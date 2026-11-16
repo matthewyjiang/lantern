@@ -1,0 +1,76 @@
+# Lint and unit tests, then a headless end-to-end snapshot: scripts/serve.py streams the
+# recorded table scan, a camera image and status topics over the Foxglove WebSocket protocol,
+# and Lantern renders them on Mesa's software Vulkan (lavapipe), so no GPU is needed.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  rust:
+    name: Clippy and tests
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      # Pinned, so a new stable's lints don't fail an unchanged tree.
+      - uses: dtolnay/rust-toolchain@1.96.0
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo clippy --release --all-targets --locked -- -D warnings
+      - run: cargo test --release --locked
+
+  scripts:
+    name: Shellcheck
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - run: shellcheck scripts/*.sh
+
+  headless:
+    name: Headless snapshot (software Vulkan)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.96.0
+      - uses: Swatinem/rust-cache@v2
+      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends mesa-vulkan-drivers
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+      - run: pip install foxglove-sdk==0.31.0 numpy pillow
+      # The recorded scans come from PointCloudLibrary/data at a pinned commit, SHA-256 checked.
+      - uses: actions/cache@v4
+        with:
+          path: fixtures
+          key: fixtures-${{ hashFiles('scripts/fixtures.py') }}
+      - run: python -c "import sys; sys.path.insert(0, 'scripts'); import fixtures; fixtures.load('table')"
+      - run: cargo build --release --locked
+      # The table scan has 460,400 points: all of them must reach the screen.
+      - name: Snapshot against live data
+        env:
+          PY: python
+          URL: ws://127.0.0.1:8765
+          AT: "5"
+        run: |
+          set -o pipefail
+          mkdir -p out/ci
+          scripts/snap-live.sh out/ci "--cloud table --camera --status" - | tee out/ci/result.txt
+          grep -q ": 460400 points and 0 robot vertices drawn" out/ci/result.txt
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: headless-snapshot
+          path: out/ci

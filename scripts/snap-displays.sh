@@ -43,7 +43,7 @@ same() { # a, b: the viewport beside the side panel must match
   local ok=PASS; [[ $px == 0 ]] || { ok=FAIL; fail=1; }
   printf "%-44s %8s px  %s\n" "$1 = $2" "$px" "$ok"
 }
-open_settings='--script '$dir/open-settings.json
+open_settings=(--script "$dir/open-settings.json")
 printf '[{"t": 0.5, "type": "tap", "key": "open-settings"}]\n' > "$dir/open-settings.json"
 local8765='"connections": ["ws://127.0.0.1:8765"]'
 
@@ -64,7 +64,7 @@ two="--connect ws://127.0.0.1:8765 --connect ws://127.0.0.1:8766 --urdf $med7"
 # shellcheck disable=SC2086
 shot two-servers '{"trail": 15}' 6 $two
 # shellcheck disable=SC2086
-shot two-servers-settings '{"trail": 15}' 3 $two $open_settings
+shot two-servers-settings '{"trail": 15}' 3 $two "${open_settings[@]}"
 stop
 
 # The robot a server describes: drawn with no file at all; with a file of the same robot, the
@@ -74,7 +74,7 @@ serve description 8765 "--cloud none --robot-pose reach --robot-description $med
 shot description-only "{$local8765}" 3
 shot description-same "{$local8765, \"robot_urdf\": \"$med14\"}" 3
 shot description-mismatch "{$local8765, \"robot_urdf\": \"$med7\"}" 3
-shot description-mismatch-settings "{$local8765, \"robot_urdf\": \"$med7\"}" 3 $open_settings
+shot description-mismatch-settings "{$local8765, \"robot_urdf\": \"$med7\"}" 3 "${open_settings[@]}"
 stop
 same description-same description-only
 # The described robot's meshes aren't on this machine (the testdata copy has none next to it):

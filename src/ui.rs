@@ -5,7 +5,6 @@
 
 use std::collections::BTreeSet;
 
-use glam::Vec3;
 use rune::tok::{self, TextStyle, motion, type_};
 use rune::color::srgb_decode;
 use rune::{Color, Cx, Drag, El, Phase, PointerButton, ScrollSpec, Tx, WheelEvent, col, effect, el, oklch, oklcha, row, text, text_input};
@@ -115,7 +114,7 @@ fn frame_labels(s: &State, [w, h]: [f32; 2]) -> Vec<El> {
     let t = tok::theme(true);
     let vp = s.camera.view_proj(w / h.max(1.0));
     s.display.labels.iter().filter_map(|(name, p)| {
-        let clip = vp * Vec3::from(*p).extend(1.0);
+        let clip = vp * p.extend(1.0);
         if clip.w <= 0.0 {
             return None;
         }

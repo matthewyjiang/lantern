@@ -57,9 +57,9 @@ impl Canvas<'_> {
             return;
         }
         let i = (y * self.w + x) as usize * 4;
-        for k in 0..3 {
-            let under = self.rgba[i + k] as f32;
-            self.rgba[i + k] = (under + (color[k].clamp(0.0, 1.0) * 255.0 - under) * a).round() as u8;
+        for (out, c) in self.rgba[i..i + 3].iter_mut().zip(color) {
+            let under = *out as f32;
+            *out = (under + (c.clamp(0.0, 1.0) * 255.0 - under) * a).round() as u8;
         }
         self.rgba[i + 3] = self.rgba[i + 3].max((a * 255.0) as u8);
     }
