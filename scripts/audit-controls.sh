@@ -33,9 +33,11 @@ tap() { echo "[{\"t\": 0.1, \"type\": \"tap\", \"key\": \"$1\"}]"; }
 drag='{"t": 0.1, "type": "drag", "x": 400, "y": 330, "dx": 160, "dy": 40, "dur": 0.4}'
 
 printf "%-22s %-8s %13s  %s\n" control expect "viewport diff" result
-check grid           changes "$(tap grid)"
-check points         changes "$(tap points)"
-check frames         changes "$(tap frames)"
+# Each toggle twice: its row (tapped at the centre) and the switch track people aim for.
+for k in grid points frames; do
+  check "$k"       changes "$(tap $k)"
+  check "$k-track" changes "$(tap $k-track)"
+done
 check color-intensity changes "$(tap color-1)"
 check size-1         changes "$(tap size-0)"
 check size-4         changes "$(tap size-3)"
