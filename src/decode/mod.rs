@@ -1,0 +1,197 @@
+//! Wire messages to scene types. A channel is decodable when its (message encoding, schema
+//! name) pair has a row in `DECODERS`; supporting a new message type means adding one row and
+//! its function. Nothing outside this module sees a message type.
+
+mod cdr;
+mod foxglove;
+mod points;
+mod ros;
+
+use std::fmt;
+
+use crate::scene::{PointCloud, Poses, Transform};
+
+pub use points::ColorChoice;
+
+/// What a channel feeds, which decides how the UI offers it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Kind {
+    PointCloud,
+    Transforms,
+    Poses,
+}
+
+impl Kind {
+    pub fn label(self) -> &'static str {
+        match self {
+            Kind::PointCloud => "Point cloud",
+            Kind::Transforms => "Transforms",
+            Kind::Poses => "Poses",
+        }
+    }
+}
+
+pub enum Decoded {
+    Cloud(PointCloud),
+    Transforms(Vec<Transform>),
+    Poses(Poses),
+}
+
+struct Decoder {
+    encoding: &'static str,
+    schema: &'static str,
+    kind: Kind,
+    decode: fn(&[u8], &ColorChoice) -> Result<Decoded, DecodeError>,
+}
+
+/// ROS 2 messages arrive as `cdr` through foxglove_bridge; Foxglove's own schemas as
+/// `protobuf` from the Foxglove SDKs (what kpd publishes with).
+const DECODERS: &[Decoder] = &[
+    Decoder { encoding: "cdr", schema: "sensor_msgs/msg/PointCloud2", kind: Kind::PointCloud, decode: ros::point_cloud2 },
+    Decoder { encoding: "cdr", schema: "tf2_msgs/msg/TFMessage", kind: Kind::Transforms, decode: ros::tf_message },
+    Decoder { encoding: "cdr", schema: "geometry_msgs/msg/TransformStamped", kind: Kind::Transforms, decode: ros::transform_stamped },
+    Decoder { encoding: "cdr", schema: "geometry_msgs/msg/PoseStamped", kind: Kind::Poses, decode: ros::pose_stamped },
+    Decoder { encoding: "cdr", schema: "geometry_msgs/msg/PoseArray", kind: Kind::Poses, decode: ros::pose_array },
+    Decoder { encoding: "cdr", schema: "nav_msgs/msg/Odometry", kind: Kind::Poses, decode: ros::odometry },
+    Decoder { encoding: "protobuf", schema: "foxglove.PointCloud", kind: Kind::PointCloud, decode: foxglove::point_cloud },
+    Decoder { encoding: "protobuf", schema: "foxglove.FrameTransform", kind: Kind::Transforms, decode: foxglove::frame_transform },
+    Decoder { encoding: "protobuf", schema: "foxglove.FrameTransforms", kind: Kind::Transforms, decode: foxglove::frame_transforms },
+    Decoder { encoding: "protobuf", schema: "foxglove.PoseInFrame", kind: Kind::Poses, decode: foxglove::pose_in_frame },
+    Decoder { encoding: "protobuf", schema: "foxglove.PosesInFrame", kind: Kind::Poses, decode: foxglove::poses_in_frame },
+    Decoder { encoding: "protobuf", schema: "foxglove.Odometry", kind: Kind::Poses, decode: foxglove::odometry },
+];
+
+fn find(encoding: &str, schema: &str) -> Option<&'static Decoder> {
+    DECODERS.iter().find(|d| d.encoding == encoding && d.schema == schema)
+}
+
+/// What a channel with this encoding and schema would feed, or `None` if Lantern can't read it.
+pub fn kind_of(encoding: &str, schema: &str) -> Option<Kind> {
+    find(encoding, schema).map(|d| d.kind)
+}
+
+/// Decodes one message. `color` only matters for point clouds.
+pub fn decode(encoding: &str, schema: &str, payload: &[u8], color: &ColorChoice) -> Result<Decoded, DecodeError> {
+    let d = find(encoding, schema).ok_or_else(|| DecodeError::new(format!("no decoder for {schema} ({encoding})")))?;
+    (d.decode)(payload, color)
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct DecodeError(String);
+
+impl DecodeError {
+    pub fn new(msg: impl Into<String>) -> DecodeError {
+        DecodeError(msg.into())
+    }
+}
+
+impl fmt::Display for DecodeError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for DecodeError {}
+
+/// Message bytes produced by the reference implementations (rclpy's CDR serializer, the
+/// Foxglove Python SDK's protobuf), captured by `scripts/capture_test_bytes.py`.
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::scene::PointColor;
+    use glam::DVec3;
+
+    fn cloud(encoding: &str, schema: &str, bytes: &[u8], color: ColorChoice) -> PointCloud {
+        match decode(encoding, schema, bytes, &color).unwrap() {
+            Decoded::Cloud(c) => c,
+            _ => panic!("not a cloud"),
+        }
+    }
+
+    // Both reference clouds hold the same three points: (1,2,3) i=10, (4,5,6) i=20, and
+    // (NaN,0,0) i=30, which must be dropped. The ROS one also packs rgb 0x00ff8000 per point.
+    #[test]
+    fn ros_point_cloud2_from_rclpy() {
+        let c = cloud("cdr", "sensor_msgs/msg/PointCloud2", include_bytes!("testdata/pc2.cdr"), ColorChoice::Auto);
+        assert_eq!(c.frame_id, "lidar");
+        assert_eq!(c.fields, ["x", "y", "z", "intensity", "rgb"]);
+        // Auto picks the packed colour over intensity.
+        assert_eq!(c.color, PointColor::Rgb);
+        assert_eq!(c.points.len(), 2);
+        assert_eq!(&c.points[1][..3], &[4.0, 5.0, 6.0]);
+        assert_eq!(c.points[0][3].to_bits(), 0xffff_8000, "rgb bits, alpha forced opaque");
+
+        let c = cloud("cdr", "sensor_msgs/msg/PointCloud2", include_bytes!("testdata/pc2.cdr"), ColorChoice::Field("intensity".into()));
+        assert_eq!(c.points.iter().map(|p| p[3]).collect::<Vec<_>>(), [10.0, 20.0]);
+        assert!(matches!(c.color, PointColor::Field { ref name, min, max } if name == "intensity" && min == 10.0 && max == 20.0));
+    }
+
+    #[test]
+    fn foxglove_point_cloud_from_python_sdk() {
+        let c = cloud("protobuf", "foxglove.PointCloud", include_bytes!("testdata/pointcloud.pb"), ColorChoice::Auto);
+        assert_eq!(c.frame_id, "lidar");
+        assert_eq!(c.origin.translation, DVec3::new(0.0, 0.0, 1.5));
+        assert_eq!(c.fields, ["x", "y", "z", "intensity"]);
+        assert!(matches!(c.color, PointColor::Field { ref name, .. } if name == "intensity"));
+        assert_eq!(c.points, [[1.0, 2.0, 3.0, 10.0], [4.0, 5.0, 6.0, 20.0]]);
+
+        let c = cloud("protobuf", "foxglove.PointCloud", include_bytes!("testdata/pointcloud.pb"), ColorChoice::Height);
+        assert_eq!(c.color, PointColor::Height);
+    }
+
+    #[test]
+    fn transforms_from_both_encodings() {
+        for (enc, schema, bytes) in [
+            ("cdr", "tf2_msgs/msg/TFMessage", &include_bytes!("testdata/tf.cdr")[..]),
+            ("protobuf", "foxglove.FrameTransforms", &include_bytes!("testdata/frametransforms.pb")[..]),
+        ] {
+            let Ok(Decoded::Transforms(ts)) = decode(enc, schema, bytes, &ColorChoice::Auto) else { panic!("{schema}") };
+            assert_eq!(ts.len(), 2, "{schema}");
+            assert_eq!((ts[0].parent.as_str(), ts[0].child.as_str()), ("map", "base_link"));
+            assert_eq!(ts[0].pose.translation, DVec3::new(1.0, 2.0, 0.0));
+            assert!((ts[0].pose.rotation.z - std::f64::consts::FRAC_1_SQRT_2).abs() < 1e-12, "{schema}");
+            assert_eq!((ts[1].parent.as_str(), ts[1].child.as_str()), ("base_link", "lidar"));
+        }
+    }
+
+    #[test]
+    fn poses_from_both_encodings() {
+        for (enc, schema, bytes) in [
+            ("cdr", "geometry_msgs/msg/PoseArray", &include_bytes!("testdata/posearray.cdr")[..]),
+            ("protobuf", "foxglove.PosesInFrame", &include_bytes!("testdata/posesinframe.pb")[..]),
+        ] {
+            let Ok(Decoded::Poses(p)) = decode(enc, schema, bytes, &ColorChoice::Auto) else { panic!("{schema}") };
+            assert_eq!(p.frame_id, "map", "{schema}");
+            assert_eq!(p.items.len(), 2, "{schema}");
+            assert_eq!(p.items[1].pose.translation, DVec3::new(0.5, -0.25, 0.1), "{schema}");
+        }
+    }
+
+    // A body at (0.5, -0.25, 0.1) turned 90° about z, moving 0.2 m/s along its own x: that's
+    // +y in the parent frame, which is how Lantern keeps velocities.
+    #[test]
+    fn odometry_velocity_lands_in_the_parent_frame() {
+        for (enc, schema, bytes) in [
+            ("cdr", "nav_msgs/msg/Odometry", &include_bytes!("testdata/odometry.cdr")[..]),
+            ("protobuf", "foxglove.Odometry", &include_bytes!("testdata/odometry.pb")[..]),
+        ] {
+            let Ok(Decoded::Poses(p)) = decode(enc, schema, bytes, &ColorChoice::Auto) else { panic!("{schema}") };
+            assert_eq!(p.frame_id, "world", "{schema}");
+            let [item] = &p.items[..] else { panic!("{schema}: one item") };
+            assert_eq!(item.label.as_deref(), Some("cup"), "{schema}");
+            assert_eq!(item.pose.translation, DVec3::new(0.5, -0.25, 0.1), "{schema}");
+            let v = item.velocity.unwrap();
+            assert!((v - DVec3::new(0.0, 0.2, 0.0)).length() < 1e-12, "{schema}: {v:?}");
+        }
+    }
+
+    #[test]
+    fn truncated_messages_are_errors_not_panics() {
+        let full = include_bytes!("testdata/pc2.cdr");
+        for cut in [3, 20, full.len() / 2, full.len() - 1] {
+            assert!(decode("cdr", "sensor_msgs/msg/PointCloud2", &full[..cut], &ColorChoice::Auto).is_err(), "cut at {cut}");
+        }
+        let full = include_bytes!("testdata/pointcloud.pb");
+        assert!(decode("protobuf", "foxglove.PointCloud", &full[..full.len() - 3], &ColorChoice::Auto).is_err());
+    }
+}

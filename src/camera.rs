@@ -18,9 +18,9 @@ pub struct OrbitCamera {
 
 const RAD_PER_PT: f32 = 0.006;
 const PITCH_LIMIT: f32 = 89.0 * std::f32::consts::PI / 180.0;
-const MIN_DISTANCE: f32 = 0.5;
-const MAX_DISTANCE: f32 = 500.0;
-const NEAR: f32 = 0.05;
+const MIN_DISTANCE: f32 = 0.05;
+const MAX_DISTANCE: f32 = 5000.0;
+const NEAR: f32 = 0.01;
 
 impl Default for OrbitCamera {
     fn default() -> Self {
