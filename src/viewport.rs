@@ -3,7 +3,7 @@
 //! any other element.
 //!
 //! Per frame: find the slot's rect in the instance stream, record one timestamped 3D pass
-//! (sky + grid, points, TF lines) into a target the slot's size, then draw the UI with a hook
+//! (sky + grid, points, TF and pose lines) into a target the slot's size, then draw the UI with a hook
 //! that blits that target at the slot. GPU timestamps bracket the 3D pass alone, so they never
 //! include the UI pass or a headless readback; `summary` reports them after a headless run.
 
@@ -12,54 +12,106 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
 use bytemuck::{Pod, Zeroable};
-use glam::Vec3;
+use glam::{Mat4, Vec3};
 use rune::compose::{Compositor, DeviceKey, Frame};
 use rune::render::{CLIP_WGSL, EffectSite, Instance, KIND_EFFECT};
 use wgpu::util::DeviceExt;
 
 use crate::camera::OrbitCamera;
-use crate::lidar::Cloud;
+use crate::scene::PointCloud;
 
 /// The effect-slot tag the viewport paints.
 pub const MARK: u32 = 1;
 
 const COLOR_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8UnormSrgb;
 const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
-/// Points are coloured by height over this range, metres (road to building roof).
-pub const HEIGHT_RANGE: (f32, f32) = (-0.3, 16.0);
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ColorBy {
-    Height,
-    Intensity,
+/// How points get their colour, with the range the colour ramp spans.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Shade {
+    /// By height in the display frame, metres.
+    Height { lo: f32, hi: f32 },
+    /// By each point's field value (`w`).
+    Field { lo: f32, hi: f32 },
+    /// Each point's own colour, packed in `w`.
+    Rgb,
 }
 
 /// What the viewport draws, read from app state each frame.
 pub struct View<'a> {
-    pub cloud: &'a Arc<Cloud>,
     pub camera: OrbitCamera,
-    pub color_by: ColorBy,
+    /// The cloud and `display_T_cloud`; `None` draws no points.
+    pub cloud: Option<(&'a Arc<PointCloud>, Mat4)>,
+    pub shade: Shade,
     /// Point size, in points (device pixels follow the slot's scale).
     pub point_size: f32,
-    /// Draw every `decimate`-th return.
+    /// Draw every `decimate`-th point.
     pub decimate: u32,
-    pub show_grid: bool,
-    pub show_points: bool,
-    pub show_frames: bool,
+    /// Ground grid: minor cell size, metres (majors are ten cells); `None` hides it.
+    pub grid: Option<f32>,
+    /// Roughly how far the data reaches from its centre, metres: scales the depth cue.
+    pub radius: f32,
+    /// TF axes, the TF tree, poses and velocities, already in the display frame.
+    pub lines: &'a Arc<Lines>,
+}
+
+/// Thick screen-space line segments: three `vec4`s each, as `seg_vs` reads them.
+#[derive(Default)]
+pub struct Lines(Vec<[f32; 4]>);
+
+pub const RED: [f32; 4] = [0.94, 0.33, 0.31, 1.0];
+pub const GREEN: [f32; 4] = [0.45, 0.85, 0.40, 1.0];
+pub const BLUE: [f32; 4] = [0.35, 0.55, 1.0, 1.0];
+
+impl Lines {
+    /// A segment `width` points wide; `color` is sRGB and alpha.
+    pub fn segment(&mut self, a: Vec3, b: Vec3, width: f32, color: [f32; 4]) {
+        self.0.extend([[a.x, a.y, a.z, width], [b.x, b.y, b.z, 0.0], color]);
+    }
+
+    /// RGB axes of the frame `m` places, each `len` metres.
+    pub fn axes(&mut self, m: Mat4, len: f32, width: f32) {
+        let o = m.transform_point3(Vec3::ZERO);
+        for (axis, color) in [(Vec3::X, RED), (Vec3::Y, GREEN), (Vec3::Z, BLUE)] {
+            self.segment(o, m.transform_point3(axis * len), width, color);
+        }
+    }
+
+    /// An arrow from `a` to `b`, with a head a fifth of its length.
+    pub fn arrow(&mut self, a: Vec3, b: Vec3, width: f32, color: [f32; 4]) {
+        let d = b - a;
+        let len = d.length();
+        if len < 1e-6 {
+            return;
+        }
+        self.segment(a, b, width, color);
+        let back = -d * 0.2;
+        let side = d.cross(if d.normalize().z.abs() > 0.9 { Vec3::X } else { Vec3::Z }).normalize() * len * 0.1;
+        self.segment(b, b + back + side, width, color);
+        self.segment(b, b + back - side, width, color);
+    }
+
+    pub fn len(&self) -> usize {
+        self.0.len() / 3
+    }
 }
 
 pub struct Viewport<S> {
     view_of: fn(&S) -> View<'_>,
     gpu: Option<Gpu>,
-    /// Compositor `render` CPU time per frame, ms (recording only; Rune times the whole frame).
-    encode_ms: Vec<f64>,
+    /// Compositor `render` CPU time per frame, ms (recording only; Rune times the whole frame),
+    /// and whether that frame uploaded a new cloud.
+    encode_ms: Vec<(bool, f64)>,
+    /// Time to copy each new cloud into a GPU buffer, ms (included in its frame's `encode_ms`).
+    upload_ms: Vec<f64>,
+    /// When each frame's `render` started: in a paced run the gaps show frames that ran late.
+    starts: Vec<Instant>,
     /// Points drawn on the last frame, and the target size.
     last: (u32, (u32, u32)),
 }
 
 impl<S> Viewport<S> {
     pub fn new(view_of: fn(&S) -> View<'_>) -> Self {
-        Viewport { view_of, gpu: None, encode_ms: Vec::new(), last: (0, (0, 0)) }
+        Viewport { view_of, gpu: None, encode_ms: Vec::new(), upload_ms: Vec::new(), starts: Vec::new(), last: (0, (0, 0)) }
     }
 }
 
@@ -70,6 +122,7 @@ impl<S: 'static> Compositor<S> for Viewport<S> {
 
     fn render(&mut self, f: &mut Frame<'_, S>) {
         let started = Instant::now();
+        self.starts.push(started);
         let (device, queue, size) = (f.device, f.queue, f.size);
         let key = f.device_key();
         if self.gpu.as_ref().is_none_or(|g| g.key != key) {
@@ -79,17 +132,21 @@ impl<S: 'static> Compositor<S> for Viewport<S> {
         gpu.timer.as_mut().map(|t| t.collect());
 
         let slot = slot_rect(&f.rt.instances, &f.rt.marks);
+        let mut uploaded = false;
         if let Some(inst) = slot {
             let view = (self.view_of)(&f.rt.state);
             let w = inst.rect[2].round().max(1.0) as u32;
             let h = inst.rect[3].round().max(1.0) as u32;
             gpu.ensure_target(device, (w, h));
-            gpu.ensure_cloud(device, view.cloud);
-            let drawn = if view.show_points { view.cloud.points.len().div_ceil(view.decimate.max(1) as usize) as u32 } else { 0 };
+            let t = Instant::now();
+            if gpu.ensure_scene(device, queue, view.cloud.map(|(c, _)| c), view.lines) {
+                uploaded = true;
+                self.upload_ms.push(t.elapsed().as_secs_f64() * 1000.0);
+            }
+            let drawn = view.cloud.map_or(0, |(c, _)| c.points.len().div_ceil(view.decimate.max(1) as usize) as u32);
             let uniform = frame_uniform(&view, (w, h), inst.params[3]);
-            let show_frames = view.show_frames;
             f.write_buffer(&gpu.frame_buf, 0, bytemuck::bytes_of(&uniform));
-            gpu.encode_3d(f.encoder, drawn, show_frames);
+            gpu.encode_3d(f.encoder, drawn);
             self.last = (drawn, (w, h));
         }
 
@@ -101,19 +158,28 @@ impl<S: 'static> Compositor<S> for Viewport<S> {
                 gpu.blit(device, queue, pass, site);
             }
         });
-        self.encode_ms.push(started.elapsed().as_secs_f64() * 1000.0);
+        self.encode_ms.push((uploaded, started.elapsed().as_secs_f64() * 1000.0));
     }
 
     fn summary(&mut self, device: &wgpu::Device) -> Option<String> {
         let (drawn, (w, h)) = self.last;
-        let mut out = format!("lantern: viewport {w}x{h} px, {drawn} points drawn per frame\n");
-        out += &format!("lantern: compositor encode cpu {}\n", Stats::of(&self.encode_ms).line());
+        let mut out = format!("lantern: viewport {w}x{h} px, {drawn} points drawn on the last frame\n");
+        let steady: Vec<f64> = self.encode_ms.iter().filter(|(u, _)| !u).map(|(_, ms)| *ms).collect();
+        out += &format!("lantern: compositor encode cpu, frames without a new cloud: {}\n", Stats::of(&steady).line());
+        out += &format!("lantern: new clouds uploaded to the GPU: {} ({})\n", self.upload_ms.len(), Stats::all(&self.upload_ms).line());
+        // Gaps between frame starts; at 60 Hz, one over 25 ms means a frame missed its slot.
+        let gaps: Vec<f64> = self.starts.windows(2).map(|w| (w[1] - w[0]).as_secs_f64() * 1000.0).collect();
+        let late = gaps.iter().skip(1).filter(|&&g| g > 25.0).count();
+        out += &format!("lantern: frame start-to-start {}, {late} gaps over 25 ms\n", Stats::of(&gaps).line());
         match self.gpu.as_mut().and_then(|g| g.timer.as_mut()) {
             Some(t) => {
                 t.drain(device);
+                // Only frames that drew the final point count: frames before the data arrived
+                // (or after a toggle) draw something else and would blur the number.
+                let at_last: Vec<f64> = t.samples.iter().filter(|(n, _)| *n == drawn).map(|(_, ms)| *ms).collect();
                 out += &format!(
-                    "lantern: gpu 3D pass (timestamps) {}, {} frames timed, {} untimed (found all {} query slots in flight)",
-                    Stats::of(&t.samples_ms).line(), t.samples_ms.len(), t.skipped, RING,
+                    "lantern: gpu 3D pass (timestamps), frames drawing {drawn} points: {}; {} other frames timed, {} untimed (found all {} query slots in flight)",
+                    Stats::of(&at_last).line(), t.samples.len() - at_last.len(), t.skipped, RING,
                 );
             }
             None => out += "lantern: gpu 3D pass: TIMESTAMP_QUERY unavailable on this adapter",
@@ -132,22 +198,30 @@ fn slot_rect(instances: &[Instance], marks: &[u32]) -> Option<Instance> {
 struct FrameUniform {
     view_proj: [f32; 16],
     inv_view_proj: [f32; 16],
+    model: [f32; 16],
     eye: [f32; 4],
     viewport: [f32; 4],
     style: [u32; 4],
-    height: [f32; 4],
+    shade: [f32; 4],
+    grid: [f32; 4],
 }
 
 fn frame_uniform(v: &View<'_>, (w, h): (u32, u32), scale: f32) -> FrameUniform {
     let vp = v.camera.view_proj(w as f32 / h as f32);
-    let color_by = match v.color_by { ColorBy::Height => 0, ColorBy::Intensity => 1 };
+    let (mode, lo, hi) = match v.shade {
+        Shade::Height { lo, hi } => (0, lo, hi),
+        Shade::Field { lo, hi } => (1, lo, hi),
+        Shade::Rgb => (2, 0.0, 1.0),
+    };
     FrameUniform {
         view_proj: vp.to_cols_array(),
         inv_view_proj: vp.inverse().to_cols_array(),
+        model: v.cloud.map_or(Mat4::IDENTITY, |(_, m)| m).to_cols_array(),
         eye: v.camera.eye().extend(1.0).into(),
         viewport: [w as f32, h as f32, v.point_size * scale, scale],
-        style: [color_by, v.decimate.max(1), v.show_grid as u32, 0],
-        height: [HEIGHT_RANGE.0, HEIGHT_RANGE.1, 0.0, 0.0],
+        style: [mode, v.decimate.max(1), v.grid.is_some() as u32, 0],
+        shade: [lo, hi, 0.0, 0.0],
+        grid: [v.grid.unwrap_or(1.0), v.radius, 0.0, 0.0],
     }
 }
 
@@ -165,7 +239,7 @@ struct Gpu {
     /// One blit pipeline per format Rune hands the hook (frame target, or a layer's).
     blits: std::cell::RefCell<Vec<(wgpu::TextureFormat, wgpu::RenderPipeline)>>,
     target: Option<Target>,
-    cloud: Option<Uploaded>,
+    scene: Option<Uploaded>,
     timer: Option<GpuTimer>,
 }
 
@@ -176,11 +250,13 @@ struct Target {
     blit_group: wgpu::BindGroup,
 }
 
+/// Buffers for one cloud and one set of lines (each compared by pointer, re-uploaded on change).
 struct Uploaded {
-    /// The cloud these buffers hold (compared by pointer).
-    source: Arc<Cloud>,
+    cloud: Option<Arc<PointCloud>>,
+    points: wgpu::Buffer,
+    lines: Arc<Lines>,
+    segs: wgpu::Buffer,
     group: wgpu::BindGroup,
-    seg_count: u32,
 }
 
 impl Gpu {
@@ -242,7 +318,7 @@ impl Gpu {
         let timer = device.features().contains(wgpu::Features::TIMESTAMP_QUERY).then(|| GpuTimer::new(device, queue));
         Gpu {
             key, frame_buf, scene_bgl, blit_bgl, blit_buf, module, sky, points, segs,
-            blits: Default::default(), target: None, cloud: None, timer,
+            blits: Default::default(), target: None, scene: None, timer,
         }
     }
 
@@ -273,44 +349,69 @@ impl Gpu {
         self.target = Some(Target { size, color, depth, blit_group });
     }
 
-    fn ensure_cloud(&mut self, device: &wgpu::Device, cloud: &Arc<Cloud>) {
-        if self.cloud.as_ref().is_some_and(|u| Arc::ptr_eq(&u.source, cloud)) {
-            return;
+    /// Uploads a changed cloud or line set; true when it uploaded a new cloud.
+    fn ensure_scene(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, cloud: Option<&Arc<PointCloud>>, lines: &Arc<Lines>) -> bool {
+        let same_cloud = |u: &Uploaded| match (&u.cloud, cloud) {
+            (Some(a), Some(b)) => Arc::ptr_eq(a, b),
+            (None, None) => true,
+            _ => false,
+        };
+        let (cloud_ok, lines_ok) = self.scene.as_ref().map_or((false, false), |u| (same_cloud(u), Arc::ptr_eq(&u.lines, lines)));
+        if cloud_ok && lines_ok {
+            return false;
         }
-        let bytes: &[u8] = bytemuck::cast_slice(&cloud.points);
-        let limit = device.limits().max_storage_buffer_binding_size as usize;
-        assert!(
-            bytes.len() <= limit,
-            "point cloud of {} points is {} bytes, over this device's max_storage_buffer_binding_size of {limit}",
-            cloud.points.len(), bytes.len(),
-        );
-        // An empty storage binding is invalid; keep one zero point so the layout always binds.
-        let points = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("viewport points"),
-            contents: if bytes.is_empty() { &[0; 16] } else { bytes },
+        // An empty storage binding is invalid; an empty cloud or line set binds one zero vec4.
+        let storage = |label, bytes: &[u8]| device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some(label),
+            contents: if bytes.is_empty() { &[0; 48] } else { bytes },
             usage: wgpu::BufferUsages::STORAGE,
         });
-        let segs = frame_segments(cloud);
-        let seg_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("viewport segments"),
-            contents: bytemuck::cast_slice(&segs),
-            usage: wgpu::BufferUsages::STORAGE,
-        });
+        let old = self.scene.take();
+        let points = match old.as_ref().filter(|_| cloud_ok) {
+            Some(u) => u.points.clone(),
+            None => {
+                let bytes: &[u8] = cloud.map_or(&[], |c| bytemuck::cast_slice(&c.points));
+                let limit = device.limits().max_storage_buffer_binding_size as usize;
+                assert!(
+                    bytes.len() <= limit,
+                    "point cloud of {} points is {} bytes, over this device's max_storage_buffer_binding_size of {limit}",
+                    bytes.len() / 16, bytes.len(),
+                );
+                // Reuse the last cloud's buffer when this one fits: a sensor's clouds are about
+                // the same size, and a fresh 22 MB buffer per cloud costs its page faults again.
+                match old.as_ref().filter(|u| u.points.size() >= bytes.len().max(48) as u64) {
+                    Some(u) if !bytes.is_empty() => {
+                        queue.write_buffer(&u.points, 0, bytes);
+                        u.points.clone()
+                    }
+                    _ => device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                        label: Some("viewport points"),
+                        contents: if bytes.is_empty() { &[0; 48] } else { bytes },
+                        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+                    }),
+                }
+            }
+        };
+        let segs = match old.as_ref().filter(|_| lines_ok) {
+            Some(u) => u.segs.clone(),
+            None => storage("viewport segments", bytemuck::cast_slice(&lines.0)),
+        };
         let group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("viewport scene"),
             layout: &self.scene_bgl,
             entries: &[
                 wgpu::BindGroupEntry { binding: 0, resource: self.frame_buf.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 1, resource: points.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 2, resource: seg_buf.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 2, resource: segs.as_entire_binding() },
             ],
         });
-        self.cloud = Some(Uploaded { source: Arc::clone(cloud), group, seg_count: (segs.len() / 3) as u32 });
+        self.scene = Some(Uploaded { cloud: cloud.cloned(), points, lines: Arc::clone(lines), segs, group });
+        !cloud_ok && cloud.is_some()
     }
 
     /// Records the timestamped 3D pass into the offscreen target.
-    fn encode_3d(&mut self, encoder: &mut wgpu::CommandEncoder, drawn: u32, show_frames: bool) {
-        let (Some(target), Some(cloud)) = (&self.target, &self.cloud) else { return };
+    fn encode_3d(&mut self, encoder: &mut wgpu::CommandEncoder, drawn: u32) {
+        let (Some(target), Some(scene)) = (&self.target, &self.scene) else { return };
         let slot = self.timer.as_mut().and_then(|t| t.begin());
         let timestamp_writes = slot.map(|k| wgpu::RenderPassTimestampWrites {
             query_set: &self.timer.as_ref().unwrap().set,
@@ -335,20 +436,20 @@ impl Gpu {
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
-            pass.set_bind_group(0, &cloud.group, &[]);
+            pass.set_bind_group(0, &scene.group, &[]);
             pass.set_pipeline(&self.sky);
             pass.draw(0..3, 0..1);
             if drawn > 0 {
                 pass.set_pipeline(&self.points);
                 pass.draw(0..6 * drawn, 0..1);
             }
-            if show_frames && cloud.seg_count > 0 {
+            if scene.lines.len() > 0 {
                 pass.set_pipeline(&self.segs);
-                pass.draw(0..4, 0..cloud.seg_count);
+                pass.draw(0..4, 0..scene.lines.len() as u32);
             }
         }
         if let Some(k) = slot {
-            self.timer.as_mut().unwrap().end(encoder, k);
+            self.timer.as_mut().unwrap().end(encoder, k, drawn);
         }
     }
 
@@ -398,32 +499,6 @@ impl Gpu {
     }
 }
 
-/// TF-style frames: the map origin's axes, each sweep's sensor axes, and the path between them.
-/// Three `vec4`s per segment, as `seg_vs` reads them.
-fn frame_segments(cloud: &Cloud) -> Vec<[f32; 4]> {
-    const RED: [f32; 3] = [0.94, 0.33, 0.31];
-    const GREEN: [f32; 3] = [0.45, 0.85, 0.40];
-    const BLUE: [f32; 3] = [0.35, 0.55, 1.0];
-    const PATH: [f32; 3] = [0.98, 0.80, 0.35];
-    let mut out = Vec::new();
-    let mut seg = |a: Vec3, b: Vec3, width: f32, c: [f32; 3]| {
-        out.extend([[a.x, a.y, a.z, width], [b.x, b.y, b.z, 0.0], [c[0], c[1], c[2], 1.0]]);
-    };
-    let mut axes = |o: Vec3, len: f32, width: f32| {
-        seg(o, o + Vec3::X * len, width, RED);
-        seg(o, o + Vec3::Y * len, width, GREEN);
-        seg(o, o + Vec3::Z * len, width, BLUE);
-    };
-    axes(Vec3::ZERO, 2.0, 4.0);
-    for &p in &cloud.poses {
-        axes(p, 1.0, 3.0);
-    }
-    for w in cloud.poses.windows(2) {
-        seg(w[0], w[1], 3.0, PATH);
-    }
-    out
-}
-
 /// Timestamp query slots in flight. Headless runs wait for the GPU every frame, so a slot is
 /// read two frames after it's written and four never run out; eight leave room for a window
 /// that queues frames. Frames that find every slot busy go untimed and `summary` counts them.
@@ -438,7 +513,8 @@ struct GpuTimer {
     slots: Vec<TimerSlot>,
     next: usize,
     ns_per_tick: f64,
-    samples_ms: Vec<f64>,
+    /// Points drawn and GPU ms, per timed frame.
+    samples: Vec<(u32, f64)>,
     skipped: u32,
 }
 
@@ -446,6 +522,7 @@ struct TimerSlot {
     readback: wgpu::Buffer,
     state: SlotState,
     mapped: Arc<AtomicBool>,
+    drawn: u32,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -476,9 +553,10 @@ impl GpuTimer {
                 }),
                 state: SlotState::Free,
                 mapped: Arc::new(AtomicBool::new(false)),
+                drawn: 0,
             })
             .collect();
-        GpuTimer { set, resolve, slots, next: 0, ns_per_tick: queue.get_timestamp_period() as f64, samples_ms: Vec::new(), skipped: 0 }
+        GpuTimer { set, resolve, slots, next: 0, ns_per_tick: queue.get_timestamp_period() as f64, samples: Vec::new(), skipped: 0 }
     }
 
     /// Maps slots recorded last frame (now submitted) and reads the ones that have landed.
@@ -501,7 +579,7 @@ impl GpuTimer {
                     slot.readback.unmap();
                     slot.mapped.store(false, Ordering::Relaxed);
                     slot.state = SlotState::Free;
-                    self.samples_ms.push(ticks[1].wrapping_sub(ticks[0]) as f64 * self.ns_per_tick / 1e6);
+                    self.samples.push((slot.drawn, ticks[1].wrapping_sub(ticks[0]) as f64 * self.ns_per_tick / 1e6));
                 }
                 _ => {}
             }
@@ -518,11 +596,12 @@ impl GpuTimer {
         Some(k)
     }
 
-    fn end(&mut self, encoder: &mut wgpu::CommandEncoder, k: usize) {
+    fn end(&mut self, encoder: &mut wgpu::CommandEncoder, k: usize, drawn: u32) {
         let at = RESOLVE_STRIDE * k as u64;
         encoder.resolve_query_set(&self.set, 2 * k as u32..2 * k as u32 + 2, &self.resolve, at);
         encoder.copy_buffer_to_buffer(&self.resolve, at, &self.slots[k].readback, 0, 16);
         self.slots[k].state = SlotState::Recorded;
+        self.slots[k].drawn = drawn;
     }
 
     /// Reads every slot still in flight (after the run's last submit).
@@ -540,8 +619,12 @@ struct Stats { n: usize, mean: f64, p50: f64, p95: f64, max: f64 }
 
 impl Stats {
     fn of(samples: &[f64]) -> Stats {
-        let steady = if samples.len() > 1 { &samples[1..] } else { samples };
-        let mut v = steady.to_vec();
+        Stats::all(if samples.len() > 1 { &samples[1..] } else { samples })
+    }
+
+    /// Every sample, warm-up included.
+    fn all(samples: &[f64]) -> Stats {
+        let mut v = samples.to_vec();
         v.sort_by(f64::total_cmp);
         let q = |p: f64| if v.is_empty() { 0.0 } else { v[((v.len() - 1) as f64 * p).round() as usize] };
         let mean = if v.is_empty() { 0.0 } else { v.iter().sum::<f64>() / v.len() as f64 };

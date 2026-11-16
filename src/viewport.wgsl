@@ -1,6 +1,6 @@
 // Lantern's 3D viewport. Three pipelines draw into the offscreen target in one pass, in order:
 // `sky` (backdrop + ground grid, no depth), `points` (the cloud, depth-tested and written), then
-// `seg` (TF axes and the sensor path, depth-tested, blended). `blit` then copies the target into
+// `seg` (TF axes and tree, poses, velocities; depth-tested, blended). `blit` then copies the target into
 // Rune's effect slot inside the UI pass. Rune's CLIP_WGSL is prepended (clip_alpha).
 //
 // Colours are linear: the offscreen target is *Srgb, and `blit` re-encodes when the UI pass
@@ -9,17 +9,23 @@
 struct Frame {
     view_proj: mat4x4f,
     inv_view_proj: mat4x4f,
+    // The cloud's frame in the display frame.
+    model: mat4x4f,
     eye: vec4f,
     // Target width and height (device px), point size (device px), unused.
     viewport: vec4f,
-    // Colour mode (0 height, 1 intensity), decimation stride, grid on (1/0), unused.
+    // Colour mode (0 height, 1 field value, 2 packed rgb), decimation stride, grid on (1/0), unused.
     style: vec4<u32>,
-    // Height colour range, metres: low, high.
-    height: vec4f,
+    // The colour ramp's range (height in metres, or field value): low, high.
+    shade: vec4f,
+    // Minor grid cell, metres (majors are ten; the grid fades out with it), scene radius
+    // (the depth cue scales with it), unused, unused.
+    grid: vec4f,
 }
 
 @group(0) @binding(0) var<uniform> F: Frame;
-@group(0) @binding(1) var<storage, read> points: array<vec4f>;
+// x, y, z as f32 bits, then the colour value: an f32 field value, or rgb packed 0xAARRGGBB.
+@group(0) @binding(1) var<storage, read> points: array<vec4<u32>>;
 // Three vec4s per segment: a (xyz, width px), b (xyz), colour (rgb, alpha).
 @group(0) @binding(2) var<storage, read> segs: array<vec4f>;
 
@@ -69,22 +75,26 @@ fn grid_lines(c: vec2f, cell: f32, width_px: f32) -> f32 {
 }
 
 @fragment fn sky_fs(in: SkyOut) -> @location(0) vec4f {
-    let near = F.inv_view_proj * vec4f(in.ndc, 1.0, 1.0);
-    let dir = normalize(near.xyz / near.w - F.eye.xyz);
+    // Unproject a point 10^4 near-plane distances out (depth is near/distance here), not the
+    // near plane itself: an eye a kilometre out keeps ~0.1 mm of f32 precision, so a point 1 cm
+    // away would quantise the ray's direction into visible blocks.
+    let far = F.inv_view_proj * vec4f(in.ndc, 1e-4, 1.0);
+    let dir = normalize(far.xyz / far.w - F.eye.xyz);
     var col = mix(BG_LOW, BG_HORIZON, exp(-abs(dir.z) * 5.0));
     // Derivatives must run in uniform control flow: compute grid terms everywhere, mask after.
     let t = -F.eye.z / dir.z;
     let hit = F.eye.xy + dir.xy * t;
     let on_ground = dir.z * F.eye.z < 0.0 && F.style.z == 1u;
-    let fade = select(0.0, 1.0 - smoothstep(25.0, 140.0, t), on_ground);
-    let minor = grid_lines(hit, 1.0, 1.0);
-    let major = grid_lines(hit, 10.0, 1.3);
+    let cell = F.grid.x;
+    let fade = select(0.0, 1.0 - smoothstep(25.0 * cell, 140.0 * cell, t), on_ground);
+    let minor = grid_lines(hit, cell, 1.0);
+    let major = grid_lines(hit, 10.0 * cell, 1.3);
     col = mix(col, vec3f(0.050, 0.055, 0.066), minor * fade * 0.8);
     col = mix(col, vec3f(0.105, 0.115, 0.135), major * fade);
     return vec4f(col, 1.0);
 }
 
-// ---- points: one screen-aligned quad per return, pulled from the storage buffer ----
+// ---- points: one screen-aligned quad per point, pulled from the storage buffer ----
 
 struct PointOut { @builtin(position) pos: vec4f, @location(0) color: vec3f }
 
@@ -95,8 +105,9 @@ const QUAD: array<u32, 6> = array<u32, 6>(0u, 1u, 2u, 2u, 1u, 3u);
 @vertex fn points_vs(@builtin(vertex_index) v: u32) -> PointOut {
     let ii = v / 6u;
     let vi = QUAD[v % 6u];
-    let p = points[ii * F.style.y];
-    var clip = F.view_proj * vec4f(p.xyz, 1.0);
+    let raw = points[ii * F.style.y];
+    let world = F.model * vec4f(bitcast<vec3f>(raw.xyz), 1.0);
+    var clip = F.view_proj * world;
     if (clip.w <= 0.0) {
         return PointOut(vec4f(2.0, 2.0, 2.0, 1.0), vec3f(0.0)); // behind the eye: off-screen
     }
@@ -104,17 +115,18 @@ const QUAD: array<u32, 6> = array<u32, 6>(0u, 1u, 2u, 2u, 1u, 3u);
     clip = vec4f(clip.xy + corner * F.viewport.z / F.viewport.xy * clip.w, clip.zw);
 
     var c: vec3f;
+    let span = F.shade.y - F.shade.x;
     if (F.style.x == 0u) {
-        let h = (p.z - F.height.x) / (F.height.y - F.height.x);
-        // Start at Turbo's blue: its near-black low end would swallow the road and its paint.
-        // Shade by intensity so dark asphalt recedes and paint and poles stand out.
-        c = to_linear(turbo(0.12 + 0.83 * h)) * (0.1 + 0.9 * p.w);
+        // Start at Turbo's blue: its near-black low end would vanish into the backdrop.
+        c = to_linear(turbo(0.12 + 0.83 * (world.z - F.shade.x) / span));
+    } else if (F.style.x == 1u) {
+        c = to_linear(turbo(0.08 + 0.84 * (bitcast<f32>(raw.w) - F.shade.x) / span));
     } else {
-        c = to_linear(turbo(0.08 + 0.84 * p.w));
+        c = to_linear(vec3f(f32((raw.w >> 16u) & 255u), f32((raw.w >> 8u) & 255u), f32(raw.w & 255u)) / 255.0);
     }
-    // Depth cue: far returns sink toward the horizon colour.
-    let dist = distance(p.xyz, F.eye.xyz);
-    c = mix(c, BG_HORIZON, smoothstep(30.0, 160.0, dist) * 0.7);
+    // Depth cue: far points sink toward the horizon colour.
+    let dist = distance(world.xyz, F.eye.xyz);
+    c = mix(c, BG_HORIZON, smoothstep(0.6 * F.grid.y, 3.0 * F.grid.y, dist) * 0.7);
     return PointOut(clip, c);
 }
 

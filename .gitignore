@@ -1,2 +1,4 @@
 /target
 /out
+/fixtures
+__pycache__/
