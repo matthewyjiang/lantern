@@ -8,6 +8,8 @@
 # - `+readback` adds a PNG readback every frame (`--out`), to show the GPU number excludes it.
 # - `ingest-10hz` sends the cloud at 10 Hz for the whole run: what a live sensor costs.
 # - `unpaced` drops `--realtime`: how many frames/s the loop can do.
+# - `+robot` rows load the KUKA Med 7 (fixtures/med7, scripts/robot_fixture.py; 0.5 M vertices),
+#   posed by serve.py's joint states: what the arm adds to the pass, with and without the points.
 # Writes out/bench.tsv; raw logs go to out/bench/. PY as in snap-live.sh.
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -31,12 +33,13 @@ run() { # name, extra args...
   for t in $(seq 1 "$trials"); do
     local log=out/bench/$name-$t.log
     rm -rf out/bench/frames "$cfg/lantern"
+    [[ -n ${SETTINGS:-} ]] && mkdir -p "$cfg/lantern" && printf '%s\n' "$SETTINGS" > "$cfg/lantern/settings.json"
     local start; start=$(date +%s.%N)
     XDG_CONFIG_HOME=$cfg "$bin" "$@" > "$log" 2>&1
     local wall; wall=$(echo "$(date +%s.%N) - $start" | bc)
     local cpu gpu drawn uploads
     cpu=$(grep -oP 'frame cpu mean \K[0-9.]+ ms p50 [0-9.]+ p95 [0-9.]+ max [0-9.]+' "$log" | sed -E 's/ ms p50 | p95 | max /\t/g')
-    drawn=$(grep -oP '\K[0-9]+(?= points drawn)' "$log")
+    drawn=$(grep -oP '\K[0-9]+(?= points and)' "$log")
     gpu=$(grep -oP 'frames drawing [0-9]+ points: mean [0-9.]+ ms p50 \K[0-9.]+ p95 [0-9.]+ max [0-9.]+ \(n=[0-9]+' "$log" | sed -E 's/ p95 /\t/; s/ max [0-9.]+ \(n=/\t/')
     uploads=$(grep -oP 'uploaded to the GPU: \K[0-9]+ \(mean [0-9.]+' "$log" | sed -E 's/ \(mean /\t/')
     gaps=$(grep -oP 'start-to-start mean [0-9.]+ ms p50 [0-9.]+ p95 \K[0-9.]+ max [0-9.]+ \(n=[0-9]+\), [0-9]+' "$log" | sed -E 's/ max /\t/; s/ \(n=[0-9]+\), /\t/')
@@ -55,6 +58,10 @@ run size-4 "${paced[@]}" --scene size-4
 run full+readback --realtime --frames 120 --out out/bench/frames
 rm -rf out/bench/frames
 run unpaced --frames 6000
+serve --cloud terrain --hz 0 --robot-pose home
+robot="{\"robot_urdf\": \"$PWD/fixtures/med7/med7.urdf\"}"
+SETTINGS=$robot run full+robot "${paced[@]}"
+SETTINGS=$robot run robot-only "${paced[@]}" --scene no-points
 serve --cloud terrain --hz 10
 run ingest-10hz "${paced[@]}"
 column -t -s $'\t' out/bench.tsv

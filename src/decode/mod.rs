@@ -4,6 +4,7 @@
 
 mod cdr;
 mod foxglove;
+mod json;
 mod points;
 mod ros;
 
@@ -19,6 +20,7 @@ pub enum Kind {
     PointCloud,
     Transforms,
     Poses,
+    JointStates,
 }
 
 impl Kind {
@@ -27,6 +29,7 @@ impl Kind {
             Kind::PointCloud => "Point cloud",
             Kind::Transforms => "Transforms",
             Kind::Poses => "Poses",
+            Kind::JointStates => "Joints",
         }
     }
 }
@@ -35,6 +38,8 @@ pub enum Decoded {
     Cloud(PointCloud),
     Transforms(Vec<Transform>),
     Poses(Poses),
+    /// Joint positions by name (radians, or metres for prismatic joints).
+    Joints(Vec<(String, f64)>),
 }
 
 pub struct Decoder {
@@ -66,6 +71,10 @@ const DECODERS: &[Decoder] = &[
     Decoder { encoding: "protobuf", schema: "foxglove.PoseInFrame", kind: Kind::Poses, decode: foxglove::pose_in_frame },
     Decoder { encoding: "protobuf", schema: "foxglove.PosesInFrame", kind: Kind::Poses, decode: foxglove::poses_in_frame },
     Decoder { encoding: "protobuf", schema: "foxglove.Odometry", kind: Kind::Poses, decode: foxglove::odometry },
+    Decoder { encoding: "cdr", schema: "sensor_msgs/msg/JointState", kind: Kind::JointStates, decode: ros::joint_state },
+    // Foxglove has no joint-state schema; an SDK app (kpd) logs the ROS message's shape as JSON
+    // under its name: `{"name": [...], "position": [...]}` (README, "Publishing from kpd").
+    Decoder { encoding: "json", schema: "sensor_msgs/msg/JointState", kind: Kind::JointStates, decode: json::joint_state },
 ];
 
 /// The decoder for a channel's encoding and schema, or `None` if Lantern can't read it. The
@@ -185,6 +194,26 @@ mod tests {
             let v = item.velocity.unwrap();
             assert!((v - DVec3::new(0.0, 0.2, 0.0)).length() < 1e-12, "{schema}: {v:?}");
         }
+    }
+
+    // The same state in both encodings: three joints, positions for all, plus velocity and
+    // effort that Lantern ignores.
+    #[test]
+    fn joint_states_from_both_encodings() {
+        let json = br#"{"name": ["lbr_joint_0", "lbr_joint_1", "lbr_joint_2"], "position": [0.5, -1.25, 2.0], "velocity": [0.0, 0.0, 0.0]}"#;
+        for (enc, bytes) in [("cdr", &include_bytes!("testdata/jointstate.cdr")[..]), ("json", &json[..])] {
+            let Ok(Decoded::Joints(j)) = decode(enc, "sensor_msgs/msg/JointState", bytes, &ColorChoice::Auto) else { panic!("{enc}") };
+            assert_eq!(j, [("lbr_joint_0".to_string(), 0.5), ("lbr_joint_1".to_string(), -1.25), ("lbr_joint_2".to_string(), 2.0)], "{enc}");
+        }
+    }
+
+    // ROS allows a JointState with names but no positions (an effort-only driver): that's no
+    // positions, not an error. Positions for only some names is malformed.
+    #[test]
+    fn joint_states_without_positions_carry_none() {
+        let Ok(Decoded::Joints(j)) = decode("json", "sensor_msgs/msg/JointState", br#"{"name": ["a", "b"], "effort": [1, 2]}"#, &ColorChoice::Auto) else { panic!() };
+        assert!(j.is_empty());
+        assert!(decode("json", "sensor_msgs/msg/JointState", br#"{"name": ["a", "b"], "position": [1]}"#, &ColorChoice::Auto).is_err());
     }
 
     #[test]

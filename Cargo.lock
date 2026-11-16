@@ -1511,6 +1511,7 @@ dependencies = [
  "bytemuck",
  "glam",
  "prost",
+ "roxmltree 0.21.2",
  "rune",
  "serde",
  "serde_json",

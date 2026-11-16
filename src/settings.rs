@@ -32,6 +32,13 @@ pub struct Settings {
     pub show_frames: bool,
     pub show_labels: bool,
     pub show_poses: bool,
+    /// The robot's URDF file; empty for none.
+    pub robot_urdf: String,
+    /// The joint-state topic that poses the robot; `None` uses the first one advertised.
+    pub joint_topic: Option<String>,
+    pub show_robot: bool,
+    /// 0–1.
+    pub robot_opacity: f32,
 }
 
 impl Default for Settings {
@@ -50,6 +57,10 @@ impl Default for Settings {
             show_frames: true,
             show_labels: true,
             show_poses: true,
+            robot_urdf: String::new(),
+            joint_topic: None,
+            show_robot: true,
+            robot_opacity: 1.0,
         }
     }
 }
@@ -68,7 +79,7 @@ impl Settings {
         match std::fs::read_to_string(&path) {
             Ok(text) => match serde_json::from_str::<Settings>(&text) {
                 // Every n-th point, so 0 would draw nothing (and divide by zero).
-                Ok(s) => Settings { decimate: s.decimate.max(1), ..s },
+                Ok(s) => Settings { decimate: s.decimate.max(1), robot_opacity: s.robot_opacity.clamp(0.0, 1.0), ..s },
                 Err(e) => {
                     eprintln!("lantern: {} doesn't parse ({e}); using defaults", path.display());
                     Settings::default()

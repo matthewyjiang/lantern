@@ -1,5 +1,5 @@
 //! The window: the viewport card with its overlays, and on the right either the side panel
-//! (quick display controls) or the Settings page (connection, topics, frames, display). Every
+//! (quick display controls) or the Settings page (connection, topics, frames, robot, display). Every
 //! control here edits `State::settings` or the camera; `State::sync` applies the edit.
 
 use std::collections::BTreeSet;
@@ -229,6 +229,13 @@ fn sidebar(s: &State) -> El {
         .child(point_size_field("size", st))
         .child(density_field("decimate", st));
 
+    // Only once a robot has loaded: there's nothing to show or fade before.
+    let robot = s.robot_model().map(|_| {
+        section("Robot")
+            .child(toggle_row("robot", "Robot model", st.show_robot, |s| s.settings.show_robot ^= true))
+            .child(opacity_field("robot-opacity", st))
+    });
+
     let camera = section("Camera").child(
         row().gap(8.0)
             .child(button("home", "Reset view", |s| s.camera = s.home_view()))
@@ -239,6 +246,7 @@ fn sidebar(s: &State) -> El {
         .child(row().items_center().gap(8.0).child(header(s).grow(1.0).min_w(0.0)).child(gear))
         .child(displays)
         .child(cloud)
+        .children(robot)
         .child(camera)
 }
 
@@ -284,6 +292,7 @@ fn settings_page(s: &State) -> El {
         .child(connection_section(s))
         .child(topics_section(s))
         .child(frames_section(s))
+        .child(robot_section(s))
         .child(display_section(s));
 
     col().key("settings").w(SETTINGS_W).h_full().px(22.0).pt(22.0).gap(20.0).min_h(0.0)
@@ -295,7 +304,7 @@ fn settings_page(s: &State) -> El {
 fn connection_section(s: &State) -> El {
     let t = tok::theme(true);
     let (dot, line) = connection_line(s);
-    let input = el().key("url-field").grow(1.0).h(32.0).px(10.0).radius(tok::radius::MD).fill(t.card).border(1.0, t.card_border).center_y()
+    let input = el().key("url-field").grow(1.0).min_w(0.0).h(32.0).px(10.0).radius(tok::radius::MD).clip_rounded(tok::radius::MD).fill(t.card).border(1.0, t.card_border).center_y()
         .child(
             text_input(&s.url_edit, MONO)
                 .key("url")
@@ -328,6 +337,7 @@ fn topics_section(s: &State) -> El {
         return sec.child(text("No topics yet. Topics appear here as the server advertises them.").font(type_::LABEL).color(t.text_secondary).max_lines(3));
     }
     let cloud_topic = s.cloud_topic();
+    let joint_topic = s.joint_topic();
     let mut list = col().key("topics").radius(tok::radius::MD).fill(t.card).border(1.0, t.card_border);
     for (i, c) in s.received.channels.iter().enumerate() {
         let key = format!("topic-{i}");
@@ -343,6 +353,11 @@ fn topics_section(s: &State) -> El {
                 (kind_badge(Kind::Poses), switch(&format!("{key}-show"), &c.topic, on, move |s| toggle_in(&mut s.settings.hidden_topics, &topic)))
             }
             Some(Kind::Transforms) => (kind_badge(Kind::Transforms), text("Always on").font(type_::LABEL).color(t.text_secondary)),
+            Some(Kind::JointStates) => {
+                let on = joint_topic.as_deref() == Some(c.topic.as_str());
+                let topic = c.topic.clone();
+                (kind_badge(Kind::JointStates), radio_dot(&format!("{key}-show"), &c.topic, on, move |s| s.settings.joint_topic = Some(topic.clone())))
+            }
             None => (unsupported_badge(), el()),
         };
         let mut info = col().gap(2.0).grow(1.0).min_w(0.0)
@@ -371,6 +386,7 @@ fn kind_badge(kind: Kind) -> El {
         Kind::PointCloud => 250.0,
         Kind::Transforms => 150.0,
         Kind::Poses => 70.0,
+        Kind::JointStates => 310.0,
     };
     el().w(84.0).h(20.0).radius(10.0).center().fill(oklcha(0.75, 0.12, hue, 0.16))
         .child(text(kind.label()).font(SMALL).color(oklch(0.84, 0.1, hue)))
@@ -409,6 +425,83 @@ fn frames_section(s: &State) -> El {
         .child(text(format!("{} frames received", frames.len())).font(type_::LABEL).color(t.text_secondary))
 }
 
+fn robot_section(s: &State) -> El {
+    let t = tok::theme(true);
+    let st = &s.settings;
+    let load = |s: &mut State| {
+        s.settings.robot_urdf = s.urdf_edit.text.trim().to_string();
+        // Cleared, so the same path loads again (after editing the file).
+        s.robot = None;
+    };
+    // Clipped: a long path would otherwise draw over the Load button.
+    let input = el().key("urdf-field").grow(1.0).min_w(0.0).h(32.0).px(10.0).radius(tok::radius::MD).clip_rounded(tok::radius::MD).fill(t.card).border(1.0, t.card_border).center_y()
+        .child(
+            text_input(&s.urdf_edit, MONO)
+                .key("urdf")
+                .single_line()
+                .color(t.text)
+                .placeholder("/path/to/robot.urdf", t.text_secondary)
+                .on_edit(|s: &mut State| &mut s.urdf_edit)
+                .on_submit(move |s: &mut State, tx: &mut Tx| {
+                    load(s);
+                    tx.blur();
+                }),
+        );
+    let error = oklch(0.72, 0.17, 25.0);
+    let mut sec = section("Robot")
+        .child(field_note("URDF file", "Plain URDF (run xacro first). STL meshes, by path relative to the file, file:// or package://."))
+        .child(row().gap(8.0).child(input).child(button("load-urdf", "Load", load).grow(0.0).w(92.0).min_w(92.0)));
+    let status = match &s.robot {
+        None => text("No robot loaded").font(type_::LABEL).color(t.text_secondary),
+        Some((_, Err(e))) => text(e.clone()).font(type_::LABEL).color(error).max_lines(4),
+        Some((_, Ok(m))) => text(format!(
+            "{}: {} links, {} joints, {} meshes · loaded in {:.0} ms",
+            m.robot.name, m.robot.links.len(), m.robot.movable().count(), m.mesh.parts.len(), m.load_ms,
+        )).font(type_::LABEL).color(t.text_secondary).max_lines(2),
+    };
+    sec = sec.child(status.key("robot-status"));
+    let Some(m) = s.robot_model() else { return sec };
+    // A model can load with some visuals missing: say which, a few at a time.
+    const SHOWN: usize = 3;
+    for p in m.problems.iter().take(SHOWN) {
+        sec = sec.child(text(p.clone()).font(SMALL).color(error).max_lines(2));
+    }
+    if m.problems.len() > SHOWN {
+        sec = sec.child(text(format!("and {} more visuals not drawn", m.problems.len() - SHOWN)).font(SMALL).color(error));
+    }
+    if let Some(note) = &s.display.robot_note {
+        sec = sec.child(text(note.clone()).font(type_::LABEL).color(t.text_secondary).max_lines(3));
+    }
+
+    let topics: Vec<&str> = s.topics_of(Kind::JointStates).collect();
+    let auto_label = match (&st.joint_topic, topics.first()) {
+        (None, Some(t)) => format!("Auto ({t})"),
+        _ => "Auto".to_string(),
+    };
+    let mut options: Vec<(Option<String>, String)> = vec![(None, auto_label)];
+    options.extend(topics.iter().map(|t| (Some(t.to_string()), t.to_string())));
+    if let Some(chosen) = &st.joint_topic
+        && !topics.contains(&chosen.as_str())
+    {
+        options.push((Some(chosen.clone()), format!("{chosen} (not advertised)")));
+    }
+    let mut list = col().key("joint-topic").role("radiogroup").gap(2.0);
+    for (i, (value, label)) in options.into_iter().enumerate() {
+        let on = value == st.joint_topic;
+        list = list.child(radio_row(&format!("joints-{i}"), &label, on, move |s| s.settings.joint_topic = value.clone()));
+    }
+    let movable: Vec<&str> = m.robot.movable().collect();
+    let received = match &s.received.joints {
+        Some((topic, j)) => format!("{} of {} joints received on {topic}", movable.iter().filter(|n| j.contains_key(**n)).count(), movable.len()),
+        None => "No joint states yet: drawn at the URDF's zero pose".to_string(),
+    };
+    sec.child(field_note("Joint states", "sensor_msgs/msg/JointState, from foxglove_bridge (CDR) or a Foxglove SDK app (JSON)."))
+        .child(list)
+        .child(text(received).key("joints-received").font(type_::LABEL).color(t.text_secondary).max_lines(2))
+        .child(toggle_row("robot-full", "Show robot", st.show_robot, |s| s.settings.show_robot ^= true))
+        .child(opacity_field("robot-opacity-full", st))
+}
+
 fn display_section(s: &State) -> El {
     let st = &s.settings;
     section("Display")
@@ -421,6 +514,10 @@ fn display_section(s: &State) -> El {
 // The side panel and the Settings page both offer these (keyed apart).
 fn point_size_field(key: &'static str, st: &Settings) -> El {
     field("Point size (pt)", segmented(key, &[(1.0, "1"), (2.0, "2"), (3.0, "3"), (4.0, "4")], st.point_size, |s, v| s.settings.point_size = v))
+}
+
+fn opacity_field(key: &'static str, st: &Settings) -> El {
+    field("Opacity", segmented(key, &[(1.0, "100%"), (0.75, "75%"), (0.5, "50%"), (0.25, "25%")], st.robot_opacity, |s, v| s.settings.robot_opacity = v))
 }
 
 fn density_field(key: &'static str, st: &Settings) -> El {
@@ -498,12 +595,12 @@ fn radio_row(key: &str, label: &str, on: bool, pick: impl Fn(&mut State) + 'stat
         .child(text(label.to_string()).font(MONO).color(if on { t.text } else { t.text_secondary }).truncate())
 }
 
-/// Equal-width options in a track; the chosen one sits raised.
 /// The chosen chip or segment: raised above its track.
 fn selected(e: El) -> El {
     e.fill(oklch(0.36, 0.008, 265.0)).shadow(1.0, 2.0, tok::theme(true).edge)
 }
 
+/// Equal-width options in a track; the chosen one sits raised.
 fn segmented<T: Copy + PartialEq + 'static>(key: &'static str, options: &[(T, &str)], current: T, set: fn(&mut State, T)) -> El {
     let t = tok::theme(true);
     let mut track = row().key(key).role("radiogroup").h(30.0).padding(2.0).gap(2.0).radius(tok::radius::MD).fill(t.control_track);

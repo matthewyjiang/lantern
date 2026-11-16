@@ -12,7 +12,7 @@ py=${PY:-/tmp/fxenv/bin/python}
 dir=out/audit
 rm -rf "$dir" && mkdir -p "$dir"
 cfg=$(mktemp -d)
-"$py" -u scripts/serve.py --cloud table > "$dir/serve.log" 2>&1 &
+"$py" -u scripts/serve.py --cloud table --robot-pose reach > "$dir/serve.log" 2>&1 &
 server=$!
 trap 'kill $server 2>/dev/null; wait $server 2>/dev/null || true; rm -rf "$cfg"' EXIT
 for _ in $(seq 100); do grep -q "^serving" "$dir/serve.log" && break; sleep 0.1; done
@@ -42,7 +42,9 @@ ev() { echo "{\"t\": $1, \"type\": \"tap\", \"key\": \"$2\"}"; }
 tap() { echo "[$(ev 1.5 "$1")]"; }
 open='{"t": 0.5, "type": "tap", "key": "open-settings"}'
 stap() { echo "[$open, $(ev 1.5 "$1")]"; }
-# The same, after scrolling the page to its end (the Display section is below the fold).
+# The same, after scrolling the page partway (Frames' axis length and the Robot section) or
+# to its end (the Display section): taps land only on what's on screen.
+mtap() { echo "[$open, {\"t\": 1.0, \"type\": \"wheel\", \"x\": 1060, \"y\": 400, \"dx\": 0, \"dy\": -900}, $(ev 1.5 "$1")]"; }
 send() { echo "[$open, {\"t\": 1.0, \"type\": \"wheel\", \"x\": 1060, \"y\": 400, \"dx\": 0, \"dy\": ${SCROLL_DY:--2000}}, $(ev 1.5 "$1")]"; }
 drag='{"t": 1.5, "type": "drag", "x": 400, "y": 330, "dx": 160, "dy": 40, "dur": 0.4}'
 
@@ -70,12 +72,12 @@ side shift-drag-pan   changes "[{\"t\": 1.45, \"hold\": \"shift\"}, $drag, {\"t\
 side middle-drag-pan  changes '[{"t": 1.5, "type": "drag", "button": "middle", "x": 400, "y": 330, "dx": 160, "dy": 40, "dur": 0.4}]'
 side wheel-zoom       changes '[{"t": 1.5, "type": "wheel", "x": 400, "y": 330, "dx": 0, "dy": 120}]'
 side settings-done    same    "[$open, $(ev 1.5 close-settings)]"
-# Settings page. Topics sort by name: /markers, /objects, /points, /tf.
-sett topic-markers    changes "$(stap topic-0-show)"
-sett topic-objects    changes "$(stap topic-1-show)"
+# Settings page. Topics sort by name: /joint_states, /markers, /objects, /points, /tf.
+sett topic-markers    changes "$(stap topic-1-show)"
+sett topic-objects    changes "$(stap topic-2-show)"
 sett fixed-frame      changes "$(stap frame-1)"
 sett labels           changes "$(stap labels)"
-sett axis-5cm         changes "$(stap axis-0)"
+sett axis-5cm         changes "$(mtap axis-0)"
 sett color-field      changes "$(send color-full-1)"
 sett size-full        changes "$(send size-full-3)"
 sett density-full     changes "$(send decimate-full-2)"
@@ -86,4 +88,23 @@ sett url-enter        changes "[$open, $(ev 0.6 url), {\"t\": 0.7, \"type\": \"k
 dead='{"url": "ws://10.255.255.1:8765"}'
 switch="[$open, $(ev 0.6 url), {\"t\": 0.7, \"type\": \"key\", \"cmd\": true, \"name\": \"a\"}, {\"t\": 0.8, \"type\": \"type\", \"text\": \"ws://127.0.0.1:8765\"}, {\"t\": 2.2, \"type\": \"key\", \"name\": \"Enter\"}]"
 at=6 sett switch-from-dead  same    "$switch" "$dead"
+
+# Robot (the Med 7 from scripts/robot_fixture.py, posed by serve.py's joint states). Its side
+# panel section only exists once it has loaded, so these start from settings that load it.
+robot="{\"robot_urdf\": \"$PWD/fixtures/med7/med7.urdf\"}"
+[[ -f fixtures/med7/med7.urdf ]] || { echo "no fixtures/med7: run scripts/robot_fixture.py"; exit 1; }
+snap base-robot '[]' "$robot"
+snap settings-robot "[$open]" "$robot"
+rside() { check base-robot "$crop_side" "$@" "$robot"; }
+rsett() { check settings-robot "$crop_settings" "$@" "$robot"; }
+rside robot           changes "$(tap robot)"
+rside robot-track     changes "$(tap robot-track)"
+rside robot-opacity   changes "$(tap robot-opacity-2)"
+rsett robot-full      changes "$(mtap robot-full)"
+rsett robot-opacity-full changes "$(mtap robot-opacity-full-3)"
+# Picking the topic Auto already uses keeps the pose: switching must not drop received joints.
+rsett joints-explicit same    "$(mtap joints-1)"
+# Typing the path and pressing Enter loads the robot (from no robot, so the arm appears).
+# Typing runs at about 30 characters a second: Enter waits for the whole path.
+at=5 sett urdf-enter  changes "[$open, {\"t\": 0.6, \"type\": \"wheel\", \"x\": 1060, \"y\": 400, \"dx\": 0, \"dy\": -900}, $(ev 1.0 urdf), {\"t\": 1.1, \"type\": \"type\", \"text\": \"$PWD/fixtures/med7/med7.urdf\"}, {\"t\": 3.5, \"type\": \"key\", \"name\": \"Enter\"}]"
 exit $fail
