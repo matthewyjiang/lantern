@@ -179,6 +179,45 @@ impl Robot {
         Ok(Robot { name: robot.attribute("name").unwrap_or("robot").to_string(), links, joints, visuals })
     }
 
+    /// How `self` and `other` differ as mechanisms, or `None` when they're the same: the same
+    /// root, joints (by name) between the same links, moving the same way, placed alike within a
+    /// micrometre. The robot's name, visuals and colours don't count, so two files of one arm
+    /// (different mesh paths) match, and two arms that share joint names (KUKA's Med 7 and Med 14)
+    /// don't.
+    pub fn kinematic_difference(&self, other: &Robot) -> Option<String> {
+        const TOLERANCE: f64 = 1e-6;
+        if self.links[0] != other.links[0] {
+            return Some(format!("the root link is {} in one and {} in the other", self.links[0], other.links[0]));
+        }
+        if self.joints.len() != other.joints.len() {
+            return Some(format!("{} has {} joints and {} has {}", self.name, self.joints.len(), other.name, other.joints.len()));
+        }
+        for a in &self.joints {
+            let Some(b) = other.joints.iter().find(|b| b.name == a.name) else {
+                return Some(format!("{} has no joint {}", other.name, a.name));
+            };
+            let links = |r: &Robot, j: &Joint| (r.links[j.parent].clone(), r.links[j.child].clone());
+            if links(self, a) != links(other, b) {
+                return Some(format!("joint {} connects different links", a.name));
+            }
+            let same_motion = match (&a.motion, &b.motion) {
+                (Motion::Fixed, Motion::Fixed) => true,
+                (Motion::Rotate(x), Motion::Rotate(y)) | (Motion::Slide(x), Motion::Slide(y)) => (*x - *y).length() < TOLERANCE,
+                _ => false,
+            };
+            if !same_motion {
+                return Some(format!("joint {} moves differently ({:?} vs {:?})", a.name, a.motion, b.motion));
+            }
+            let (p, q) = (a.origin, b.origin);
+            if (p.translation - q.translation).length() > TOLERANCE || p.rotation.angle_between(q.rotation) > TOLERANCE {
+                // Shortest round-trip digits: values past the tolerance never print alike.
+                let at = |v: DVec3| format!("({}, {}, {}) m", v.x, v.y, v.z);
+                return Some(format!("joint {} sits at {} in {} and {} in {}", a.name, at(p.translation), self.name, at(q.translation), other.name));
+            }
+        }
+        None
+    }
+
     /// Joints that take a position (not fixed, not mimicking another), in tree order.
     pub fn movable(&self) -> impl Iterator<Item = &str> {
         self.joints.iter().filter(|j| j.motion != Motion::Fixed && j.mimic.is_none()).map(|j| j.name.as_str())
@@ -259,7 +298,7 @@ mod tests {
     }
 
     // Reference values from pinocchio 4.1.0 on the same URDF (buildModelFromXML, then
-    // updateFramePlacements; R row-major). Home is the arm's usual home pose; reach turns every joint.
+    // updateFramePlacements; R row-major). Home bends joints 2, 4 and 6; reach turns every joint.
     #[test]
     fn med7_forward_kinematics_matches_pinocchio() {
         let robot = Robot::parse(MED7).unwrap();
@@ -297,6 +336,19 @@ mod tests {
         let at = |name: &str| poses[robot.links.iter().position(|l| l == name).unwrap()].translation;
         assert!((at("l") - DVec3::new(0.0, 0.02, 0.1)).length() < 1e-12);
         assert!((at("r") - DVec3::new(0.0, -0.02, 0.1)).length() < 1e-12);
+    }
+
+    // The Med 7 and Med 14 share every joint name; only their geometry tells them apart.
+    #[test]
+    fn arms_that_share_joint_names_differ_kinematically() {
+        let med7 = Robot::parse(MED7).unwrap();
+        let med14 = Robot::parse(include_str!("testdata/med14.urdf")).unwrap();
+        assert_eq!(med7.movable().collect::<Vec<_>>(), med14.movable().collect::<Vec<_>>());
+        let why = med7.kinematic_difference(&med14).expect("different arms");
+        assert_eq!(why, "joint lbr_joint_0 sits at (0, 0, 0.1475) m in med7 and (0, 0, 0.147) m in med14");
+        // The same arm with another mesh path and colour is the same mechanism.
+        let restyled = Robot::parse(&MED7.replace("meshes/med7/visual/link_1.stl", "/elsewhere/link_1.stl").replace("<robot name=\"med7\"", "<robot name=\"arm\"")).unwrap();
+        assert_eq!(med7.kinematic_difference(&restyled), None);
     }
 
     #[test]

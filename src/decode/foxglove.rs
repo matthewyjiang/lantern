@@ -6,10 +6,11 @@
 use glam::{DQuat, DVec3};
 use prost::Message;
 
+use super::image;
 use super::points::{ColorChoice, Field, Num, Packed};
 use super::ros::unit;
 use super::{DecodeError, Decoded};
-use crate::scene::{Pose as ScenePose, Poses, Tracked, Transform};
+use crate::scene::{Annotation, PointsKind, Pose as ScenePose, Poses, Tracked, Transform};
 
 #[derive(Clone, PartialEq, Message)]
 struct Vector3 {
@@ -198,4 +199,167 @@ pub fn odometry(bytes: &[u8], _: &ColorChoice) -> Result<Decoded, DecodeError> {
     let velocity = m.linear_velocity.map(|v| pose.rotation * vec3(Some(v)));
     let item = Tracked { pose, label: Some(m.body_frame_id).filter(|l| !l.is_empty()), velocity };
     Ok(Decoded::Poses(Poses { frame_id: m.frame_id, items: vec![item] }))
+}
+
+#[derive(Clone, PartialEq, Message)]
+struct JointState {
+    #[prost(string, tag = "1")]
+    name: String,
+    #[prost(double, optional, tag = "2")]
+    position: Option<f64>,
+}
+
+#[derive(Clone, PartialEq, Message)]
+struct JointStates {
+    #[prost(message, repeated, tag = "2")]
+    joints: Vec<JointState>,
+}
+
+/// Every joint that has a position (a joint with only velocity or effort is skipped).
+pub fn joint_states(bytes: &[u8], _: &ColorChoice) -> Result<Decoded, DecodeError> {
+    let m: JointStates = parse(bytes)?;
+    Ok(Decoded::Joints(m.joints.into_iter().filter_map(|j| Some((j.name, j.position?))).collect()))
+}
+
+#[derive(Clone, PartialEq, Message)]
+struct CompressedImage {
+    #[prost(bytes = "vec", tag = "2")]
+    data: Vec<u8>,
+    #[prost(string, tag = "3")]
+    format: String,
+}
+
+#[derive(Clone, PartialEq, Message)]
+struct RawImage {
+    #[prost(fixed32, tag = "2")]
+    width: u32,
+    #[prost(fixed32, tag = "3")]
+    height: u32,
+    #[prost(string, tag = "4")]
+    encoding: String,
+    #[prost(fixed32, tag = "5")]
+    step: u32,
+    #[prost(bytes = "vec", tag = "6")]
+    data: Vec<u8>,
+}
+
+pub fn compressed_image(bytes: &[u8], _: &ColorChoice) -> Result<Decoded, DecodeError> {
+    let m: CompressedImage = parse(bytes)?;
+    Ok(Decoded::Image(image::compressed(&m.format, &m.data)?))
+}
+
+pub fn raw_image(bytes: &[u8], _: &ColorChoice) -> Result<Decoded, DecodeError> {
+    let m: RawImage = parse(bytes)?;
+    Ok(Decoded::Image(image::raw(m.width, m.height, &m.encoding, m.step, false, &m.data)?))
+}
+
+#[derive(Clone, PartialEq, Message)]
+struct Color {
+    #[prost(double, tag = "1")]
+    r: f64,
+    #[prost(double, tag = "2")]
+    g: f64,
+    #[prost(double, tag = "3")]
+    b: f64,
+    #[prost(double, tag = "4")]
+    a: f64,
+}
+
+#[derive(Clone, PartialEq, Message)]
+struct Point2 {
+    #[prost(double, tag = "1")]
+    x: f64,
+    #[prost(double, tag = "2")]
+    y: f64,
+}
+
+#[derive(Clone, PartialEq, Message)]
+struct CircleAnnotation {
+    #[prost(message, optional, tag = "2")]
+    position: Option<Point2>,
+    #[prost(double, tag = "3")]
+    diameter: f64,
+    #[prost(double, tag = "4")]
+    thickness: f64,
+    #[prost(message, optional, tag = "5")]
+    fill_color: Option<Color>,
+    #[prost(message, optional, tag = "6")]
+    outline_color: Option<Color>,
+}
+
+#[derive(Clone, PartialEq, Message)]
+struct PointsAnnotation {
+    #[prost(int32, tag = "2")]
+    r#type: i32,
+    #[prost(message, repeated, tag = "3")]
+    points: Vec<Point2>,
+    #[prost(message, optional, tag = "4")]
+    outline_color: Option<Color>,
+    /// Per point (POINTS) or segment colours; Lantern draws a shape in one colour, the first.
+    #[prost(message, repeated, tag = "5")]
+    outline_colors: Vec<Color>,
+    #[prost(message, optional, tag = "6")]
+    fill_color: Option<Color>,
+    #[prost(double, tag = "7")]
+    thickness: f64,
+}
+
+#[derive(Clone, PartialEq, Message)]
+struct TextAnnotation {
+    #[prost(message, optional, tag = "2")]
+    position: Option<Point2>,
+    #[prost(string, tag = "3")]
+    text: String,
+    #[prost(double, tag = "4")]
+    font_size: f64,
+    #[prost(message, optional, tag = "5")]
+    text_color: Option<Color>,
+    #[prost(message, optional, tag = "6")]
+    background_color: Option<Color>,
+}
+
+#[derive(Clone, PartialEq, Message)]
+struct ImageAnnotations {
+    #[prost(message, repeated, tag = "1")]
+    circles: Vec<CircleAnnotation>,
+    #[prost(message, repeated, tag = "2")]
+    points: Vec<PointsAnnotation>,
+    #[prost(message, repeated, tag = "3")]
+    texts: Vec<TextAnnotation>,
+}
+
+/// A missing colour is transparent: an absent fill draws no fill.
+fn rgba(c: Option<Color>) -> [f32; 4] {
+    c.map_or([0.0; 4], |c| [c.r as f32, c.g as f32, c.b as f32, c.a as f32])
+}
+
+fn point2(p: Option<Point2>) -> [f32; 2] {
+    p.map_or([0.0; 2], |p| [p.x as f32, p.y as f32])
+}
+
+pub fn image_annotations(bytes: &[u8], _: &ColorChoice) -> Result<Decoded, DecodeError> {
+    let m: ImageAnnotations = parse(bytes)?;
+    let mut out = Vec::new();
+    for c in m.circles {
+        out.push(Annotation::Circle { center: point2(c.position), diameter: c.diameter as f32, thickness: c.thickness as f32, outline: rgba(c.outline_color), fill: rgba(c.fill_color) });
+    }
+    for p in m.points {
+        let kind = match p.r#type {
+            1 => PointsKind::Points,
+            2 => PointsKind::Loop,
+            3 => PointsKind::Strip,
+            4 => PointsKind::Lines,
+            // UNKNOWN (0) or newer: nothing to draw, but the message's other shapes still are.
+            _ => continue,
+        };
+        let points = p.points.into_iter().map(|q| point2(Some(q))).collect();
+        let color = p.outline_color.or_else(|| p.outline_colors.into_iter().next());
+        out.push(Annotation::Points { kind, points, color: rgba(color), fill: rgba(p.fill_color), thickness: p.thickness as f32 });
+    }
+    for t in m.texts {
+        // An unset text colour would be transparent: white, as Foxglove draws it.
+        let color = t.text_color.map_or([1.0; 4], |c| rgba(Some(c)));
+        out.push(Annotation::Text { at: point2(t.position), text: t.text, size: t.font_size as f32, color, background: rgba(t.background_color) });
+    }
+    Ok(Decoded::Annotations(out))
 }

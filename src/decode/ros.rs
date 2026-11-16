@@ -1,12 +1,13 @@
 //! ROS 2 messages in CDR, field order as in the `.msg` definitions (sensor_msgs, tf2_msgs,
-//! geometry_msgs; identical in Humble and Jazzy).
+//! geometry_msgs, std_msgs, diagnostic_msgs; identical in Humble and Jazzy).
 
 use glam::{DQuat, DVec3};
 
 use super::cdr::Cdr;
+use super::image;
 use super::points::{ColorChoice, Field, Num, Packed};
 use super::{DecodeError, Decoded};
-use crate::scene::{Pose, Poses, Tracked, Transform};
+use crate::scene::{Diagnostic, Level, Pose, Poses, Tracked, Transform};
 
 /// `std_msgs/Header`: stamp (int32 sec, uint32 nanosec), then the frame_id it returns. Lantern
 /// draws the newest message of each topic, so it doesn't use stamps.
@@ -135,4 +136,55 @@ pub fn odometry(bytes: &[u8], _: &ColorChoice) -> Result<Decoded, DecodeError> {
     }
     let item = Tracked { pose, label: Some(child), velocity: Some(pose.rotation * linear) };
     Ok(Decoded::Poses(Poses { frame_id, items: vec![item] }))
+}
+
+/// `sensor_msgs/CompressedImage`: header, format, data.
+pub fn compressed_image(bytes: &[u8], _: &ColorChoice) -> Result<Decoded, DecodeError> {
+    let mut r = Cdr::new(bytes)?;
+    header(&mut r)?;
+    let format = r.string()?;
+    Ok(Decoded::Image(image::compressed(&format, r.bytes()?)?))
+}
+
+/// `sensor_msgs/Image`: header, height, width, encoding, is_bigendian, step, data.
+pub fn image(bytes: &[u8], _: &ColorChoice) -> Result<Decoded, DecodeError> {
+    let mut r = Cdr::new(bytes)?;
+    header(&mut r)?;
+    let height = r.u32()?;
+    let width = r.u32()?;
+    let encoding = r.string()?;
+    let big_endian = r.bool()?;
+    let step = r.u32()?;
+    Ok(Decoded::Image(image::raw(width, height, &encoding, step, big_endian, r.bytes()?)?))
+}
+
+/// `std_msgs/String`.
+pub fn string(bytes: &[u8], _: &ColorChoice) -> Result<Decoded, DecodeError> {
+    Ok(Decoded::Text(Cdr::new(bytes)?.string()?))
+}
+
+/// `std_msgs/String` on a `robot_description` topic: a URDF.
+pub fn robot_description(bytes: &[u8], _: &ColorChoice) -> Result<Decoded, DecodeError> {
+    Ok(Decoded::RobotDescription(Cdr::new(bytes)?.string()?))
+}
+
+/// `diagnostic_msgs/DiagnosticArray`: header, then each status's level (byte), name, message,
+/// hardware_id and key/value pairs.
+pub fn diagnostic_array(bytes: &[u8], _: &ColorChoice) -> Result<Decoded, DecodeError> {
+    let mut r = Cdr::new(bytes)?;
+    header(&mut r)?;
+    // A status is at least 32 bytes (level and padding, three empty strings, an empty
+    // sequence's count); 20 is a safe lower bound for refusing an impossible count.
+    let n = r.seq_len(20)?;
+    let mut out = Vec::with_capacity(n);
+    for _ in 0..n {
+        let level = r.u8()?;
+        let name = r.string()?;
+        let message = r.string()?;
+        let _hardware_id = r.string()?;
+        let m = r.seq_len(8)?;
+        let values = (0..m).map(|_| Ok((r.string()?, r.string()?))).collect::<Result<_, DecodeError>>()?;
+        out.push(Diagnostic { level: Level::from_byte(level), name, message, values });
+    }
+    Ok(Decoded::Diagnostics(out))
 }

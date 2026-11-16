@@ -2,8 +2,8 @@
 
 # Lantern
 
-A small RViz stand-in in Rust: draws point clouds, TF, poses and a robot model live from any
-Foxglove WebSocket source, including foxglove_bridge on ROS 2.
+A small RViz stand-in in Rust: draws point clouds, TF, poses, a robot model and camera images
+live from any Foxglove WebSocket source, including foxglove_bridge on ROS 2.
 
 ![Lantern drawing a KUKA arm beside a table scan coloured by intensity, with TF axes, labelled objects and the side panel.](docs/screenshots/robot-home-sdk.png)
 

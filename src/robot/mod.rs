@@ -51,8 +51,18 @@ pub struct Part {
 pub fn load(path: &Path, max_vertices: usize) -> Result<Model, String> {
     let started = Instant::now();
     let xml = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
-    let robot = Robot::parse(&xml)?;
-    let dir = path.parent().unwrap_or(Path::new("."));
+    build(&xml, path.parent().unwrap_or(Path::new(".")), max_vertices, started)
+}
+
+/// Loads a URDF received as text (a `robot_description` topic). Mesh paths must be absolute,
+/// `file://` or `package://`: relative ones resolve against the working directory, which is
+/// rarely where the sender meant.
+pub fn load_text(xml: &str, max_vertices: usize) -> Result<Model, String> {
+    build(xml, Path::new("."), max_vertices, Instant::now())
+}
+
+fn build(xml: &str, dir: &Path, max_vertices: usize, started: Instant) -> Result<Model, String> {
+    let robot = Robot::parse(xml)?;
     let mut vertices: Vec<[f32; 6]> = Vec::new();
     let mut parts = Vec::new();
     let mut problems = Vec::new();

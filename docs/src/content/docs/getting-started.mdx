@@ -89,13 +89,20 @@ connected. The chip at the viewport's top left counts the points drawn.
 
 The side panel holds what you change while looking:
 
-- **Displays:** grid, point cloud, TF frames and poses, each on or off.
+- **Displays:** grid, point cloud, TF frames and poses, each on or off, plus camera image, text
+  and stats once a server offers them.
 - **Point cloud:** colour (Auto or Height), point size, and density (every point, ½, ¼ or ⅛).
 - **Robot:** show/hide and opacity, once a robot model is loaded.
 - **Camera:** Reset view, and Top down.
 
 The settings button (the slider icon) opens the [Settings page](/lantern/guides/settings/), for everything else:
-the server URL, topics, the fixed frame and the robot's URDF.
+the servers, topics, the fixed frame, pose expiry and trails, and the robot's URDF.
+
+To read other servers or load a robot for one run without changing your settings:
+
+```sh
+cargo run --release -- --connect ws://a:8765 --connect ws://b:8765 --urdf robot.urdf
+```
 
 ## Next
 

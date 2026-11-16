@@ -267,7 +267,7 @@ impl<'a> Session<'a> {
         match serde_json::from_str::<Op>(text) {
             Ok(Op::Advertise { channels }) => {
                 for mut c in channels {
-                    c.decoder = decode::decoder_for(&c.encoding, &c.schema_name);
+                    c.decoder = decode::decoder_for(&c.encoding, &c.schema_name, &c.topic);
                     self.channels.insert(c.id, c);
                 }
                 self.publish_channels();

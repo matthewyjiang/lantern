@@ -18,6 +18,8 @@ serde_json = "1"
 prost = { version = "0.14", default-features = false, features = ["derive", "std"] }
 # URDF parsing (robot models): a read-only XML DOM, no dependencies of its own.
 roxmltree = "0.21.2"
+# Camera images (JPEG, PNG): the same crate and codecs Rune already builds for its own images.
+image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
 
 # Rune ships patched copies of these crates and asks every app that builds it to apply them too
 # (a dependency's `[patch]` doesn't reach the workspace that depends on it). Same rev as `rune`.

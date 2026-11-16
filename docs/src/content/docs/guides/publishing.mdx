@@ -1,6 +1,6 @@
 ---
 title: Publish to Lantern
-description: Send a robot's joints, tracked objects, markers and point clouds to Lantern from your own program with a Foxglove SDK, no ROS needed.
+description: Send a robot's joints, tracked objects, markers, point clouds, camera images and status to Lantern from your own program with a Foxglove SDK, no ROS needed.
 ---
 
 import { Steps } from '@astrojs/starlight/components';
@@ -18,12 +18,19 @@ what its camera sees, and the objects it tracks. If your stack already runs ROS 
 | Topic | Channel | Lantern draws |
 | --- | --- | --- |
 | `/tf` | `FrameTransformsChannel` | The TF tree: where the camera and the robot base sit in `world` |
-| `/joint_states` | JSON channel (below) | The robot, posed from its URDF |
+| `/joint_states` | `JointStatesChannel`, or a JSON channel (below) | The robot, posed from its URDF |
+| `/robot_description` | JSON channel (below) | The robot model itself, so Lantern needs no URDF file |
 | `/objects` | `OdometryChannel` | One labelled pose per tracked object, with a 1 s velocity arrow |
 | `/markers` | `PosesInFrameChannel` | Unlabelled poses, such as fiducial detections |
 | `/points` | `PointCloudChannel` | The camera's point cloud |
+| `/camera/image` | `CompressedImageChannel` or `RawImageChannel` | The camera image, in a card over the viewport |
+| `/camera/annotations` | `ImageAnnotationsChannel` | Boxes, circles and labels drawn over that image |
+| `/status` | JSON channel (below) | A text card, such as the current task and phase |
+| `/diagnostics` | JSON channel (below) | One stats card for the arm, camera, gripper, ... |
 
-The topic names are free; Lantern picks channels by schema, not name. Publish only what you have.
+The topic names are free, except that a robot description's must be `robot_description` or
+end in `/robot_description`; otherwise Lantern picks channels by schema, not name. Publish only what you
+have.
 
 ## Serve from your program
 
@@ -78,7 +85,16 @@ has a complete, runnable point cloud example.
 
 ## Joint states
 
-Foxglove has no joint-state schema. Declare a JSON channel whose schema `title` is
+`foxglove.JointStates` carries a name and position per joint:
+
+```python
+from foxglove.channels import JointStatesChannel
+
+joints = JointStatesChannel("/joint_states")
+joints.log(fm.JointStates(joints=[fm.JointState(name=n, position=q_i) for n, q_i in zip(joint_names, q)]))
+```
+
+Or publish the ROS message's shape as JSON: declare a JSON channel whose schema `title` is
 `sensor_msgs/msg/JointState`. The SDK sends the title as the schema name, which is what Lantern
 matches, and Lantern reads `name` and `position`:
 
@@ -100,12 +116,35 @@ The names must match the joints in your URDF. Lantern draws the newest message, 
 tick of a fast control loop is fine. Messages that carry only some joints merge, so an arm and a
 gripper can publish separately.
 
+## Text, stats and the robot description
+
+These have no Foxglove schema either, so they go out as JSON under the ROS type's name, the
+same way:
+
+```python
+def ros_json(topic, ros_type, properties):
+    return foxglove.Channel(topic, schema={"title": ros_type, "type": "object", "properties": properties})
+
+text = ros_json("/status", "std_msgs/msg/String", {"data": {"type": "string"}})
+text.log({"data": "policy: pick_cup\nphase: grasp"})
+
+diagnostics = ros_json("/diagnostics", "diagnostic_msgs/msg/DiagnosticArray", {"status": {"type": "array"}})
+diagnostics.log({"status": [
+    # level: 0 OK, 1 warning, 2 error, 3 stale.
+    {"level": 1, "name": "camera", "message": "frame drops", "values": [{"key": "fps", "value": "27.4"}]},
+]})
+
+description = ros_json("/robot_description", "std_msgs/msg/String", {"data": {"type": "string"}})
+description.log({"data": urdf_text})
+```
+
 ## Load the robot
 
-Lantern reads the URDF from disk on its own machine, not from a topic. Expand xacro once
-(`xacro robot.urdf.xacro > robot.urdf`), then load the file in **Settings → Robot**. If the
-URDF's root link is connected to the fixed frame through TF, the robot stands where TF says;
-otherwise it stands at the fixed frame's origin.
+Either publish the URDF on `/robot_description` (above), or load a file on Lantern's machine:
+expand xacro once (`xacro robot.urdf.xacro > robot.urdf`), then load it in **Settings → Robot**.
+A published URDF's meshes must still be on Lantern's machine, by absolute, `file://` or
+`package://` path. If the URDF's root link is connected to the fixed frame through TF, the robot
+stands where TF says; otherwise it stands at the fixed frame's origin.
 The [Robot model guide](/lantern/guides/robot-model/) has the details.
 
 ![Lantern drawing a KUKA arm beside a table scan, with two labelled objects and two markers on the table.](../../../../screenshots/robot-home-sdk.png)
@@ -114,11 +153,11 @@ The [Robot model guide](/lantern/guides/robot-model/) has the details.
 
 [`scripts/serve.py`](https://github.com/matthewyjiang/lantern/blob/main/scripts/serve.py) serves
 this same shape with fixed data: a table scan, two tracked objects (`cup` and `box`), two markers,
-and, with `--robot-pose`, a KUKA Med 7's joints. It's a complete working example of everything on
-this page:
+and, with `--robot-pose`, a KUKA Med 7's joints; `--camera` and `--status` add the image, its
+annotations, text and diagnostics. It's a complete working example of everything on this page:
 
 ```sh
-/tmp/fxenv/bin/python scripts/serve.py --cloud table --robot-pose home
+/tmp/fxenv/bin/python scripts/serve.py --cloud table --robot-pose home --camera --status
 ```
 
 Setup for `/tmp/fxenv` is in [Connect a source](/lantern/connect/#no-robot-the-replay-server).

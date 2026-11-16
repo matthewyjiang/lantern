@@ -11,15 +11,15 @@ screen, and each step has one owner.
 
 <Pipeline />
 
-- **Source.** A client thread connects, subscribes to the topics the app wants, decodes what
-  arrives, and reconnects when the connection drops.
+- **Source.** One client thread per server connects, subscribes to the topics the app wants,
+  decodes what arrives, and reconnects when the connection drops.
 - **Decoders.** A table maps each (encoding, schema) pair to a function that turns message bytes
   into a scene type. Nothing past this point knows a message type.
 - **Inbox.** Events wait here for the UI thread. Point clouds coalesce to the newest per topic, so
   a UI that falls behind a fast publisher drops stale clouds instead of queueing them. Everything
   else queues in arrival order, because order matters for TF.
-- **App state.** Applies events, keeps the TF tree, loads the robot, and derives what to draw:
-  the fixed frame, lines, labels, bounds and link poses.
+- **App state.** Applies each connection's events, merges their TF trees, loads the robot, and
+  derives what to draw: the fixed frame, lines, labels, bounds, link poses and the image card.
 - **Viewport and UI.** A Rune compositor draws the 3D pass offscreen into a slot in the UI, then
   the side panel and Settings page draw around it.
 
@@ -28,12 +28,14 @@ screen, and each step has one owner.
 | File | Owns |
 | --- | --- |
 | `src/source.rs` | The `Source` trait; `FoxgloveWs`, the WebSocket client thread (tungstenite): subscribes to what the app wants, reconnects |
-| `src/decode/` | The `(encoding, schema)` → decoder table; ROS CDR and Foxglove protobuf decoders; point field extraction |
-| `src/scene.rs` | What gets drawn, independent of message types: clouds, transforms, poses, the TF tree |
-| `src/app.rs` | App state: applies source events, syncs settings with the source, loads the robot, derives the display |
+| `src/decode/` | The `(encoding, schema)` → decoder table; ROS CDR, Foxglove protobuf and JSON decoders; point field extraction; image decoding (`image.rs`) |
+| `src/scene.rs` | What gets drawn, independent of message types: clouds, transforms, poses, images, the TF tree |
+| `src/connection.rs` | One server: its source and what it has received (clouds, TF, poses, joints, images, text, stats), with pose expiry and trails |
+| `src/app.rs` | App state: opens and closes connections to match settings, picks topics, loads the robot (file or description), derives the display |
+| `src/annotate.rs` | Draws image annotations into the image on the CPU |
 | `src/robot/` | URDF parsing and forward kinematics (`urdf.rs`), STL and primitive meshes with smoothed normals (`mesh.rs`), loading and mesh path resolution (`mod.rs`) |
 | `src/settings.rs` | Persisted settings |
-| `src/ui.rs` | Side panel, Settings page, viewport overlays |
+| `src/ui.rs` | Side panel, Settings page, viewport overlays (status chip, image, text and stats cards) |
 | `src/camera.rs` | Orbit camera (REP 103, z up), reversed infinite depth |
 | `src/viewport.rs` | Rune `Compositor`: offscreen 3D pass blitted into an `El::effect` slot, GPU timer |
 | `src/viewport.wgsl` | Sky and grid, points (vertex-pulled quads), robot (lit meshes), lines, blit |
@@ -66,9 +68,12 @@ which AMCL publishes on `/amcl_pose`:
    ```rust title="src/decode/mod.rs" ins={3}
    const DECODERS: &[Decoder] = &[
        // ...
-       Decoder { encoding: "cdr", schema: "geometry_msgs/msg/PoseWithCovarianceStamped", kind: Kind::Poses, decode: ros::pose_with_covariance_stamped },
+       row("cdr", "geometry_msgs/msg/PoseWithCovarianceStamped", None, Kind::Poses, ros::pose_with_covariance_stamped),
    ];
    ```
+
+   The third field limits a row to topics of that name, alone or after a `/` (as the
+   `robot_description` rows do); `None` matches any topic.
 
 3. Test it against bytes from the reference serializer. `scripts/capture_test_bytes.py` writes
    rclpy's CDR and the Foxglove Python SDK's protobuf into `src/decode/testdata/`; add your
@@ -79,9 +84,9 @@ which AMCL publishes on `/amcl_pose`:
 The topic now shows in Settings with a **Poses** badge instead of **No decoder**, and the
 source subscribes to it like any other pose topic.
 
-A message that needs a new kind of drawing (an image, a marker array) needs more: a `Decoded`
-variant and `Kind`, a scene type in `src/scene.rs`, state in `src/app.rs`, and drawing in the
-viewport.
+A message that needs a new kind of drawing (a marker array, say) needs more: a `Decoded`
+variant and `Kind`, a scene type in `src/scene.rs`, state in `src/connection.rs` and
+`src/app.rs`, and drawing in the viewport or the UI.
 
 ## Add a source
 
@@ -113,7 +118,7 @@ The contract, as `FoxgloveWs` keeps it:
   name for the side panel, or `Failed { error }`, which the status chip shows. Retry on your own
   if that makes sense for the transport.
 - **Advertise channels.** Send `Event::Channels` with every topic you can offer, each with its
-  `kind` from `decode::decoder_for(encoding, schema)`. Each list replaces the last one.
+  `kind` from `decode::decoder_for(encoding, schema, topic)`. Each list replaces the last one.
 - **Deliver only what's wanted.** Send `Event::Data` for topics in the latest `Wanted`, decoded
   through the same `decode::decoder_for` table. A message that doesn't decode is
   `Event::DecodeFailed`; the topic keeps its last good data.

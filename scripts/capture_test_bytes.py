@@ -113,3 +113,53 @@ js.position = [0.5, -1.25, 2.0]
 js.velocity = [0.0, 0.0, 0.0]
 write("jointstate.cdr", serialize_message(js))
 write("odometry.pb", fm.Odometry(frame_id="world", body_frame_id="cup", pose=fpose(ODOM_T, ODOM_Q), linear_velocity=fm.Vector3(x=0.2, y=0.0, z=0.0), angular_velocity=fm.Vector3(x=0.0, y=0.0, z=0.5)).encode())
+
+# The same three joints as foxglove.JointStates (protobuf), plus a fourth with no position
+# (effort only), which Lantern skips.
+write("jointstates.pb", fm.JointStates(joints=[
+    *(fm.JointState(name=n, position=q, velocity=0.0) for n, q in zip(js.name, js.position)),
+    fm.JointState(name="gripper", effort=1.5),
+]).encode())
+
+# Images: a 3x2 picture, red green blue / white black grey, as PNG (lossless, so the test checks
+# exact pixels) and as raw rgb8 / bgr8. ROS Image rows are padded (step 12 for 9 bytes).
+import io
+
+from PIL import Image as PILImage
+from sensor_msgs.msg import CompressedImage, Image
+
+PIXELS = [(255, 0, 0), (0, 255, 0), (0, 0, 255), (255, 255, 255), (0, 0, 0), (128, 128, 128)]
+png = io.BytesIO()
+pic = PILImage.new("RGB", (3, 2))
+pic.putdata(PIXELS)
+pic.save(png, format="PNG")
+write("compressedimage.pb", fm.CompressedImage(frame_id="camera", format="png", data=png.getvalue()).encode())
+ci = CompressedImage()
+ci.header.frame_id, ci.format, ci.data = "camera", "png", png.getvalue()
+write("compressedimage.cdr", serialize_message(ci))
+rgb = bytes(c for p in PIXELS for c in p)
+write("rawimage.pb", fm.RawImage(frame_id="camera", width=3, height=2, encoding="rgb8", step=9, data=rgb).encode())
+im = Image()
+im.header.frame_id, im.height, im.width, im.encoding, im.is_bigendian, im.step = "camera", 2, 3, "bgr8", 0, 12
+im.data = b"".join(bytes(c for p in PIXELS[r * 3:r * 3 + 3] for c in p[::-1]) + b"\0\0\0" for r in range(2))
+write("image.cdr", serialize_message(im))
+
+# Annotations: a circle, a closed square (LINE_LOOP), and a label.
+def color(r, g, b, a=1.0):
+    return fm.Color(r=r, g=g, b=b, a=a)
+
+
+write("imageannotations.pb", fm.ImageAnnotations(
+    circles=[fm.CircleAnnotation(position=fm.Point2(x=10.0, y=20.0), diameter=8.0, thickness=2.0, outline_color=color(1.0, 0.0, 0.0))],
+    points=[fm.PointsAnnotation(type=fm.PointsAnnotationType.LineLoop, points=[fm.Point2(x=x, y=y) for x, y in [(1, 1), (5, 1), (5, 5), (1, 5)]], outline_color=color(0.0, 1.0, 0.0), thickness=1.0)],
+    texts=[fm.TextAnnotation(position=fm.Point2(x=3.0, y=4.0), text="tag 7", font_size=12.0, text_color=color(1.0, 1.0, 1.0))],
+).encode())
+
+# Text and stats: a std_msgs/String, and a DiagnosticArray with one status and two values.
+from diagnostic_msgs.msg import DiagnosticArray, DiagnosticStatus, KeyValue
+from std_msgs.msg import String
+
+write("string.cdr", serialize_message(String(data="tracking ok\nlate ticks: 0")))
+da = DiagnosticArray()
+da.status = [DiagnosticStatus(level=DiagnosticStatus.WARN, name="controller", message="velocity limit binding", hardware_id="arm", values=[KeyValue(key="tracking error", value="1.8 mm"), KeyValue(key="late ticks", value="3")])]
+write("diagnostics.cdr", serialize_message(da))
