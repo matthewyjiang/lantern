@@ -85,6 +85,64 @@ impl Tracked {
     }
 }
 
+/// A camera image, decoded: `width × height` straight-alpha sRGB pixels, rows top first.
+#[derive(Clone, Debug)]
+pub struct Image {
+    pub width: u32,
+    pub height: u32,
+    pub rgba: Vec<u8>,
+}
+
+/// A shape drawn over an image, in its pixel coordinates (origin top-left, y down). Colours are
+/// sRGB 0–1 RGBA as Foxglove gives them; alpha 0 draws nothing (an unset fill).
+#[derive(Clone, Debug, PartialEq)]
+pub enum Annotation {
+    Circle { center: [f32; 2], diameter: f32, thickness: f32, outline: [f32; 4], fill: [f32; 4] },
+    Points { kind: PointsKind, points: Vec<[f32; 2]>, color: [f32; 4], fill: [f32; 4], thickness: f32 },
+    Text { at: [f32; 2], text: String, size: f32, color: [f32; 4], background: [f32; 4] },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PointsKind {
+    /// A dot at each point.
+    Points,
+    /// A closed outline.
+    Loop,
+    /// An open polyline.
+    Strip,
+    /// Separate segments, two points each.
+    Lines,
+}
+
+/// One status of a `diagnostic_msgs/DiagnosticArray`: a named component's health and readings.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Diagnostic {
+    pub level: Level,
+    pub name: String,
+    pub message: String,
+    pub values: Vec<(String, String)>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Level {
+    Ok,
+    Warn,
+    Error,
+    Stale,
+}
+
+impl Level {
+    /// `DiagnosticStatus.level`: 0 OK, 1 WARN, 2 ERROR, 3 STALE; anything else reads as an error.
+    pub fn from_byte(b: u8) -> Level {
+        match b {
+            0 => Level::Ok,
+            1 => Level::Warn,
+            3 => Level::Stale,
+            _ => Level::Error,
+        }
+    }
+}
+
 /// The `lo` and `hi` percentiles (0–1) of `values`, nearest rank; `None` when empty.
 pub fn percentiles(mut values: Vec<f32>, lo: f32, hi: f32) -> Option<(f32, f32)> {
     if values.is_empty() {
@@ -104,6 +162,11 @@ pub struct TfTree {
 }
 
 impl TfTree {
+    /// Adds every transform of `other` (several connections' trees drawn as one).
+    pub fn extend(&mut self, other: &TfTree) {
+        self.parents.extend(other.parents.iter().map(|(c, p)| (c.clone(), p.clone())));
+    }
+
     pub fn insert(&mut self, t: Transform) {
         if t.parent != t.child {
             self.parents.insert(t.child, (t.parent, t.pose));

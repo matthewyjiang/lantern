@@ -7,6 +7,8 @@
 #   so each run ingests one cloud and then draws it; no pixels are read back.
 # - `+readback` adds a PNG readback every frame (`--out`), to show the GPU number excludes it.
 # - `ingest-10hz` sends the cloud at 10 Hz for the whole run: what a live sensor costs.
+# - `camera-10hz` adds a 640x400 camera image and its annotations at 10 Hz: decoded on the source
+#   thread, annotations drawn into a copy and uploaded on the UI thread (in Rune's frame time).
 # - `unpaced` drops `--realtime`: how many frames/s the loop can do.
 # - `+robot` rows load the KUKA Med 7 (fixtures/med7, scripts/robot_fixture.py; 0.5 M vertices),
 #   posed by serve.py's joint states: what the arm adds to the pass, with and without the points.
@@ -64,6 +66,8 @@ SETTINGS=$robot run full+robot "${paced[@]}"
 SETTINGS=$robot run robot-only "${paced[@]}" --scene no-points
 serve --cloud terrain --hz 10
 run ingest-10hz "${paced[@]}"
+serve --cloud terrain --hz 10 --camera
+run camera-10hz "${paced[@]}"
 column -t -s $'\t' out/bench.tsv
 
 

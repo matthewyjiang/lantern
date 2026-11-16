@@ -151,7 +151,9 @@ impl<S: 'static> Compositor<S> for Viewport<S> {
             self.gpu = Some(Gpu::new(device, queue, key));
         }
         let gpu = self.gpu.as_mut().unwrap();
-        gpu.timer.as_mut().map(|t| t.collect());
+        if let Some(t) = gpu.timer.as_mut() {
+            t.collect();
+        }
 
         let slot = slot_rect(&f.rt.instances, &f.rt.marks);
         let mut uploaded = false;

@@ -7,16 +7,20 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-use crate::decode::ColorChoice;
+use crate::decode::{ColorChoice, Kind};
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
-    /// The Foxglove WebSocket server: foxglove_bridge or an SDK app (both default to 8765).
-    pub url: String,
+    /// The Foxglove WebSocket servers to read, all at once: foxglove_bridge or SDK apps (both
+    /// default to port 8765). Topics of the same name on two servers feed one display.
+    pub connections: Vec<String>,
+    /// The single server of settings files from before `connections`: read, never written.
+    #[serde(skip_serializing)]
+    url: Option<String>,
     /// The point cloud topic to draw; `None` draws the first one advertised.
     pub cloud_topic: Option<String>,
-    /// Pose topics the user switched off (new topics show by default).
+    /// Pose, annotation, text and stats topics the user switched off (new topics show by default).
     pub hidden_topics: BTreeSet<String>,
     /// The frame the scene is drawn in; `None` uses the root of the TF tree the data is in.
     pub fixed_frame: Option<String>,
@@ -27,6 +31,11 @@ pub struct Settings {
     pub decimate: u32,
     /// Length of TF and pose axes, metres.
     pub axis_length: f32,
+    /// A pose not refreshed for this long is dropped, seconds; 0 keeps poses until their topic
+    /// goes away.
+    pub pose_timeout: f32,
+    /// How far back each pose's trail reaches, seconds; 0 draws no trails.
+    pub trail: f32,
     pub show_grid: bool,
     pub show_points: bool,
     pub show_frames: bool,
@@ -39,19 +48,30 @@ pub struct Settings {
     pub show_robot: bool,
     /// 0–1.
     pub robot_opacity: f32,
+    /// The `robot_description` topic whose URDF is drawn; `None` uses the first advertised.
+    pub description_topic: Option<String>,
+    /// The image topic to show; `None` shows the first advertised.
+    pub image_topic: Option<String>,
+    pub show_image: bool,
+    pub show_text: bool,
+    pub show_stats: bool,
 }
 
 impl Default for Settings {
     fn default() -> Self {
         Settings {
-            url: "ws://localhost:8765".into(),
+            connections: vec!["ws://localhost:8765".into()],
+            url: None,
             cloud_topic: None,
             hidden_topics: BTreeSet::new(),
             fixed_frame: None,
             color: ColorChoice::Auto,
             point_size: 2.0,
             decimate: 1,
-            axis_length: 0.25,
+            // Table-top scale: a 25 cm axis hides a 10 cm object.
+            axis_length: 0.1,
+            pose_timeout: 2.0,
+            trail: 0.0,
             show_grid: true,
             show_points: true,
             show_frames: true,
@@ -61,6 +81,11 @@ impl Default for Settings {
             joint_topic: None,
             show_robot: true,
             robot_opacity: 1.0,
+            description_topic: None,
+            image_topic: None,
+            show_image: true,
+            show_text: true,
+            show_stats: true,
         }
     }
 }
@@ -73,13 +98,59 @@ fn path() -> Option<PathBuf> {
     Some(base.join("lantern/settings.json"))
 }
 
+/// The longest pose trail, seconds (the UI's longest option): every trail is redrawn whole on
+/// each display rebuild, so a hand-edited hour of a fast topic would be millions of segments.
+const MAX_TRAIL: f32 = 60.0;
+
 impl Settings {
+    /// The setting that picks the one topic drawn, for kinds drawn one topic at a time; `None`
+    /// for kinds where every topic is drawn (each can be hidden instead).
+    pub fn picked(&self, kind: Kind) -> Option<&Option<String>> {
+        match kind {
+            Kind::PointCloud => Some(&self.cloud_topic),
+            Kind::JointStates => Some(&self.joint_topic),
+            Kind::Image => Some(&self.image_topic),
+            Kind::RobotDescription => Some(&self.description_topic),
+            Kind::Transforms | Kind::Poses | Kind::Annotations | Kind::Text | Kind::Stats => None,
+        }
+    }
+
+    pub fn picked_mut(&mut self, kind: Kind) -> Option<&mut Option<String>> {
+        match kind {
+            Kind::PointCloud => Some(&mut self.cloud_topic),
+            Kind::JointStates => Some(&mut self.joint_topic),
+            Kind::Image => Some(&mut self.image_topic),
+            Kind::RobotDescription => Some(&mut self.description_topic),
+            Kind::Transforms | Kind::Poses | Kind::Annotations | Kind::Text | Kind::Stats => None,
+        }
+    }
+
+    /// Values a hand-edited file can get wrong, put right; an old single `url` becomes the
+    /// connection list.
+    fn checked(mut self) -> Settings {
+        if self.trail > MAX_TRAIL {
+            eprintln!("lantern: trail {} s in the settings file is over the {MAX_TRAIL} s limit; using {MAX_TRAIL} s", self.trail);
+        }
+        if let Some(url) = self.url.take()
+            && !self.connections.contains(&url)
+        {
+            self.connections = vec![url];
+        }
+        Settings {
+            // Every n-th point, so 0 would draw nothing (and divide by zero).
+            decimate: self.decimate.max(1),
+            robot_opacity: self.robot_opacity.clamp(0.0, 1.0),
+            pose_timeout: self.pose_timeout.max(0.0),
+            trail: self.trail.clamp(0.0, MAX_TRAIL),
+            ..self
+        }
+    }
+
     pub fn load() -> Settings {
         let Some(path) = path() else { return Settings::default() };
         match std::fs::read_to_string(&path) {
             Ok(text) => match serde_json::from_str::<Settings>(&text) {
-                // Every n-th point, so 0 would draw nothing (and divide by zero).
-                Ok(s) => Settings { decimate: s.decimate.max(1), robot_opacity: s.robot_opacity.clamp(0.0, 1.0), ..s },
+                Ok(s) => s.checked(),
                 Err(e) => {
                     eprintln!("lantern: {} doesn't parse ({e}); using defaults", path.display());
                     Settings::default()
@@ -104,5 +175,20 @@ impl Settings {
         if let Err(e) = write() {
             eprintln!("lantern: can't save settings to {} ({e})", path.display());
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Files written before several connections name one `url`; that's the list now, and a file
+    // with the list keeps it.
+    #[test]
+    fn an_old_single_url_becomes_the_connection_list() {
+        let old: Settings = serde_json::from_str(r#"{"url": "ws://robot:9090"}"#).unwrap();
+        assert_eq!(old.checked().connections, ["ws://robot:9090"]);
+        let new: Settings = serde_json::from_str(r#"{"connections": ["ws://a:1", "ws://b:2"]}"#).unwrap();
+        assert_eq!(new.checked().connections, ["ws://a:1", "ws://b:2"]);
     }
 }
