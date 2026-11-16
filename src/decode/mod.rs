@@ -37,11 +37,18 @@ pub enum Decoded {
     Poses(Poses),
 }
 
-struct Decoder {
+pub struct Decoder {
     encoding: &'static str,
     schema: &'static str,
-    kind: Kind,
+    pub kind: Kind,
     decode: fn(&[u8], &ColorChoice) -> Result<Decoded, DecodeError>,
+}
+
+impl Decoder {
+    /// Decodes one message. `color` only matters for point clouds.
+    pub fn decode(&self, payload: &[u8], color: &ColorChoice) -> Result<Decoded, DecodeError> {
+        (self.decode)(payload, color)
+    }
 }
 
 /// ROS 2 messages arrive as `cdr` through foxglove_bridge; Foxglove's own schemas as
@@ -61,19 +68,10 @@ const DECODERS: &[Decoder] = &[
     Decoder { encoding: "protobuf", schema: "foxglove.Odometry", kind: Kind::Poses, decode: foxglove::odometry },
 ];
 
-fn find(encoding: &str, schema: &str) -> Option<&'static Decoder> {
+/// The decoder for a channel's encoding and schema, or `None` if Lantern can't read it. The
+/// source looks it up once, when the channel is advertised.
+pub fn decoder_for(encoding: &str, schema: &str) -> Option<&'static Decoder> {
     DECODERS.iter().find(|d| d.encoding == encoding && d.schema == schema)
-}
-
-/// What a channel with this encoding and schema would feed, or `None` if Lantern can't read it.
-pub fn kind_of(encoding: &str, schema: &str) -> Option<Kind> {
-    find(encoding, schema).map(|d| d.kind)
-}
-
-/// Decodes one message. `color` only matters for point clouds.
-pub fn decode(encoding: &str, schema: &str, payload: &[u8], color: &ColorChoice) -> Result<Decoded, DecodeError> {
-    let d = find(encoding, schema).ok_or_else(|| DecodeError::new(format!("no decoder for {schema} ({encoding})")))?;
-    (d.decode)(payload, color)
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -98,6 +96,10 @@ impl std::error::Error for DecodeError {}
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn decode(encoding: &str, schema: &str, payload: &[u8], color: &ColorChoice) -> Result<Decoded, DecodeError> {
+        decoder_for(encoding, schema).unwrap_or_else(|| panic!("no decoder for {schema}")).decode(payload, color)
+    }
     use crate::scene::PointColor;
     use glam::DVec3;
 

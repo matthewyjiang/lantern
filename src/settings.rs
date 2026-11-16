@@ -66,10 +66,14 @@ impl Settings {
     pub fn load() -> Settings {
         let Some(path) = path() else { return Settings::default() };
         match std::fs::read_to_string(&path) {
-            Ok(text) => serde_json::from_str(&text).unwrap_or_else(|e| {
-                eprintln!("lantern: {} doesn't parse ({e}); using defaults", path.display());
-                Settings::default()
-            }),
+            Ok(text) => match serde_json::from_str::<Settings>(&text) {
+                // Every n-th point, so 0 would draw nothing (and divide by zero).
+                Ok(s) => Settings { decimate: s.decimate.max(1), ..s },
+                Err(e) => {
+                    eprintln!("lantern: {} doesn't parse ({e}); using defaults", path.display());
+                    Settings::default()
+                }
+            },
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Settings::default(),
             Err(e) => {
                 eprintln!("lantern: can't read {} ({e}); using defaults", path.display());

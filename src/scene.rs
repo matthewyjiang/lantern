@@ -85,6 +85,16 @@ impl Tracked {
     }
 }
 
+/// The `lo` and `hi` percentiles (0–1) of `values`, nearest rank; `None` when empty.
+pub fn percentiles(mut values: Vec<f32>, lo: f32, hi: f32) -> Option<(f32, f32)> {
+    if values.is_empty() {
+        return None;
+    }
+    values.sort_by(f32::total_cmp);
+    let at = |p: f32| values[((values.len() - 1) as f32 * p).round() as usize];
+    Some((at(lo), at(hi)))
+}
+
 /// The latest transform for every child frame: enough to place data from any connected frame
 /// in a display frame. No history: Lantern draws the newest message of each topic with the
 /// newest transforms, not a time-synchronised past.
