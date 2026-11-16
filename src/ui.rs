@@ -11,6 +11,7 @@ use rune::{Color, Cx, Drag, El, Phase, PointerButton, ScrollSpec, Tx, WheelEvent
 use crate::app::State;
 use crate::decode::{ColorChoice, Kind};
 use crate::scene::PointColor;
+use crate::settings::Settings;
 use crate::source::Status;
 use crate::viewport::{self, Shade};
 
@@ -102,7 +103,7 @@ fn glass() -> El {
 /// How many points are drawn, so Density and the Point cloud toggle read back.
 fn point_badge(s: &State) -> El {
     let t = tok::theme(true);
-    let label = match &s.cloud {
+    let label = match &s.received.cloud {
         None => "No point cloud".to_string(),
         Some((topic, c)) => {
             let (total, drawn) = (c.points.len(), s.drawn_points());
@@ -118,11 +119,12 @@ fn point_badge(s: &State) -> El {
 
 /// Says why the view is empty or incomplete; absent when everything draws.
 fn status_chip(s: &State) -> Option<El> {
-    let msg = match (&s.status, &s.display.problem) {
+    let msg = match (&s.received.status, &s.display.problem) {
         (Status::Failed { error }, _) => format!("Can't reach {}: {error}", s.settings.url),
         (Status::Connecting, _) => format!("Connecting to {}…", s.settings.url),
         (Status::Connected { .. }, Some(p)) => p.clone(),
-        (Status::Connected { .. }, None) if s.channels.is_empty() => "Connected; the server offers no topics yet".into(),
+        (Status::Connected { .. }, None) if s.received.server_warning.is_some() => format!("Server: {}", s.received.server_warning.as_deref().unwrap_or_default()),
+        (Status::Connected { .. }, None) if s.received.channels.is_empty() => "Connected; the server offers no topics yet".into(),
         _ => return None,
     };
     Some(glass().px(10.0).py(7.0).max_w(520.0).child(
@@ -154,7 +156,7 @@ fn legend(s: &State) -> Option<El> {
         (0.0, "#30123b"), (0.1, "#4662d7"), (0.2, "#36aaf9"), (0.3, "#1ae4b6"), (0.4, "#72fe5e"),
         (0.5, "#c8ef34"), (0.6, "#faba39"), (0.7, "#f66b19"), (0.8, "#ca2a04"), (0.9, "#930c01"), (1.0, "#7a0403"),
     ];
-    let field = match s.cloud.as_ref().map(|(_, c)| &c.color) {
+    let field = match s.received.cloud.as_ref().map(|(_, c)| &c.color) {
         Some(PointColor::Field { name, .. }) => name.clone(),
         _ => String::new(),
     };
@@ -200,7 +202,7 @@ fn header(s: &State) -> El {
 
 /// The connection's colour and one-line summary.
 fn connection_line(s: &State) -> (Color, String) {
-    match &s.status {
+    match &s.received.status {
         Status::Connected { server } if server.is_empty() => (oklch(0.78, 0.17, 150.0), format!("Connected · {}", host(&s.settings.url))),
         Status::Connected { server } => (oklch(0.78, 0.17, 150.0), format!("{server} · {}", host(&s.settings.url))),
         Status::Connecting => (oklch(0.78, 0.15, 70.0), format!("Connecting to {}", host(&s.settings.url))),
@@ -224,8 +226,8 @@ fn sidebar(s: &State) -> El {
 
     let cloud = section("Point cloud")
         .child(field("Color", color_choices("color", s, false)))
-        .child(field("Point size (pt)", segmented("size", &[(1.0, "1"), (2.0, "2"), (3.0, "3"), (4.0, "4")], st.point_size, |s, v| s.settings.point_size = v)))
-        .child(field("Density", segmented("decimate", &[(1, "All"), (2, "½"), (4, "¼"), (8, "⅛")], st.decimate, |s, v| s.settings.decimate = v)));
+        .child(point_size_field("size", st))
+        .child(density_field("decimate", st));
 
     let camera = section("Camera").child(
         row().gap(8.0)
@@ -244,7 +246,7 @@ fn sidebar(s: &State) -> El {
 fn color_choices(key: &'static str, s: &State, full: bool) -> El {
     let mut options = vec![(ColorChoice::Auto, "Auto".to_string()), (ColorChoice::Height, "Height".to_string())];
     if full {
-        let fields = s.cloud.as_ref().map(|(_, c)| c.fields.clone()).unwrap_or_default();
+        let fields = s.received.cloud.as_ref().map(|(_, c)| c.fields.clone()).unwrap_or_default();
         for f in fields.into_iter().filter(|f| !matches!(f.as_str(), "x" | "y" | "z")) {
             options.push((ColorChoice::Field(f.clone()), f));
         }
@@ -258,7 +260,7 @@ fn color_choices(key: &'static str, s: &State, full: bool) -> El {
             .h(28.0).px(12.0).center().radius(tok::radius::MD)
             .on_press(move |s: &mut State| s.settings.color = set.clone())
             .child(text(label).font(type_::LABEL).color(if chosen { t.text } else { t.text_secondary }));
-        chip = if chosen { chip.fill(oklch(0.36, 0.008, 265.0)).shadow(1.0, 2.0, t.edge) } else { chip.fill(t.control_track).hover(t.hover).press(t.press) };
+        chip = if chosen { selected(chip) } else { chip.fill(t.control_track).hover(t.hover).press(t.press) };
         wrap = wrap.child(chip);
     }
     wrap
@@ -307,7 +309,7 @@ fn connection_section(s: &State) -> El {
                 }),
         );
     let connect = button("connect", "Connect", |s| s.settings.url = s.url_edit.text.trim().to_string()).grow(0.0).w(92.0).min_w(92.0);
-    let detail = match &s.status {
+    let detail = match &s.received.status {
         Status::Failed { error } => error.clone(),
         _ => line,
     };
@@ -322,12 +324,12 @@ fn connection_section(s: &State) -> El {
 fn topics_section(s: &State) -> El {
     let t = tok::theme(true);
     let sec = section("Topics");
-    if s.channels.is_empty() {
+    if s.received.channels.is_empty() {
         return sec.child(text("No topics yet. Topics appear here as the server advertises them.").font(type_::LABEL).color(t.text_secondary).max_lines(3));
     }
     let cloud_topic = s.cloud_topic();
     let mut list = col().key("topics").radius(tok::radius::MD).fill(t.card).border(1.0, t.card_border);
-    for (i, c) in s.channels.iter().enumerate() {
+    for (i, c) in s.received.channels.iter().enumerate() {
         let key = format!("topic-{i}");
         let (badge, control): (El, El) = match c.kind {
             Some(Kind::PointCloud) => {
@@ -346,7 +348,7 @@ fn topics_section(s: &State) -> El {
         let mut info = col().gap(2.0).grow(1.0).min_w(0.0)
             .child(text(c.topic.clone()).font(MONO).color(if c.kind.is_some() { t.text } else { t.text_secondary }).truncate())
             .child(text(format!("{} · {}", c.schema, c.encoding)).font(SMALL).color(t.text_secondary).truncate());
-        if let Some(err) = s.errors.get(&c.topic) {
+        if let Some(err) = s.received.errors.get(&c.topic) {
             info = info.child(text(err.clone()).key(format!("{key}-error")).font(SMALL).color(oklch(0.72, 0.17, 25.0)).max_lines(2));
         }
         if i > 0 {
@@ -354,8 +356,8 @@ fn topics_section(s: &State) -> El {
         }
         list = list.child(row().key(key).px(12.0).py(9.0).gap(10.0).items_center().child(badge).child(info).child(control));
     }
-    let supported = s.channels.iter().filter(|c| c.kind.is_some()).count();
-    sec.child(text(format!("{} topics, {supported} Lantern can draw", s.channels.len())).font(type_::LABEL).color(t.text_secondary)).child(list)
+    let supported = s.received.channels.iter().filter(|c| c.kind.is_some()).count();
+    sec.child(text(format!("{} topics, {supported} Lantern can draw", s.received.channels.len())).font(type_::LABEL).color(t.text_secondary)).child(list)
 }
 
 fn toggle_in(set: &mut BTreeSet<String>, topic: &str) {
@@ -382,7 +384,7 @@ fn unsupported_badge() -> El {
 
 fn frames_section(s: &State) -> El {
     let t = tok::theme(true);
-    let frames = s.tf.frames();
+    let frames = s.received.tf.frames();
     let auto_label = match (&s.settings.fixed_frame, &s.display.fixed) {
         (None, Some(f)) => format!("Auto ({f})"),
         _ => "Auto".to_string(),
@@ -411,9 +413,18 @@ fn display_section(s: &State) -> El {
     let st = &s.settings;
     section("Display")
         .child(field("Point color", color_choices("color-full", s, true)))
-        .child(field("Point size (pt)", segmented("size-full", &[(1.0, "1"), (2.0, "2"), (3.0, "3"), (4.0, "4")], st.point_size, |s, v| s.settings.point_size = v)))
-        .child(field("Density", segmented("decimate-full", &[(1, "All"), (2, "½"), (4, "¼"), (8, "⅛")], st.decimate, |s, v| s.settings.decimate = v)))
+        .child(point_size_field("size-full", st))
+        .child(density_field("decimate-full", st))
         .child(toggle_row("grid-full", "Grid", st.show_grid, |s| s.settings.show_grid ^= true))
+}
+
+// The side panel and the Settings page both offer these (keyed apart).
+fn point_size_field(key: &'static str, st: &Settings) -> El {
+    field("Point size (pt)", segmented(key, &[(1.0, "1"), (2.0, "2"), (3.0, "3"), (4.0, "4")], st.point_size, |s, v| s.settings.point_size = v))
+}
+
+fn density_field(key: &'static str, st: &Settings) -> El {
+    field("Density", segmented(key, &[(1, "All"), (2, "½"), (4, "¼"), (8, "⅛")], st.decimate, |s, v| s.settings.decimate = v))
 }
 
 // ---- controls ----
@@ -488,6 +499,11 @@ fn radio_row(key: &str, label: &str, on: bool, pick: impl Fn(&mut State) + 'stat
 }
 
 /// Equal-width options in a track; the chosen one sits raised.
+/// The chosen chip or segment: raised above its track.
+fn selected(e: El) -> El {
+    e.fill(oklch(0.36, 0.008, 265.0)).shadow(1.0, 2.0, tok::theme(true).edge)
+}
+
 fn segmented<T: Copy + PartialEq + 'static>(key: &'static str, options: &[(T, &str)], current: T, set: fn(&mut State, T)) -> El {
     let t = tok::theme(true);
     let mut track = row().key(key).role("radiogroup").h(30.0).padding(2.0).gap(2.0).radius(tok::radius::MD).fill(t.control_track);
@@ -498,7 +514,7 @@ fn segmented<T: Copy + PartialEq + 'static>(key: &'static str, options: &[(T, &s
             .on_press(move |s: &mut State| set(s, value))
             .child(text(label).font(type_::LABEL).color(if chosen { t.text } else { t.text_secondary }));
         seg = if chosen {
-            seg.fill(oklch(0.36, 0.008, 265.0)).shadow(1.0, 2.0, t.edge)
+            selected(seg)
         } else {
             seg.hover(t.hover).press(t.press)
         };

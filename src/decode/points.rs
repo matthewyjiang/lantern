@@ -2,7 +2,7 @@
 //! named fields at byte offsets) into Lantern's `[x, y, z, colour]` points.
 
 use super::DecodeError;
-use crate::scene::{PointCloud, PointColor, Pose};
+use crate::scene::{percentiles, PointCloud, PointColor, Pose};
 
 /// The user's colour choice for clouds.
 #[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -161,12 +161,10 @@ fn unit_byte(v: f32, num: Num) -> u32 {
 /// points: one hot return shouldn't wash the rest of the cloud into a single colour.
 fn robust_range(points: &[[f32; 4]]) -> (f32, f32) {
     let step = points.len().div_ceil(1 << 16).max(1);
-    let mut v: Vec<f32> = points.iter().step_by(step).map(|p| p[3]).filter(|w| w.is_finite()).collect();
-    if v.is_empty() {
-        return (0.0, 1.0);
+    let v: Vec<f32> = points.iter().step_by(step).map(|p| p[3]).filter(|w| w.is_finite()).collect();
+    match percentiles(v, 0.01, 0.99) {
+        Some((lo, hi)) if hi > lo => (lo, hi),
+        Some((lo, _)) => (lo, lo + 1.0),
+        None => (0.0, 1.0),
     }
-    v.sort_by(f32::total_cmp);
-    let q = |p: f64| v[((v.len() - 1) as f64 * p).round() as usize];
-    let (lo, hi) = (q(0.01), q(0.99));
-    if hi > lo { (lo, hi) } else { (lo, lo + 1.0) }
 }

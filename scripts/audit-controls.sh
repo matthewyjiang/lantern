@@ -23,15 +23,16 @@ at=3
 crop_side=1948x1560+20+20
 crop_settings=1640x1560+20+20
 
-snap() { # name, events JSON array
+snap() { # name, events JSON array, [settings JSON to start from]
   printf '%s\n' "$2" > "$dir/$1.json"
   rm -rf "$cfg/lantern"
+  [[ -n ${3:-} ]] && mkdir -p "$cfg/lantern" && printf '%s\n' "$3" > "$cfg/lantern/settings.json"
   XDG_CONFIG_HOME=$cfg "$bin" --realtime --script "$dir/$1.json" --snap "$dir/$1.png" --at "$at" > "$dir/$1.log" 2>&1 \
     || { echo "$1: run failed, see $dir/$1.log"; exit 1; }
 }
 fail=0
-check() { # baseline, crop, name, expect, events
-  snap "$3" "$5"
+check() { # baseline, crop, name, expect, events, [settings JSON]
+  snap "$3" "$5" "${6:-}"
   local px; px=$(compare -metric AE -fuzz 1% -extract "$2" "$dir/$1.png" "$dir/$3.png" null: 2>&1 | cut -d' ' -f1 || true)
   local ok=PASS
   if [[ $4 == changes && $px == 0 ]] || [[ $4 == same && $px != 0 ]]; then ok=FAIL; fail=1; fi
@@ -79,5 +80,10 @@ sett color-field      changes "$(send color-full-1)"
 sett size-full        changes "$(send size-full-3)"
 sett density-full     changes "$(send decimate-full-2)"
 sett grid-full        changes "$(send grid-full)"
-sett url-enter        changes "[$open, $(ev 1.0 url), {\"t\": 1.1, \"type\": \"key\", \"ctrl\": true, \"name\": \"a\"}, {\"t\": 1.2, \"type\": \"type\", \"text\": \"ws://127.0.0.1:9\"}, {\"t\": 1.5, \"type\": \"key\", \"name\": \"Enter\"}]"
+sett url-enter        changes "[$open, $(ev 0.6 url), {\"t\": 0.7, \"type\": \"key\", \"cmd\": true, \"name\": \"a\"}, {\"t\": 0.8, \"type\": \"type\", \"text\": \"ws://127.0.0.1:9\"}, {\"t\": 2.2, \"type\": \"key\", \"name\": \"Enter\"}]"
+# Start on an unreachable address (its connect hangs until the 3 s timeout), switch to the
+# live server at 2.2 s: the dead connection's late failure must not blank the new one.
+dead='{"url": "ws://10.255.255.1:8765"}'
+switch="[$open, $(ev 0.6 url), {\"t\": 0.7, \"type\": \"key\", \"cmd\": true, \"name\": \"a\"}, {\"t\": 0.8, \"type\": \"type\", \"text\": \"ws://127.0.0.1:8765\"}, {\"t\": 2.2, \"type\": \"key\", \"name\": \"Enter\"}]"
+at=6 sett switch-from-dead  same    "$switch" "$dead"
 exit $fail

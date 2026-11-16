@@ -23,6 +23,11 @@ use crate::scene::PointCloud;
 /// The effect-slot tag the viewport paints.
 pub const MARK: u32 = 1;
 
+/// The most points one cloud can have: all of them bind as one storage buffer of 16-byte
+/// points, and Rune asks wgpu for its default (and downlevel) 128 MiB binding size. The app
+/// refuses larger clouds with a per-topic error (`State::apply`).
+pub const MAX_POINTS: usize = (128 << 20) / 16;
+
 const COLOR_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8UnormSrgb;
 const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
 /// How points get their colour, with the range the colour ramp spans.
@@ -261,6 +266,8 @@ struct Uploaded {
 
 impl Gpu {
     fn new(device: &wgpu::Device, queue: &wgpu::Queue, key: DeviceKey) -> Gpu {
+        let limit = device.limits().max_storage_buffer_binding_size;
+        assert!(limit >= (MAX_POINTS * 16) as u64, "this device binds {limit} B of storage, under MAX_POINTS × 16 B");
         let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("viewport"),
             source: wgpu::ShaderSource::Wgsl(format!("{CLIP_WGSL}\n{}", include_str!("viewport.wgsl")).into()),
@@ -351,50 +358,27 @@ impl Gpu {
 
     /// Uploads a changed cloud or line set; true when it uploaded a new cloud.
     fn ensure_scene(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, cloud: Option<&Arc<PointCloud>>, lines: &Arc<Lines>) -> bool {
-        let same_cloud = |u: &Uploaded| match (&u.cloud, cloud) {
+        let old = self.scene.take();
+        let same_cloud = old.as_ref().is_some_and(|u| match (&u.cloud, cloud) {
             (Some(a), Some(b)) => Arc::ptr_eq(a, b),
             (None, None) => true,
             _ => false,
-        };
-        let (cloud_ok, lines_ok) = self.scene.as_ref().map_or((false, false), |u| (same_cloud(u), Arc::ptr_eq(&u.lines, lines)));
-        if cloud_ok && lines_ok {
+        });
+        let same_lines = old.as_ref().is_some_and(|u| Arc::ptr_eq(&u.lines, lines));
+        if same_cloud && same_lines {
+            self.scene = old;
             return false;
         }
-        // An empty storage binding is invalid; an empty cloud or line set binds one zero vec4.
-        let storage = |label, bytes: &[u8]| device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some(label),
-            contents: if bytes.is_empty() { &[0; 48] } else { bytes },
-            usage: wgpu::BufferUsages::STORAGE,
-        });
-        let old = self.scene.take();
-        let points = match old.as_ref().filter(|_| cloud_ok) {
-            Some(u) => u.points.clone(),
-            None => {
+        let points = match &old {
+            Some(u) if same_cloud => u.points.clone(),
+            _ => {
                 let bytes: &[u8] = cloud.map_or(&[], |c| bytemuck::cast_slice(&c.points));
-                let limit = device.limits().max_storage_buffer_binding_size as usize;
-                assert!(
-                    bytes.len() <= limit,
-                    "point cloud of {} points is {} bytes, over this device's max_storage_buffer_binding_size of {limit}",
-                    bytes.len() / 16, bytes.len(),
-                );
-                // Reuse the last cloud's buffer when this one fits: a sensor's clouds are about
-                // the same size, and a fresh 22 MB buffer per cloud costs its page faults again.
-                match old.as_ref().filter(|u| u.points.size() >= bytes.len().max(48) as u64) {
-                    Some(u) if !bytes.is_empty() => {
-                        queue.write_buffer(&u.points, 0, bytes);
-                        u.points.clone()
-                    }
-                    _ => device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                        label: Some("viewport points"),
-                        contents: if bytes.is_empty() { &[0; 48] } else { bytes },
-                        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
-                    }),
-                }
+                storage(device, queue, "viewport points", old.as_ref().map(|u| &u.points), bytes)
             }
         };
-        let segs = match old.as_ref().filter(|_| lines_ok) {
-            Some(u) => u.segs.clone(),
-            None => storage("viewport segments", bytemuck::cast_slice(&lines.0)),
+        let segs = match &old {
+            Some(u) if same_lines => u.segs.clone(),
+            _ => storage(device, queue, "viewport segments", old.as_ref().map(|u| &u.segs), bytemuck::cast_slice(&lines.0)),
         };
         let group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("viewport scene"),
@@ -406,7 +390,7 @@ impl Gpu {
             ],
         });
         self.scene = Some(Uploaded { cloud: cloud.cloned(), points, lines: Arc::clone(lines), segs, group });
-        !cloud_ok && cloud.is_some()
+        !same_cloud && cloud.is_some()
     }
 
     /// Records the timestamped 3D pass into the offscreen target.
@@ -507,6 +491,24 @@ const RING: usize = 8;
 const RESOLVE_STRIDE: u64 = wgpu::QUERY_RESOLVE_BUFFER_ALIGNMENT;
 
 /// GPU duration of the 3D pass, from begin/end-of-pass timestamps read back asynchronously.
+/// `bytes` in a storage buffer: `old` refilled when they fit, else a new buffer. A sensor's
+/// clouds are about the same size, and refilling halves a 1.37 M-point cloud's upload against a
+/// new 22 MB buffer each time (README, "Ingesting a cloud"). An empty binding is invalid, so
+/// empty data binds 48 zero bytes (one line segment, three points).
+fn storage(device: &wgpu::Device, queue: &wgpu::Queue, label: &str, old: Option<&wgpu::Buffer>, bytes: &[u8]) -> wgpu::Buffer {
+    match old.filter(|b| !bytes.is_empty() && b.size() >= bytes.len() as u64) {
+        Some(b) => {
+            queue.write_buffer(b, 0, bytes);
+            b.clone()
+        }
+        None => device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some(label),
+            contents: if bytes.is_empty() { &[0; 48] } else { bytes },
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+        }),
+    }
+}
+
 struct GpuTimer {
     set: wgpu::QuerySet,
     resolve: wgpu::Buffer,

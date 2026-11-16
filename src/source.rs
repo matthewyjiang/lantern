@@ -14,10 +14,11 @@ use std::time::Duration;
 use serde::Deserialize;
 use tungstenite::client::IntoClientRequest;
 use tungstenite::http::HeaderValue;
+use tungstenite::error::ProtocolError;
 use tungstenite::protocol::WebSocketConfig;
 use tungstenite::{Bytes, Message, WebSocket};
 
-use crate::decode::{self, ColorChoice, Decoded, Kind};
+use crate::decode::{self, ColorChoice, Decoded, Decoder, Kind};
 
 /// What a source tells the app, from the source's thread.
 pub enum Event {
@@ -27,10 +28,13 @@ pub enum Event {
     Data { topic: String, data: Decoded },
     /// A message on `topic` couldn't be decoded; the topic's last good data stays.
     DecodeFailed { topic: String, error: String },
+    /// A warning or error the server reported (a dropped message, a failed subscription).
+    ServerWarning(String),
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub enum Status {
+    #[default]
     Connecting,
     Connected { server: String },
     /// The connection failed or dropped; the source retries on its own.
@@ -60,18 +64,29 @@ pub trait Source: Send {
     fn want(&self, wanted: Wanted);
 }
 
+/// Opens the source for `url`; dropping it disconnects. Every source is a Foxglove WebSocket
+/// server today; another transport dispatches on the URL's scheme here.
+pub fn open(url: &str, sink: Sink) -> Box<dyn Source> {
+    Box::new(FoxgloveWs::spawn(url.to_string(), sink))
+}
+
 /// Subprotocols offered, newest first: the Foxglove SDKs (0.x) speak `foxglove.sdk.v1`;
 /// foxglove_bridge releases before the SDK rewrite speak `foxglove.websocket.v1`. Both have
 /// the same messages. (`foxglove.sdk.v1.1` moves schemas into a table; Lantern doesn't need
 /// schemas, as it decodes by schema name.)
 const SUBPROTOCOLS: &str = "foxglove.sdk.v1, foxglove.websocket.v1";
 /// The largest message Lantern accepts: 5.6 M points at the 48-byte point_step Ouster drivers
-/// publish. A larger one fails the connection with tungstenite's "Message too long: N >
-/// 268435456", shown as the connection status.
+/// publish, 8.4 M (the GPU's cap, `viewport::MAX_POINTS`) at 32 bytes. A larger one fails the
+/// connection with tungstenite's "Message too long: N > 268435456", shown as the status.
 const MAX_MESSAGE: usize = 256 << 20;
-/// How long a blocked read waits before checking for a stop or a new subscription.
+// Latencies the user sees, chosen rather than measured: none caps throughput (a busy socket
+// never waits on POLL; data is read as it arrives).
+/// How long an idle read waits before checking for a stop or a new subscription: a toggle
+/// reaches the server within three frames.
 const POLL: Duration = Duration::from_millis(50);
+/// How long an unreachable host (a robot that's off) shows "Connecting" before "Can't reach".
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
+/// The wait between attempts once a connection fails or drops.
 const RETRY: Duration = Duration::from_secs(1);
 
 /// A Foxglove WebSocket client on its own thread. Dropping it disconnects.
@@ -81,13 +96,13 @@ pub struct FoxgloveWs {
 }
 
 impl FoxgloveWs {
-    pub fn spawn(url: String, wanted: Wanted, sink: Sink) -> FoxgloveWs {
+    pub fn spawn(url: String, sink: Sink) -> FoxgloveWs {
         let (tx, rx) = mpsc::channel();
         let stop = Arc::new(AtomicBool::new(false));
         let stopped = Arc::clone(&stop);
         std::thread::Builder::new()
             .name("foxglove-ws".into())
-            .spawn(move || run(&url, wanted, &rx, &stopped, &sink))
+            .spawn(move || run(&url, Wanted::default(), &rx, &stopped, &sink))
             .expect("spawning the Foxglove WebSocket thread");
         FoxgloveWs { wanted: tx, stop }
     }
@@ -140,17 +155,29 @@ fn connect(url: &str) -> Result<(WebSocket<TcpStream>, String), String> {
     request.headers_mut().insert("Sec-WebSocket-Protocol", HeaderValue::from_static(SUBPROTOCOLS));
     let host = request.uri().host().unwrap_or_default().trim_matches(['[', ']']).to_string();
     let port = request.uri().port_u16().unwrap_or(80);
-    let addr = (host.as_str(), port).to_socket_addrs().map_err(|e| format!("{host}: {e}"))?
-        .next().ok_or_else(|| format!("{host}: no address"))?;
-    let stream = TcpStream::connect_timeout(&addr, CONNECT_TIMEOUT).map_err(|e| format!("{addr}: {e}"))?;
+    // Every address in turn: `localhost` often resolves to ::1 first, and the Foxglove SDK
+    // listens on 127.0.0.1.
+    let mut error = format!("{host}: no address");
+    let mut stream = None;
+    for addr in (host.as_str(), port).to_socket_addrs().map_err(|e| format!("{host}: {e}"))? {
+        match TcpStream::connect_timeout(&addr, CONNECT_TIMEOUT) {
+            Ok(s) => {
+                stream = Some(s);
+                break;
+            }
+            Err(e) => error = format!("{addr}: {e}"),
+        }
+    }
+    let stream = stream.ok_or(error)?;
     stream.set_read_timeout(Some(CONNECT_TIMEOUT)).ok();
     stream.set_nodelay(true).ok();
     let config = WebSocketConfig::default().max_message_size(Some(MAX_MESSAGE)).max_frame_size(Some(MAX_MESSAGE));
-    let (mut socket, response) = tungstenite::client::client_with_config(request, stream, Some(config))
-        .map_err(|e| format!("WebSocket handshake with {url}: {e}"))?;
-    if response.headers().get("Sec-WebSocket-Protocol").is_none() {
-        return Err(format!("{url} is a WebSocket server but not a Foxglove one (no subprotocol accepted)"));
-    }
+    let (mut socket, _) = tungstenite::client::client_with_config(request, stream, Some(config)).map_err(|e| match e {
+        tungstenite::HandshakeError::Failure(tungstenite::Error::Protocol(ProtocolError::SecWebSocketSubProtocolError(_))) => {
+            format!("it's a WebSocket server, but not a Foxglove one (it accepted neither {SUBPROTOCOLS})")
+        }
+        e => format!("WebSocket handshake with {url}: {e}"),
+    })?;
     let server = match socket.read().map_err(|e| e.to_string())? {
         Message::Text(t) => match serde_json::from_str::<Op>(&t) {
             Ok(Op::ServerInfo { name }) => name,
@@ -182,6 +209,9 @@ struct Advertised {
     encoding: String,
     #[serde(default)]
     schema_name: String,
+    /// Set on advertise; `None` when Lantern has no decoder for the channel.
+    #[serde(skip)]
+    decoder: Option<&'static Decoder>,
 }
 
 struct Session<'a> {
@@ -236,7 +266,8 @@ impl<'a> Session<'a> {
     fn on_op(&mut self, text: &str, wanted: &Wanted) -> Result<(), String> {
         match serde_json::from_str::<Op>(text) {
             Ok(Op::Advertise { channels }) => {
-                for c in channels {
+                for mut c in channels {
+                    c.decoder = decode::decoder_for(&c.encoding, &c.schema_name);
                     self.channels.insert(c.id, c);
                 }
                 self.publish_channels();
@@ -251,7 +282,7 @@ impl<'a> Session<'a> {
                 }
                 self.publish_channels();
             }
-            Ok(Op::Status { level, message }) if level >= 1 => eprintln!("lantern: server status (level {level}): {message}"),
+            Ok(Op::Status { level, message }) if level >= 1 => (self.sink)(Event::ServerWarning(message)),
             Ok(_) => {}
             Err(e) => eprintln!("lantern: ignoring a server message I can't parse ({e}): {text:.120}"),
         }
@@ -268,16 +299,17 @@ impl<'a> Session<'a> {
         let Some(&ch) = self.subs.get(&sub) else { return };
         let payload = b.slice(13..);
         let Some(c) = self.channels.get(&ch) else { return };
-        if decode::kind_of(&c.encoding, &c.schema_name) == Some(Kind::PointCloud) {
+        if c.decoder.is_some_and(|d| d.kind == Kind::PointCloud) {
             self.last_cloud.insert(ch, payload.clone());
         }
         self.deliver(ch, &payload, color);
     }
 
     fn deliver(&self, ch: u64, payload: &[u8], color: &ColorChoice) {
-        let Some(c) = self.channels.get(&ch) else { return };
+        // Only channels with a decoder are subscribed (`resubscribe`).
+        let Some((c, d)) = self.channels.get(&ch).and_then(|c| Some((c, c.decoder?))) else { return };
         let topic = c.topic.clone();
-        (self.sink)(match decode::decode(&c.encoding, &c.schema_name, payload, color) {
+        (self.sink)(match d.decode(payload, color) {
             Ok(data) => Event::Data { topic, data },
             Err(e) => Event::DecodeFailed { topic, error: e.to_string() },
         });
@@ -285,7 +317,7 @@ impl<'a> Session<'a> {
 
     fn publish_channels(&self) {
         let mut list: Vec<Channel> = self.channels.values()
-            .map(|c| Channel { topic: c.topic.clone(), schema: c.schema_name.clone(), encoding: c.encoding.clone(), kind: decode::kind_of(&c.encoding, &c.schema_name) })
+            .map(|c| Channel { topic: c.topic.clone(), schema: c.schema_name.clone(), encoding: c.encoding.clone(), kind: c.decoder.map(|d| d.kind) })
             .collect();
         list.sort_by(|a, b| a.topic.cmp(&b.topic));
         (self.sink)(Event::Channels(list));
@@ -294,7 +326,7 @@ impl<'a> Session<'a> {
     /// Subscribes to every decodable channel on a wanted topic and drops the rest.
     fn resubscribe(&mut self, wanted: &Wanted) -> Result<(), String> {
         let want: HashSet<u64> = self.channels.iter()
-            .filter(|(_, c)| wanted.topics.contains(&c.topic) && decode::kind_of(&c.encoding, &c.schema_name).is_some())
+            .filter(|(_, c)| wanted.topics.contains(&c.topic) && c.decoder.is_some())
             .map(|(&id, _)| id)
             .collect();
         let drop: Vec<u32> = self.subs.iter().filter(|(_, ch)| !want.contains(ch)).map(|(&s, _)| s).collect();

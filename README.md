@@ -41,6 +41,15 @@ fixed frame, labels, axis length, and colour by any numeric field. Settings are 
   or by height (Auto picks the first that exists). Settings can also colour by any numeric
   field, using its 1st–99th percentile range.
 
+Limits, each shown when hit:
+
+- A cloud can have up to 8,388,608 points, the 128 MiB storage binding Rune's GPU device allows
+  at 16 bytes per point. A bigger cloud isn't drawn, and its topic reports the count and the cap.
+- A message can be up to 256 MiB. A bigger one fails the connection, with tungstenite's error as
+  the status.
+- Poses stay drawn until their topic is unadvertised or hidden, or the connection changes. There
+  is no expiry yet, so an object a publisher stops sending stays at its last pose.
+
 To add a message type, add one row to `DECODERS` in [src/decode/mod.rs](src/decode/mod.rs) and
 write a function that turns the message into a `scene` type. To add another transport (a file,
 a different protocol), implement `Source` in [src/source.rs](src/source.rs).
@@ -137,7 +146,7 @@ Spread across trials is ≤ 0.002 ms on GPU p50.
 | 1 pt points | 1,366,408 | 0.17–0.18 ms | 0.394 (0.416) ms |
 | 4 pt points | 1,366,408 | 0.17–0.18 ms | 1.087 (1.096) ms |
 | All points + PNG readback every frame | 1,366,408 | 0.16 ms | 0.492 (0.515) ms |
-| All points, new cloud at 10 Hz | 1,366,408 | 0.18 ms (p95 9.4–9.6 ms) | 0.493 (0.516) ms |
+| All points, new cloud at 10 Hz | 1,366,408 | 0.18 ms (p95 9.4–9.5 ms) | 0.492 (0.516) ms |
 
 How to read these:
 
@@ -147,16 +156,17 @@ How to read these:
 - **GPU** comes from begin/end timestamp queries around the 3D pass only, counted only on frames
   that drew the final point count. The UI pass and any readback copy are recorded after that
   pass ends, so they're outside the timestamps. The readback row confirms it: GPU time is
-  unchanged (0.492 vs 0.495 ms), while wall time per frame rises to a 65–68 ms p95 because of
+  unchanged (0.492 vs 0.494 ms), while wall time per frame rises to a 59–75 ms p95 because of
   PNG encoding.
 - **It measures the point draw.** GPU time is linear in points drawn: 0.033 ms with none, plus
   0.338 ms per million points. That line predicts the ½ and ¼ rows within 0.002 ms.
 - **60 fps:** every paced run delivered 600 frames in 9.98 s (60.1 frames/s). The largest gap
-  between frame starts was 21.9 ms, and no gap exceeded 25 ms, which would mean a missed slot.
+  between frame starts was 22.9 ms, and no gap exceeded 25 ms, which would mean a missed slot.
   That includes the ingest row: a new 1.37 M-point cloud arriving 10 times a second (97 uploads
-  per 10 s run). Unpaced, the loop reaches 1,470–1,560 frames/s. This is headless; on-screen
+  per 10 s run). Unpaced, the loop reaches 1,200–1,560 frames/s; the spread is from run to run (old and new
+  builds alternated land in both modes), with GPU time the same 0.48 ms. This is headless; on-screen
   presentation isn't measured.
-- **Ingesting a cloud** costs its frame 5.9–6.4 ms on average to copy 21.9 MB into the GPU
+- **Ingesting a cloud** costs its frame 5.5–6.0 ms on average to copy 21.9 MB into the GPU
   buffer (`queue.write_buffer`), plus about 1 ms (0.9–1.0 ms mean) to rebuild the display,
   whose bounds come from a 16 Ki-point sample. Decoding, including the colour range, happens
   on the WebSocket thread. Before the
