@@ -46,7 +46,7 @@ pub struct Mimic {
     pub offset: f64,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct Visual {
     pub link: usize,
     /// `link_T_visual`.
@@ -56,12 +56,18 @@ pub struct Visual {
     pub color: Option<[f32; 4]>,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug)]
 pub enum Geometry {
     /// The filename as written (relative, absolute, `file://` or `package://`) and its scale.
     Mesh { filename: String, scale: DVec3 },
+    Primitive(Shape),
+}
+
+/// URDF's built-in shapes, centred on the visual's origin.
+#[derive(Debug)]
+pub enum Shape {
     Box { size: DVec3 },
-    /// Along z, centred on the origin.
+    /// Along z.
     Cylinder { radius: f64, length: f64 },
     Sphere { radius: f64 },
 }
@@ -76,7 +82,9 @@ impl Robot {
         if robot.descendants().any(|n| n.tag_name().namespace().is_some_and(|ns| ns.contains("xacro"))) {
             return Err("this is xacro, not URDF; expand it first (xacro robot.urdf.xacro > robot.urdf)".into());
         }
-        let materials: HashMap<&str, [f32; 4]> = robot.children()
+        // Named colours, wherever defined: xacro output often defines one inside the first visual
+        // that uses it and names it in the rest (urdfdom reads it the same way).
+        let materials: HashMap<&str, [f32; 4]> = robot.descendants()
             .filter(|n| n.has_tag_name("material"))
             .filter_map(|m| Some((m.attribute("name")?, color_of(m)?)))
             .collect();
@@ -157,9 +165,9 @@ impl Robot {
                     .ok_or_else(|| format!("a visual of link {} has no geometry", names[old]))?;
                 let geometry = match g.tag_name().name() {
                     "mesh" => Geometry::Mesh { filename: attr(&g, "filename")?.to_string(), scale: vec3(g.attribute("scale").unwrap_or("1 1 1"))? },
-                    "box" => Geometry::Box { size: vec3(attr(&g, "size")?)? },
-                    "cylinder" => Geometry::Cylinder { radius: num(attr(&g, "radius")?)?, length: num(attr(&g, "length")?)? },
-                    "sphere" => Geometry::Sphere { radius: num(attr(&g, "radius")?)? },
+                    "box" => Geometry::Primitive(Shape::Box { size: vec3(attr(&g, "size")?)? }),
+                    "cylinder" => Geometry::Primitive(Shape::Cylinder { radius: num(attr(&g, "radius")?)?, length: num(attr(&g, "length")?)? }),
+                    "sphere" => Geometry::Primitive(Shape::Sphere { radius: num(attr(&g, "radius")?)? }),
                     other => return Err(format!("link {} has unknown geometry <{other}>", names[old])),
                 };
                 // A material colours inline, or names one defined at the top level.

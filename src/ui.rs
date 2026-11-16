@@ -119,14 +119,24 @@ fn point_badge(s: &State) -> El {
 
 /// Says why the view is empty or incomplete; absent when everything draws.
 fn status_chip(s: &State) -> Option<El> {
-    let msg = match (&s.received.status, &s.display.problem) {
-        (Status::Failed { error }, _) => format!("Can't reach {}: {error}", s.settings.url),
-        (Status::Connecting, _) => format!("Connecting to {}…", s.settings.url),
-        (Status::Connected { .. }, Some(p)) => p.clone(),
-        (Status::Connected { .. }, None) if s.received.server_warning.is_some() => format!("Server: {}", s.received.server_warning.as_deref().unwrap_or_default()),
-        (Status::Connected { .. }, None) if s.received.channels.is_empty() => "Connected; the server offers no topics yet".into(),
-        _ => return None,
+    // The connection first, then a URDF that didn't load (its section in the side panel only
+    // exists once one has), then what the data is missing.
+    let connection = match &s.received.status {
+        Status::Failed { error } => Some(format!("Can't reach {}: {error}", s.settings.url)),
+        Status::Connecting => Some(format!("Connecting to {}…", s.settings.url)),
+        Status::Connected { .. } => None,
     };
+    let robot = match s.robot_load() {
+        Some(Err(e)) => Some(format!("Robot: {e}")),
+        _ => None,
+    };
+    let data = match (&s.display.problem, &s.received.server_warning) {
+        (Some(p), _) => Some(p.clone()),
+        (None, Some(w)) => Some(format!("Server: {w}")),
+        (None, None) if s.received.channels.is_empty() => Some("Connected; the server offers no topics yet".into()),
+        _ => None,
+    };
+    let msg = connection.or(robot).or(data)?;
     Some(glass().px(10.0).py(7.0).max_w(520.0).child(
         row().gap(8.0).items_center()
             .child(el().size(7.0, 7.0).radius(3.5).fill(oklch(0.78, 0.15, 70.0)))
@@ -401,22 +411,7 @@ fn unsupported_badge() -> El {
 fn frames_section(s: &State) -> El {
     let t = tok::theme(true);
     let frames = s.received.tf.frames();
-    let auto_label = match (&s.settings.fixed_frame, &s.display.fixed) {
-        (None, Some(f)) => format!("Auto ({f})"),
-        _ => "Auto".to_string(),
-    };
-    let mut options: Vec<(Option<String>, String)> = vec![(None, auto_label)];
-    options.extend(frames.iter().map(|f| (Some(f.clone()), f.clone())));
-    if let Some(f) = &s.settings.fixed_frame
-        && !frames.contains(f)
-    {
-        options.push((Some(f.clone()), format!("{f} (not seen yet)")));
-    }
-    let mut list = col().key("fixed-frame").role("radiogroup").gap(2.0);
-    for (i, (value, label)) in options.into_iter().enumerate() {
-        let on = value == s.settings.fixed_frame;
-        list = list.child(radio_row(&format!("frame-{i}"), &label, on, move |s| s.settings.fixed_frame = value.clone()));
-    }
+    let list = auto_picker("fixed-frame", "frame", &s.settings.fixed_frame, s.display.fixed.as_deref(), &frames, "not seen yet", |s, v| s.settings.fixed_frame = v);
     section("Frames")
         .child(field_note("Fixed frame", "Everything is drawn in this frame. Auto uses the root of the transform tree the point cloud is in."))
         .child(list)
@@ -428,11 +423,6 @@ fn frames_section(s: &State) -> El {
 fn robot_section(s: &State) -> El {
     let t = tok::theme(true);
     let st = &s.settings;
-    let load = |s: &mut State| {
-        s.settings.robot_urdf = s.urdf_edit.text.trim().to_string();
-        // Cleared, so the same path loads again (after editing the file).
-        s.robot = None;
-    };
     // Clipped: a long path would otherwise draw over the Load button.
     let input = el().key("urdf-field").grow(1.0).min_w(0.0).h(32.0).px(10.0).radius(tok::radius::MD).clip_rounded(tok::radius::MD).fill(t.card).border(1.0, t.card_border).center_y()
         .child(
@@ -442,19 +432,19 @@ fn robot_section(s: &State) -> El {
                 .color(t.text)
                 .placeholder("/path/to/robot.urdf", t.text_secondary)
                 .on_edit(|s: &mut State| &mut s.urdf_edit)
-                .on_submit(move |s: &mut State, tx: &mut Tx| {
-                    load(s);
+                .on_submit(|s: &mut State, tx: &mut Tx| {
+                    s.load_robot();
                     tx.blur();
                 }),
         );
     let error = oklch(0.72, 0.17, 25.0);
     let mut sec = section("Robot")
         .child(field_note("URDF file", "Plain URDF (run xacro first). STL meshes, by path relative to the file, file:// or package://."))
-        .child(row().gap(8.0).child(input).child(button("load-urdf", "Load", load).grow(0.0).w(92.0).min_w(92.0)));
-    let status = match &s.robot {
+        .child(row().gap(8.0).child(input).child(button("load-urdf", "Load", State::load_robot).grow(0.0).w(92.0).min_w(92.0)));
+    let status = match s.robot_load() {
         None => text("No robot loaded").font(type_::LABEL).color(t.text_secondary),
-        Some((_, Err(e))) => text(e.clone()).font(type_::LABEL).color(error).max_lines(4),
-        Some((_, Ok(m))) => text(format!(
+        Some(Err(e)) => text(e.clone()).font(type_::LABEL).color(error).max_lines(4),
+        Some(Ok(m)) => text(format!(
             "{}: {} links, {} joints, {} meshes · loaded in {:.0} ms",
             m.robot.name, m.robot.links.len(), m.robot.movable().count(), m.mesh.parts.len(), m.load_ms,
         )).font(type_::LABEL).color(t.text_secondary).max_lines(2),
@@ -473,23 +463,8 @@ fn robot_section(s: &State) -> El {
         sec = sec.child(text(note.clone()).font(type_::LABEL).color(t.text_secondary).max_lines(3));
     }
 
-    let topics: Vec<&str> = s.topics_of(Kind::JointStates).collect();
-    let auto_label = match (&st.joint_topic, topics.first()) {
-        (None, Some(t)) => format!("Auto ({t})"),
-        _ => "Auto".to_string(),
-    };
-    let mut options: Vec<(Option<String>, String)> = vec![(None, auto_label)];
-    options.extend(topics.iter().map(|t| (Some(t.to_string()), t.to_string())));
-    if let Some(chosen) = &st.joint_topic
-        && !topics.contains(&chosen.as_str())
-    {
-        options.push((Some(chosen.clone()), format!("{chosen} (not advertised)")));
-    }
-    let mut list = col().key("joint-topic").role("radiogroup").gap(2.0);
-    for (i, (value, label)) in options.into_iter().enumerate() {
-        let on = value == st.joint_topic;
-        list = list.child(radio_row(&format!("joints-{i}"), &label, on, move |s| s.settings.joint_topic = value.clone()));
-    }
+    let topics: Vec<String> = s.topics_of(Kind::JointStates).map(str::to_string).collect();
+    let list = auto_picker("joint-topic", "joints", &st.joint_topic, topics.first().map(String::as_str), &topics, "not advertised", |s, v| s.settings.joint_topic = v);
     let movable: Vec<&str> = m.robot.movable().collect();
     let received = match &s.received.joints {
         Some((topic, j)) => format!("{} of {} joints received on {topic}", movable.iter().filter(|n| j.contains_key(**n)).count(), movable.len()),
@@ -500,6 +475,36 @@ fn robot_section(s: &State) -> El {
         .child(text(received).key("joints-received").font(type_::LABEL).color(t.text_secondary).max_lines(2))
         .child(toggle_row("robot-full", "Show robot", st.show_robot, |s| s.settings.show_robot ^= true))
         .child(opacity_field("robot-opacity-full", st))
+}
+
+/// Radio rows for an optional setting: Auto (naming what it resolves to), every available value,
+/// and the chosen value when it isn't available, marked `missing`.
+fn auto_picker(
+    key: &'static str,
+    row_key: &str,
+    chosen: &Option<String>,
+    auto: Option<&str>,
+    available: &[String],
+    missing: &str,
+    set: fn(&mut State, Option<String>),
+) -> El {
+    let auto_label = match (chosen, auto) {
+        (None, Some(a)) => format!("Auto ({a})"),
+        _ => "Auto".to_string(),
+    };
+    let mut options: Vec<(Option<String>, String)> = vec![(None, auto_label)];
+    options.extend(available.iter().map(|v| (Some(v.clone()), v.clone())));
+    if let Some(c) = chosen
+        && !available.contains(c)
+    {
+        options.push((Some(c.clone()), format!("{c} ({missing})")));
+    }
+    let mut list = col().key(key).role("radiogroup").gap(2.0);
+    for (i, (value, label)) in options.into_iter().enumerate() {
+        let on = value == *chosen;
+        list = list.child(radio_row(&format!("{row_key}-{i}"), &label, on, move |s| set(s, value.clone())));
+    }
+    list
 }
 
 fn display_section(s: &State) -> El {

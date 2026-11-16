@@ -5,7 +5,7 @@ use std::f32::consts::TAU;
 
 use glam::Vec3;
 
-use super::urdf::Geometry;
+use super::urdf::Shape;
 
 pub type Triangle = [Vec3; 3];
 
@@ -14,23 +14,28 @@ pub type Triangle = [Vec3; 3];
 /// is most of a robot arm, read as curved. STL normals are ignored: exporters often zero them.
 const CREASE_DEG: f32 = 40.0;
 
-/// An STL file's triangles: binary when its size is exactly 84 + 50 × the count it declares
-/// (exporters write "solid" at the start of binary headers too), ASCII otherwise.
+/// An STL file's triangles. Binary when its size is exactly 84 + 50 × the count it declares
+/// (exporters write "solid" at the start of binary headers too); ASCII when it starts with
+/// "solid" and is text; else binary with bytes past the triangles (some exporters pad), as
+/// assimp reads it.
 pub fn stl(bytes: &[u8]) -> Result<Vec<Triangle>, String> {
-    if bytes.len() >= 84 {
-        let n = u32::from_le_bytes(bytes[80..84].try_into().unwrap()) as usize;
-        if n.checked_mul(50).and_then(|b| b.checked_add(84)) == Some(bytes.len()) {
+    let declared = (bytes.len() >= 84).then(|| u32::from_le_bytes(bytes[80..84].try_into().unwrap()) as usize);
+    let binary_len = declared.and_then(|n| n.checked_mul(50)?.checked_add(84));
+    let ascii = bytes.starts_with(b"solid") && std::str::from_utf8(bytes).is_ok();
+    match (declared, binary_len) {
+        (Some(n), Some(len)) if len == bytes.len() || (!ascii && len < bytes.len()) => {
             let f = |at: usize| f32::from_le_bytes(bytes[at..at + 4].try_into().unwrap());
             return Ok((0..n).map(|k| {
                 let at = 84 + 50 * k + 12; // past the facet normal
                 [0, 1, 2].map(|c| Vec3::new(f(at + 12 * c), f(at + 12 * c + 4), f(at + 12 * c + 8)))
             }).collect());
         }
+        _ if !ascii => {
+            return Err(format!("not an STL file: {} bytes, too short for the {} triangles a binary STL header declares, and not ASCII", bytes.len(), declared.unwrap_or(0)));
+        }
+        _ => {}
     }
-    if !bytes.starts_with(b"solid") {
-        return Err(format!("not an STL file: {} bytes, neither binary (84 + 50 per triangle) nor ASCII", bytes.len()));
-    }
-    let text = std::str::from_utf8(bytes).map_err(|_| "ASCII STL that isn't text (a truncated binary STL?)".to_string())?;
+    let text = std::str::from_utf8(bytes).unwrap();
     let mut corners = Vec::new();
     let mut words = text.split_ascii_whitespace();
     while let Some(w) = words.next() {
@@ -52,12 +57,11 @@ fn quad(out: &mut Vec<Triangle>, a: Vec3, b: Vec3, c: Vec3, d: Vec3) {
     out.extend([[a, b, c], [a, c, d]]);
 }
 
-/// A URDF primitive's triangles, wound outward. `None` for meshes.
-pub fn primitive(g: &Geometry) -> Option<Vec<Triangle>> {
+/// A URDF primitive's triangles, wound outward.
+pub fn primitive(shape: &Shape) -> Vec<Triangle> {
     let mut out = Vec::new();
-    match *g {
-        Geometry::Mesh { .. } => return None,
-        Geometry::Box { size } => {
+    match *shape {
+        Shape::Box { size } => {
             let h = size.as_vec3() * 0.5;
             for axis in 0..3 {
                 for sign in [-1.0f32, 1.0] {
@@ -68,7 +72,7 @@ pub fn primitive(g: &Geometry) -> Option<Vec<Triangle>> {
                 }
             }
         }
-        Geometry::Cylinder { radius, length } => {
+        Shape::Cylinder { radius, length } => {
             const SIDES: usize = 32;
             let (r, z) = (radius as f32, length as f32 * 0.5);
             // Wrapped like the sphere's seam, so the last side meets the first exactly.
@@ -83,7 +87,7 @@ pub fn primitive(g: &Geometry) -> Option<Vec<Triangle>> {
                 out.push([-Vec3::Z * z, b - Vec3::Z * z, a - Vec3::Z * z]);
             }
         }
-        Geometry::Sphere { radius } => {
+        Shape::Sphere { radius } => {
             const RINGS: usize = 16;
             const SEGMENTS: usize = 32;
             let at = |i: usize, k: usize| {
@@ -105,7 +109,7 @@ pub fn primitive(g: &Geometry) -> Option<Vec<Triangle>> {
             }
         }
     }
-    Some(out)
+    out
 }
 
 /// Position and normal per corner, three per triangle. A corner's normal averages the normals
@@ -168,6 +172,9 @@ mod tests {
         assert_eq!(t.len(), 2);
         assert_eq!(t[1][2], Vec3::new(0.0, 2.0, 0.0));
         assert!(stl(&bytes[..bytes.len() - 1]).is_err(), "a truncated binary STL is an error, not ASCII");
+        let mut padded = bytes.clone();
+        padded.extend([0u8; 16]);
+        assert_eq!(stl(&padded).unwrap().len(), 2, "bytes past the triangles are ignored");
     }
 
     #[test]
@@ -180,13 +187,13 @@ mod tests {
     // from the centre, which only smoothing gives (its facets are flat).
     #[test]
     fn creases_stay_sharp_and_curves_shade_smooth() {
-        let cube = shade(&primitive(&Geometry::Box { size: glam::DVec3::ONE }).unwrap());
+        let cube = shade(&primitive(&Shape::Box { size: glam::DVec3::ONE }));
         for v in &cube {
             let n = Vec3::new(v[3], v[4], v[5]);
             assert!(n.abs().max_element() > 0.9999, "box normal {n} isn't a face normal");
             assert!(n.dot(Vec3::new(v[0], v[1], v[2])) > 0.0, "box normal {n} points inward");
         }
-        let ball = shade(&primitive(&Geometry::Sphere { radius: 2.0 }).unwrap());
+        let ball = shade(&primitive(&Shape::Sphere { radius: 2.0 }));
         let worst = ball.iter().map(|v| Vec3::new(v[3], v[4], v[5]).dot(Vec3::new(v[0], v[1], v[2]).normalize())).fold(1.0, f32::min);
         assert!(worst > 0.999, "a sphere corner's normal is {}° off radial", worst.acos().to_degrees());
     }

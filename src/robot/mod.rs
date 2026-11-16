@@ -14,7 +14,10 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
 
+use urdf::Geometry;
 pub use urdf::Robot;
+
+use crate::ui::thousands;
 
 /// Light grey, for visuals with no material.
 const DEFAULT_COLOR: [f32; 4] = [0.8, 0.8, 0.8, 1.0];
@@ -54,27 +57,33 @@ pub fn load(path: &Path, max_vertices: usize) -> Result<Model, String> {
     let mut parts = Vec::new();
     let mut problems = Vec::new();
     for v in &robot.visuals {
-        let tris = match mesh::primitive(&v.geometry) {
-            Some(t) => t,
-            None => {
-                let urdf::Geometry::Mesh { filename, scale } = &v.geometry else { unreachable!() };
-                match read_mesh(filename, dir) {
-                    Ok(t) => t.into_iter().map(|tri| tri.map(|p| p * scale.as_vec3())).collect(),
-                    Err(e) => {
-                        problems.push(format!("{}: {e}", robot.links[v.link]));
-                        continue;
-                    }
+        let tris = match &v.geometry {
+            Geometry::Mesh { filename, scale } => match read_mesh(filename, dir) {
+                Ok(t) => t.into_iter().map(|tri| tri.map(|p| p * scale.as_vec3())).collect(),
+                Err(e) => {
+                    problems.push(format!("{}: {e}", robot.links[v.link]));
+                    continue;
                 }
-            }
+            },
+            Geometry::Primitive(shape) => mesh::primitive(shape),
         };
+        // Checked before shading (which costs memory per vertex): shading only drops triangles,
+        // so this is the most the visual can add.
+        let at_most = vertices.len() + 3 * tris.len();
+        if at_most > max_vertices {
+            return Err(format!(
+                "{} brings the robot to {} mesh vertices, over the {} the GPU can draw",
+                robot.links[v.link], thousands(at_most), thousands(max_vertices),
+            ));
+        }
         let m = v.origin.matrix();
         let tris: Vec<mesh::Triangle> = tris.into_iter().map(|t| t.map(|p| m.transform_point3(p))).collect();
         let start = vertices.len();
         vertices.extend(mesh::shade(&tris));
-        if vertices.len() > max_vertices {
-            return Err(format!("{} vertices so far, over the {} the GPU can draw", vertices.len(), max_vertices));
+        // A visual with no area (an empty STL) draws nothing; it gets no part.
+        if vertices.len() > start {
+            parts.push(Part { link: v.link, range: start as u32..vertices.len() as u32, color: v.color.unwrap_or(DEFAULT_COLOR) });
         }
-        parts.push(Part { link: v.link, range: start as u32..vertices.len() as u32, color: v.color.unwrap_or(DEFAULT_COLOR) });
     }
     Ok(Model { robot, mesh: Arc::new(RobotMesh { vertices, parts }), problems, load_ms: started.elapsed().as_secs_f64() * 1000.0 })
 }

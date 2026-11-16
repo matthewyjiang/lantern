@@ -53,7 +53,8 @@ Limits, each shown when hit:
 - Poses stay drawn until their topic is unadvertised or hidden, or the connection changes. There
   is no expiry yet, so an object a publisher stops sending stays at its last pose.
 - A robot can have up to 5,592,405 mesh vertices (1,864,135 triangles), the same 128 MiB binding
-  at 24 bytes per vertex. A bigger model fails to load, and Settings shows the count and the cap.
+  at 24 bytes per vertex. A bigger model fails to load (checked before each mesh is processed),
+  and the status chip and Settings name the link, the count and the cap.
   The KUKA Med 7 has 501,186.
 
 To add a message type, add one row to `DECODERS` in [src/decode/mod.rs](src/decode/mod.rs) and
@@ -114,20 +115,24 @@ Settings page.
   Filenames resolve as RViz's do: relative to the URDF, absolute, `file://`, or
   `package://pkg/...`, with pkg looked up in `ROS_PACKAGE_PATH`, `AMENT_PREFIX_PATH`
   (`<prefix>/share/pkg`), or as a directory named pkg at or above the URDF (a source checkout).
-  A visual that can't be drawn (a DAE, a missing file) is listed under the load status, and the
-  rest of the robot still draws.
+  A mesh that can't be drawn (a DAE, a missing file) is listed under the load status, and the
+  rest of the robot still draws. An unknown geometry element or a `floating`/`planar` joint
+  fails the whole load, with the reason. A load that fails shows in the viewport's status chip.
 - **Joints:** revolute, continuous, prismatic, fixed, and `mimic`. Positions come from the
   joint-state topic chosen in Settings (Auto picks the first one advertised). Messages that carry
   only some joints merge. A joint with no position yet sits at zero, and Settings shows "n of m
   joints received". Positions outside the URDF's joint limits are drawn as sent, not clamped.
 - **Placement:** the URDF's root link is placed in the fixed frame through TF when TF connects
   them (for example `world` from `robot_state_publisher`). Otherwise it's drawn at the fixed
-  frame's origin, and Settings says so. With no other data, the fixed frame is the robot's root.
+  frame's origin, and Settings says so. With no cloud or poses, Auto picks the robot's root as
+  the fixed frame if TF knows it, else the TF tree's root, else (no TF at all) the robot's root.
 - **Drawing:** colours come from URDF materials, with light grey where there are none.
   Normals are recomputed with a 40° crease angle, because STL normals are often unusable. Below
-  100% opacity, the robot shows what's behind it but not its own hidden faces (depth prepass).
-- **Loading** takes about 45 ms for the Med 7 (8 STL files, 167 k triangles; the Settings
-  status shows the time). It runs on the UI thread when the path changes.
+  100% opacity (or with a translucent material), the robot shows the points, grid, TF axes and
+  poses behind and inside it, but not its own hidden faces (depth prepass). Lines in front of a
+  translucent robot take a faint tint from it.
+- **Loading** takes 40–48 ms for the Med 7 (8 STL files, 167 k triangles; the Settings status
+  shows the time). It runs on the UI thread when the path changes, so that one frame is late.
 
 Not yet: posing links from TF alone (without joint states), the URDF sent over a topic
 (`/robot_description`), collision geometry, and DAE/OBJ meshes.
@@ -219,6 +224,8 @@ Spread across trials is ≤ 0.002 ms on GPU p50.
 | 4 pt points | 1,366,408 | 0.17–0.18 ms | 1.087 (1.096) ms |
 | All points + PNG readback every frame | 1,366,408 | 0.16 ms | 0.492 (0.515) ms |
 | All points, new cloud at 10 Hz | 1,366,408 | 0.18 ms (p95 9.4–9.5 ms) | 0.492 (0.516) ms |
+| All points + robot (Med 7, 501,186 vertices) | 1,366,408 | 0.18 ms | 0.511–0.515 (0.535–0.538) ms |
+| Robot only, points off | 0 | 0.18 ms | 0.062 (0.065–0.066) ms |
 
 How to read these:
 
@@ -248,6 +255,13 @@ How to read these:
   Paced, the samples alternate between idle clocks (P8, ~340 MHz) and 1.63 GHz. The paced GPU time
   is within 2.5% of the unpaced one (0.494 vs 0.482 ms), so the draws themselves run at about
   1.6 GHz. These are not peak-clock numbers.
+
+- **The robot** adds 0.029 ms on its own (0.062 vs 0.033 ms with points off) and 0.017–0.020 ms
+  on top of the full cloud. Both runs log 501,186 robot vertices drawn on every frame. Each frame
+  draws them twice (depth prepass, then colour), about 1.0 M vertex invocations, plus the parts'
+  matrices written per frame (8 × 80 bytes). CPU per frame is unchanged at 0.18 ms. Loading the
+  URDF is a one-time cost. It runs synchronously (41 ms in these runs), so that first frame takes
+  66–67 ms instead of the usual 23 ms.
 
 ### What bounds the point draw
 

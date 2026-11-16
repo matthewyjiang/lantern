@@ -42,6 +42,18 @@ pub enum Decoded {
     Joints(Vec<(String, f64)>),
 }
 
+/// A JointState's names with their positions. No positions at all is allowed (ROS: a driver
+/// that reports only effort); some but not all is a malformed message.
+fn joints(names: Vec<String>, positions: Vec<f64>) -> Result<Decoded, DecodeError> {
+    if positions.is_empty() {
+        return Ok(Decoded::Joints(Vec::new()));
+    }
+    if positions.len() != names.len() {
+        return Err(DecodeError::new(format!("JointState has {} names but {} positions", names.len(), positions.len())));
+    }
+    Ok(Decoded::Joints(names.into_iter().zip(positions).collect()))
+}
+
 pub struct Decoder {
     encoding: &'static str,
     schema: &'static str,

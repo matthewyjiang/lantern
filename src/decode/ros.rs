@@ -115,7 +115,7 @@ pub fn joint_state(bytes: &[u8], _: &ColorChoice) -> Result<Decoded, DecodeError
     let names = (0..n).map(|_| r.string()).collect::<Result<Vec<_>, _>>()?;
     let m = r.seq_len(8)?;
     let positions = (0..m).map(|_| r.f64()).collect::<Result<Vec<_>, _>>()?;
-    super::json::pair(names, positions)
+    super::joints(names, positions)
 }
 
 /// `nav_msgs/Odometry`: header, child_frame_id, PoseWithCovariance, TwistWithCovariance
