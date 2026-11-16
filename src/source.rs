@@ -1,7 +1,7 @@
 //! Where Lantern's data comes from. A `Source` runs on its own thread, decodes what it
 //! receives into scene types and hands `Event`s to a `Sink`; the app only says which topics it
 //! wants. `FoxgloveWs` is the one source today: a client for the Foxglove WebSocket protocol,
-//! which foxglove_bridge speaks for ROS 2 and the Foxglove SDKs speak for everything else (kpd).
+//! which foxglove_bridge speaks for ROS 2 and the Foxglove SDKs speak for everything else.
 //! Another transport (an MCAP file, a different server) is another `Source` impl.
 
 use std::collections::{HashMap, HashSet};
@@ -267,7 +267,7 @@ impl<'a> Session<'a> {
         match serde_json::from_str::<Op>(text) {
             Ok(Op::Advertise { channels }) => {
                 for mut c in channels {
-                    c.decoder = decode::decoder_for(&c.encoding, &c.schema_name);
+                    c.decoder = decode::decoder_for(&c.encoding, &c.schema_name, &c.topic);
                     self.channels.insert(c.id, c);
                 }
                 self.publish_channels();

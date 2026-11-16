@@ -4,13 +4,14 @@
 
 mod cdr;
 mod foxglove;
+mod image;
 mod json;
 mod points;
 mod ros;
 
 use std::fmt;
 
-use crate::scene::{PointCloud, Poses, Transform};
+use crate::scene::{Annotation, Diagnostic, Image, PointCloud, Poses, Transform};
 
 pub use points::ColorChoice;
 
@@ -21,6 +22,11 @@ pub enum Kind {
     Transforms,
     Poses,
     JointStates,
+    Image,
+    Annotations,
+    Text,
+    Stats,
+    RobotDescription,
 }
 
 impl Kind {
@@ -30,6 +36,11 @@ impl Kind {
             Kind::Transforms => "Transforms",
             Kind::Poses => "Poses",
             Kind::JointStates => "Joints",
+            Kind::Image => "Image",
+            Kind::Annotations => "Annotations",
+            Kind::Text => "Text",
+            Kind::Stats => "Stats",
+            Kind::RobotDescription => "Robot",
         }
     }
 }
@@ -40,6 +51,12 @@ pub enum Decoded {
     Poses(Poses),
     /// Joint positions by name (radians, or metres for prismatic joints).
     Joints(Vec<(String, f64)>),
+    Image(Image),
+    Annotations(Vec<Annotation>),
+    Text(String),
+    Diagnostics(Vec<Diagnostic>),
+    /// A URDF, as text.
+    RobotDescription(String),
 }
 
 /// A JointState's names with their positions. No positions at all is allowed (ROS: a driver
@@ -57,6 +74,9 @@ fn joints(names: Vec<String>, positions: Vec<f64>) -> Result<Decoded, DecodeErro
 pub struct Decoder {
     encoding: &'static str,
     schema: &'static str,
+    /// Only for topics named this (or ending in `/` and this): a URDF travels as a plain
+    /// string, which only its topic's name tells apart from text.
+    topic: Option<&'static str>,
     pub kind: Kind,
     decode: fn(&[u8], &ColorChoice) -> Result<Decoded, DecodeError>,
 }
@@ -69,30 +89,54 @@ impl Decoder {
 }
 
 /// ROS 2 messages arrive as `cdr` through foxglove_bridge; Foxglove's own schemas as
-/// `protobuf` from the Foxglove SDKs (what kpd publishes with).
+/// `protobuf` from the Foxglove SDKs; ROS types an SDK app logs as JSON (Foxglove has no schema
+/// of its own for them) as `json` under the ROS type's name.
 const DECODERS: &[Decoder] = &[
-    Decoder { encoding: "cdr", schema: "sensor_msgs/msg/PointCloud2", kind: Kind::PointCloud, decode: ros::point_cloud2 },
-    Decoder { encoding: "cdr", schema: "tf2_msgs/msg/TFMessage", kind: Kind::Transforms, decode: ros::tf_message },
-    Decoder { encoding: "cdr", schema: "geometry_msgs/msg/TransformStamped", kind: Kind::Transforms, decode: ros::transform_stamped },
-    Decoder { encoding: "cdr", schema: "geometry_msgs/msg/PoseStamped", kind: Kind::Poses, decode: ros::pose_stamped },
-    Decoder { encoding: "cdr", schema: "geometry_msgs/msg/PoseArray", kind: Kind::Poses, decode: ros::pose_array },
-    Decoder { encoding: "cdr", schema: "nav_msgs/msg/Odometry", kind: Kind::Poses, decode: ros::odometry },
-    Decoder { encoding: "protobuf", schema: "foxglove.PointCloud", kind: Kind::PointCloud, decode: foxglove::point_cloud },
-    Decoder { encoding: "protobuf", schema: "foxglove.FrameTransform", kind: Kind::Transforms, decode: foxglove::frame_transform },
-    Decoder { encoding: "protobuf", schema: "foxglove.FrameTransforms", kind: Kind::Transforms, decode: foxglove::frame_transforms },
-    Decoder { encoding: "protobuf", schema: "foxglove.PoseInFrame", kind: Kind::Poses, decode: foxglove::pose_in_frame },
-    Decoder { encoding: "protobuf", schema: "foxglove.PosesInFrame", kind: Kind::Poses, decode: foxglove::poses_in_frame },
-    Decoder { encoding: "protobuf", schema: "foxglove.Odometry", kind: Kind::Poses, decode: foxglove::odometry },
-    Decoder { encoding: "cdr", schema: "sensor_msgs/msg/JointState", kind: Kind::JointStates, decode: ros::joint_state },
-    // Foxglove has no joint-state schema; an SDK app (kpd) logs the ROS message's shape as JSON
-    // under its name: `{"name": [...], "position": [...]}` (README, "Publishing from kpd").
-    Decoder { encoding: "json", schema: "sensor_msgs/msg/JointState", kind: Kind::JointStates, decode: json::joint_state },
+    // Topic-specific rows first: `decoder_for` takes the first match.
+    row("cdr", "std_msgs/msg/String", Some("robot_description"), Kind::RobotDescription, ros::robot_description),
+    row("json", "std_msgs/msg/String", Some("robot_description"), Kind::RobotDescription, json::robot_description),
+    row("cdr", "sensor_msgs/msg/PointCloud2", None, Kind::PointCloud, ros::point_cloud2),
+    row("cdr", "tf2_msgs/msg/TFMessage", None, Kind::Transforms, ros::tf_message),
+    row("cdr", "geometry_msgs/msg/TransformStamped", None, Kind::Transforms, ros::transform_stamped),
+    row("cdr", "geometry_msgs/msg/PoseStamped", None, Kind::Poses, ros::pose_stamped),
+    row("cdr", "geometry_msgs/msg/PoseArray", None, Kind::Poses, ros::pose_array),
+    row("cdr", "nav_msgs/msg/Odometry", None, Kind::Poses, ros::odometry),
+    row("cdr", "sensor_msgs/msg/JointState", None, Kind::JointStates, ros::joint_state),
+    row("cdr", "sensor_msgs/msg/CompressedImage", None, Kind::Image, ros::compressed_image),
+    row("cdr", "sensor_msgs/msg/Image", None, Kind::Image, ros::image),
+    row("cdr", "std_msgs/msg/String", None, Kind::Text, ros::string),
+    row("cdr", "diagnostic_msgs/msg/DiagnosticArray", None, Kind::Stats, ros::diagnostic_array),
+    row("protobuf", "foxglove.PointCloud", None, Kind::PointCloud, foxglove::point_cloud),
+    row("protobuf", "foxglove.FrameTransform", None, Kind::Transforms, foxglove::frame_transform),
+    row("protobuf", "foxglove.FrameTransforms", None, Kind::Transforms, foxglove::frame_transforms),
+    row("protobuf", "foxglove.PoseInFrame", None, Kind::Poses, foxglove::pose_in_frame),
+    row("protobuf", "foxglove.PosesInFrame", None, Kind::Poses, foxglove::poses_in_frame),
+    row("protobuf", "foxglove.Odometry", None, Kind::Poses, foxglove::odometry),
+    row("protobuf", "foxglove.JointStates", None, Kind::JointStates, foxglove::joint_states),
+    row("protobuf", "foxglove.CompressedImage", None, Kind::Image, foxglove::compressed_image),
+    row("protobuf", "foxglove.RawImage", None, Kind::Image, foxglove::raw_image),
+    row("protobuf", "foxglove.ImageAnnotations", None, Kind::Annotations, foxglove::image_annotations),
+    // `{"name": [...], "position": [...]}`, as the ROS message.
+    row("json", "sensor_msgs/msg/JointState", None, Kind::JointStates, json::joint_state),
+    row("json", "std_msgs/msg/String", None, Kind::Text, json::string),
+    row("json", "diagnostic_msgs/msg/DiagnosticArray", None, Kind::Stats, json::diagnostic_array),
 ];
 
-/// The decoder for a channel's encoding and schema, or `None` if Lantern can't read it. The
-/// source looks it up once, when the channel is advertised.
-pub fn decoder_for(encoding: &str, schema: &str) -> Option<&'static Decoder> {
-    DECODERS.iter().find(|d| d.encoding == encoding && d.schema == schema)
+const fn row(
+    encoding: &'static str,
+    schema: &'static str,
+    topic: Option<&'static str>,
+    kind: Kind,
+    decode: fn(&[u8], &ColorChoice) -> Result<Decoded, DecodeError>,
+) -> Decoder {
+    Decoder { encoding, schema, topic, kind, decode }
+}
+
+/// The decoder for a channel's encoding, schema and topic, or `None` if Lantern can't read it.
+/// The source looks it up once, when the channel is advertised.
+pub fn decoder_for(encoding: &str, schema: &str, topic: &str) -> Option<&'static Decoder> {
+    let named = |t: &str| topic == t || topic.strip_suffix(t).is_some_and(|rest| rest.ends_with('/'));
+    DECODERS.iter().find(|d| d.encoding == encoding && d.schema == schema && d.topic.is_none_or(named))
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -119,9 +163,9 @@ mod tests {
     use super::*;
 
     fn decode(encoding: &str, schema: &str, payload: &[u8], color: &ColorChoice) -> Result<Decoded, DecodeError> {
-        decoder_for(encoding, schema).unwrap_or_else(|| panic!("no decoder for {schema}")).decode(payload, color)
+        decoder_for(encoding, schema, "/topic").unwrap_or_else(|| panic!("no decoder for {schema}")).decode(payload, color)
     }
-    use crate::scene::PointColor;
+    use crate::scene::{Level, PointColor, PointsKind};
     use glam::DVec3;
 
     fn cloud(encoding: &str, schema: &str, bytes: &[u8], color: ColorChoice) -> PointCloud {
@@ -226,6 +270,72 @@ mod tests {
         let Ok(Decoded::Joints(j)) = decode("json", "sensor_msgs/msg/JointState", br#"{"name": ["a", "b"], "effort": [1, 2]}"#, &ColorChoice::Auto) else { panic!() };
         assert!(j.is_empty());
         assert!(decode("json", "sensor_msgs/msg/JointState", br#"{"name": ["a", "b"], "position": [1]}"#, &ColorChoice::Auto).is_err());
+    }
+
+    // foxglove.JointStates carries the same three positions; its fourth joint has only an
+    // effort, and a joint without a position is no position, not zero.
+    #[test]
+    fn foxglove_joint_states_skip_joints_without_a_position() {
+        let Ok(Decoded::Joints(j)) = decode("protobuf", "foxglove.JointStates", include_bytes!("testdata/jointstates.pb"), &ColorChoice::Auto) else { panic!() };
+        assert_eq!(j, [("lbr_joint_0".to_string(), 0.5), ("lbr_joint_1".to_string(), -1.25), ("lbr_joint_2".to_string(), 2.0)]);
+    }
+
+    // One 3×2 picture (red green blue / white black grey) in four forms: PNG in both compressed
+    // messages, raw rgb8 (Foxglove) and row-padded bgr8 (ROS).
+    #[test]
+    fn images_decode_to_the_same_rgba() {
+        let want: Vec<u8> = [[255, 0, 0], [0, 255, 0], [0, 0, 255], [255, 255, 255], [0, 0, 0], [128, 128, 128]]
+            .iter().flat_map(|&[r, g, b]| [r, g, b, 255]).collect();
+        for (enc, schema, bytes) in [
+            ("protobuf", "foxglove.CompressedImage", &include_bytes!("testdata/compressedimage.pb")[..]),
+            ("cdr", "sensor_msgs/msg/CompressedImage", &include_bytes!("testdata/compressedimage.cdr")[..]),
+            ("protobuf", "foxglove.RawImage", &include_bytes!("testdata/rawimage.pb")[..]),
+            ("cdr", "sensor_msgs/msg/Image", &include_bytes!("testdata/image.cdr")[..]),
+        ] {
+            let Ok(Decoded::Image(i)) = decode(enc, schema, bytes, &ColorChoice::Auto) else { panic!("{schema}") };
+            assert_eq!((i.width, i.height), (3, 2), "{schema}");
+            assert_eq!(i.rgba, want, "{schema}");
+        }
+    }
+
+    #[test]
+    fn image_annotations_keep_shape_position_and_colour() {
+        let Ok(Decoded::Annotations(a)) = decode("protobuf", "foxglove.ImageAnnotations", include_bytes!("testdata/imageannotations.pb"), &ColorChoice::Auto) else { panic!() };
+        assert_eq!(a, [
+            Annotation::Circle { center: [10.0, 20.0], diameter: 8.0, thickness: 2.0, outline: [1.0, 0.0, 0.0, 1.0], fill: [0.0; 4] },
+            Annotation::Points { kind: PointsKind::Loop, points: vec![[1.0, 1.0], [5.0, 1.0], [5.0, 5.0], [1.0, 5.0]], color: [0.0, 1.0, 0.0, 1.0], fill: [0.0; 4], thickness: 1.0 },
+            Annotation::Text { at: [3.0, 4.0], text: "tag 7".into(), size: 12.0, color: [1.0; 4], background: [0.0; 4] },
+        ]);
+    }
+
+    #[test]
+    fn text_and_stats_from_both_encodings() {
+        let text = br#"{"data": "tracking ok\nlate ticks: 0"}"#;
+        for (enc, bytes) in [("cdr", &include_bytes!("testdata/string.cdr")[..]), ("json", &text[..])] {
+            let Ok(Decoded::Text(t)) = decode(enc, "std_msgs/msg/String", bytes, &ColorChoice::Auto) else { panic!("{enc}") };
+            assert_eq!(t, "tracking ok\nlate ticks: 0", "{enc}");
+        }
+        let json = br#"{"status": [{"level": 1, "name": "controller", "message": "velocity limit binding", "hardware_id": "arm",
+            "values": [{"key": "tracking error", "value": "1.8 mm"}, {"key": "late ticks", "value": "3"}]}]}"#;
+        for (enc, bytes) in [("cdr", &include_bytes!("testdata/diagnostics.cdr")[..]), ("json", &json[..])] {
+            let Ok(Decoded::Diagnostics(d)) = decode(enc, "diagnostic_msgs/msg/DiagnosticArray", bytes, &ColorChoice::Auto) else { panic!("{enc}") };
+            assert_eq!(d, [Diagnostic {
+                level: Level::Warn,
+                name: "controller".into(),
+                message: "velocity limit binding".into(),
+                values: vec![("tracking error".into(), "1.8 mm".into()), ("late ticks".into(), "3".into())],
+            }], "{enc}");
+        }
+    }
+
+    // A std_msgs/String is a URDF only on a robot_description topic.
+    #[test]
+    fn a_string_is_a_robot_description_only_by_its_topic() {
+        let kind = |topic| decoder_for("cdr", "std_msgs/msg/String", topic).map(|d| d.kind);
+        assert_eq!(kind("/robot_description"), Some(Kind::RobotDescription));
+        assert_eq!(kind("/arm/robot_description"), Some(Kind::RobotDescription));
+        assert_eq!(kind("/my_robot_description"), Some(Kind::Text));
+        assert_eq!(kind("/status"), Some(Kind::Text));
     }
 
     #[test]

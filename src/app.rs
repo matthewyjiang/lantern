@@ -1,58 +1,78 @@
-//! App state: the user's settings, what the source has delivered, the robot model, and the
+//! App state: the user's settings, what each connection has delivered, the robot model, and the
 //! display derived from them (fixed frame, the cloud's placement, lines, labels, link poses).
 //! Handlers only edit `settings` and the camera; `sync` runs at the start of every frame and
-//! does the rest: reconnects when the URL changes, loads the URDF when its path changes, tells
-//! the source what to deliver, saves settings, rebuilds the display.
+//! does the rest: opens and closes connections to match the list, loads the URDF when its path
+//! or the server's description changes, expires old poses, tells each source what to deliver,
+//! saves settings, rebuilds the display.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::Path;
 use std::sync::Arc;
 
-use glam::{Mat4, Vec3};
-use rune::TextEdit;
+use glam::{DVec3, Mat4, Vec3};
+use rune::{Pixels, TextEdit, Tx};
 
+use crate::annotate;
 use crate::camera::OrbitCamera;
-use crate::decode::{Decoded, Kind};
+use crate::connection::{Connection, Picked, Post, Received};
+use crate::decode::Kind;
 use crate::robot::{self, Model};
-use crate::scene::{percentiles, PointCloud, PointColor, Pose, Poses, TfTree};
+use crate::scene::{percentiles, Annotation, Diagnostic, Image, PointCloud, PointColor, Pose, TfTree};
 use crate::settings::Settings;
-use crate::source::{self, Channel, Event, Source, Status, Wanted};
-use crate::ui::thousands;
+use crate::source::{Event, Wanted};
 use crate::viewport::{self, Lines, RobotView, Shade, View};
-
-/// Where every source's events go, tagged with the connection that sent them (`main.rs` queues
-/// them for the UI thread, which hands them to `State::apply`).
-pub type Post = Arc<dyn Fn(u64, Event) + Send + Sync>;
 
 pub struct State {
     pub settings: Settings,
     /// Settings as last saved and applied.
     applied: Settings,
-    conn: Connection,
+    /// Command-line values, which last for this run (see `to_save`).
+    overrides: Overrides,
+    /// One per `settings.connections` entry, in that order.
+    conns: Vec<Connection>,
+    next_conn: u64,
     post: Post,
-    pub received: Received,
     /// Something the display depends on changed; `sync` rebuilds it.
     dirty: bool,
     pub display: Display,
-    /// The URDF last loaded: its path, and the model or why it didn't load. `sync` loads again
-    /// when the path setting changes, or when this is cleared (`load_robot`).
-    robot: Option<(String, Result<Model, String>)>,
+    /// The URDF file last loaded: its path, and the model or why it didn't load. `sync` loads
+    /// again when the path setting changes, or when this is cleared (`load_robot`).
+    robot_file: Option<(String, Result<Model, String>)>,
+    /// The URDF a `robot_description` topic sent: topic, text, and the model or why not.
+    robot_description: Option<(String, String, Result<Model, String>)>,
+    /// How the file's robot differs from the described one, when both loaded and they differ.
+    robot_mismatch: Option<String>,
     /// Joint positions changed: `sync` re-poses the robot without rebuilding the display.
     robot_dirty: bool,
+    /// The shown image with its annotations drawn in, and whether a new image or annotation
+    /// arrived since it was drawn.
+    pub image: Pixels,
+    image_dirty: bool,
 
     pub camera: OrbitCamera,
     framed: Framed,
     /// How the first data frames the camera (headless scenes choose a view before data lands).
     pub frame_with: fn(&State) -> OrbitCamera,
     pub settings_open: bool,
+    /// The Settings field for a server to add.
     pub url_edit: TextEdit,
     pub urdf_edit: TextEdit,
     /// Pointer travel already applied by the drag in progress.
     pub drag_seen: (f32, f32),
 }
 
-/// What the camera was last framed on, since the last connect. A robot alone frames the view;
-/// a cloud arriving later frames it again, unless the user has moved the camera since.
+/// What the command line set, and what the settings file had for the same fields. Saving writes
+/// the file's value back for any field still at the command line's, so `--urdf` for one run
+/// doesn't replace the URDF the UI remembers; a field changed in the UI saves as changed.
+#[derive(Default)]
+pub struct Overrides {
+    pub connections: Option<Vec<String>>,
+    pub robot_urdf: Option<String>,
+    file: Option<Settings>,
+}
+
+/// What the camera was last framed on. A robot alone frames the view; a cloud arriving later
+/// frames it again, unless the user has moved the camera since.
 #[derive(Clone, Copy, PartialEq)]
 enum Framed {
     Nothing,
@@ -60,49 +80,12 @@ enum Framed {
     Cloud,
 }
 
-/// The open source, and what it was last asked for.
-struct Connection {
-    url: String,
-    source: Box<dyn Source>,
-    sent: Wanted,
-    /// Tags this connection's events: a replaced source's thread can still send a few (a connect
-    /// timing out, a cloud mid-decode), and `apply` drops them.
-    generation: u64,
-}
-
-impl Connection {
-    fn open(url: &str, generation: u64, post: &Post) -> Connection {
-        let post = Arc::clone(post);
-        let source = source::open(url, Arc::new(move |e| post(generation, e)));
-        Connection { url: url.to_string(), source, sent: Wanted::default(), generation }
-    }
-}
-
-/// Everything the current connection delivered; a new connection starts from `default()`.
-#[derive(Default)]
-pub struct Received {
-    pub status: Status,
-    pub channels: Vec<Channel>,
-    /// The drawn cloud and its topic.
-    pub cloud: Option<(String, Arc<PointCloud>)>,
-    pub tf: TfTree,
-    /// The joint-state topic's positions so far, by joint name: messages may carry a subset
-    /// (one per driver), so they merge.
-    pub joints: Option<(String, HashMap<String, f64>)>,
-    /// The newest poses per (topic, label): one odometry topic can carry several bodies. Kept
-    /// until the topic is unadvertised, hidden, or the connection changes.
-    pub poses: BTreeMap<(String, String), Poses>,
-    /// The last error per topic (a decode failure, a cloud over the GPU cap), cleared by its
-    /// next good message.
-    pub errors: BTreeMap<String, String>,
-    /// The server's latest warning or error.
-    pub server_warning: Option<String>,
-}
-
 /// What the viewport and overlays draw, derived from data and settings in `sync`.
 pub struct Display {
     /// The frame everything is drawn in, once there's data to name one.
     pub fixed: Option<String>,
+    /// Every connection's transforms, as one tree.
+    pub tf: TfTree,
     /// `fixed_T_cloud`, when the cloud's frame connects to the fixed frame.
     pub cloud_model: Option<Mat4>,
     pub shade: Shade,
@@ -131,6 +114,7 @@ impl Default for Display {
     fn default() -> Self {
         Display {
             fixed: None,
+            tf: TfTree::default(),
             cloud_model: None,
             shade: Shade::Height { lo: 0.0, hi: 1.0 },
             lines: Arc::default(),
@@ -146,23 +130,36 @@ impl Default for Display {
 
 const VELOCITY_COLOR: [f32; 4] = [0.98, 0.78, 0.30, 1.0];
 const TREE_COLOR: [f32; 4] = [0.75, 0.78, 0.85, 0.45];
+const TRAIL_COLOR: [f32; 4] = [1.0, 0.55, 0.15, 0.9];
 /// Velocity arrows show where a body will be in this many seconds.
 const VELOCITY_LOOKAHEAD_S: f32 = 1.0;
 
 impl State {
-    pub fn new(settings: Settings, post: Post) -> State {
+    pub fn new(mut settings: Settings, mut overrides: Overrides, post: Post) -> State {
+        overrides.file = Some(settings.clone());
+        if let Some(c) = &overrides.connections {
+            settings.connections = c.clone();
+        }
+        if let Some(u) = &overrides.robot_urdf {
+            settings.robot_urdf = u.clone();
+        }
         State {
-            conn: Connection::open(&settings.url, 0, &post),
+            conns: Vec::new(),
+            next_conn: 0,
             post,
-            url_edit: TextEdit::new(settings.url.clone()),
+            url_edit: TextEdit::new(String::new()),
             urdf_edit: TextEdit::new(settings.robot_urdf.clone()),
             applied: settings.clone(),
             settings,
-            received: Received::default(),
+            overrides,
             dirty: true,
             display: Display::default(),
-            robot: None,
+            robot_file: None,
+            robot_description: None,
+            robot_mismatch: None,
             robot_dirty: false,
+            image: Pixels::new(),
+            image_dirty: false,
             camera: OrbitCamera::default(),
             framed: Framed::Nothing,
             frame_with: State::home_view,
@@ -178,99 +175,151 @@ impl State {
         self.applied = self.settings.clone();
     }
 
-    /// Applies what the current source sent since the last frame.
-    pub fn apply(&mut self, events: Vec<(u64, Event)>) {
-        for (generation, e) in events {
-            if generation != self.conn.generation {
-                continue;
-            }
-            let cloud_topic = self.cloud_topic();
-            let joint_topic = self.joint_topic();
-            let r = &mut self.received;
-            // Whether the display needs rebuilding; joint states only re-pose the robot.
-            let display = match e {
-                Event::Status(s) => {
-                    r.status = s;
-                    true
-                }
-                Event::Channels(c) => {
-                    r.channels = c;
-                    let advertised: HashSet<&str> = r.channels.iter().map(|c| c.topic.as_str()).collect();
-                    r.poses.retain(|(topic, _), _| advertised.contains(topic.as_str()));
-                    r.errors.retain(|topic, _| advertised.contains(topic.as_str()));
-                    true
-                }
-                Event::Data { topic, data: Decoded::Cloud(c) } if c.points.len() > viewport::MAX_POINTS => {
-                    let error = format!("{} points, over the {} the GPU can draw", thousands(c.points.len()), thousands(viewport::MAX_POINTS));
-                    r.errors.insert(topic, error);
-                    true
-                }
-                Event::Data { topic, data } => {
-                    // Clearing an error changes what the display says, whatever the message.
-                    let cleared = r.errors.remove(&topic).is_some();
-                    match data {
-                        Decoded::Cloud(c) => {
-                            if cloud_topic.as_deref() == Some(topic.as_str()) {
-                                r.cloud = Some((topic, Arc::new(c)));
-                            }
-                            true
-                        }
-                        Decoded::Transforms(ts) => {
-                            ts.into_iter().for_each(|t| r.tf.insert(t));
-                            true
-                        }
-                        Decoded::Poses(p) => {
-                            let label = p.items.first().and_then(|i| i.label.clone()).unwrap_or_default();
-                            r.poses.insert((topic, label), p);
-                            true
-                        }
-                        // These arrive at the robot's control rate (kpd: 100 Hz).
-                        Decoded::Joints(js) => {
-                            if joint_topic.as_deref() == Some(topic.as_str()) {
-                                match &mut r.joints {
-                                    Some((t, positions)) if *t == topic => positions.extend(js),
-                                    other => *other = Some((topic, js.into_iter().collect())),
-                                }
-                                self.robot_dirty = true;
-                            }
-                            cleared
-                        }
-                    }
-                }
-                Event::DecodeFailed { topic, error } => {
-                    r.errors.insert(topic, error);
-                    true
-                }
-                Event::ServerWarning(w) => {
-                    r.server_warning = Some(w);
-                    true
-                }
-            };
-            self.dirty |= display;
+    /// What `sync` writes to the settings file: the settings, with command-line values the
+    /// user hasn't changed since swapped back for the file's.
+    fn to_save(&self) -> Settings {
+        let mut s = self.settings.clone();
+        let (o, Some(file)) = (&self.overrides, &self.overrides.file) else { return s };
+        if o.connections.as_ref() == Some(&s.connections) {
+            s.connections = file.connections.clone();
         }
+        if o.robot_urdf.as_ref() == Some(&s.robot_urdf) {
+            s.robot_urdf = file.robot_urdf.clone();
+        }
+        s
+    }
+
+    pub fn connections(&self) -> &[Connection] {
+        &self.conns
+    }
+
+    fn received(&self) -> impl Iterator<Item = &Received> {
+        self.conns.iter().map(|c| &c.received)
+    }
+
+    /// Adds the server in the Settings field, unless it's already in the list.
+    pub fn add_connection(&mut self) {
+        let url = self.url_edit.text.trim().to_string();
+        if !url.is_empty() && !self.settings.connections.contains(&url) {
+            self.settings.connections.push(url);
+        }
+        self.url_edit = TextEdit::new(String::new());
+    }
+
+    /// Applies what the sources sent since the last frame; `clock` is the UI clock (seconds).
+    pub fn apply(&mut self, events: Vec<(u64, Event)>, clock: f64) {
+        for (id, e) in events {
+            // Per event: a connection's new channel list can change what Auto picks.
+            let picked = Picked {
+                cloud: self.cloud_topic(),
+                joints: self.joint_topic(),
+                image: self.image_topic(),
+                trail: self.settings.trail > 0.0,
+            };
+            let Some(conn) = self.conns.iter_mut().find(|c| c.id == id) else { continue };
+            let changed = conn.received.apply(e, clock, &picked);
+            self.dirty |= changed.display;
+            self.robot_dirty |= changed.robot;
+            self.image_dirty |= changed.image;
+        }
+    }
+
+    /// Every connection's topics of `kind`, each once, in connection then server order.
+    pub fn topics_of(&self, kind: Kind) -> Vec<String> {
+        let mut out: Vec<String> = Vec::new();
+        for c in self.received().flat_map(|r| &r.channels).filter(|c| c.kind == Some(kind)) {
+            if !out.contains(&c.topic) {
+                out.push(c.topic.clone());
+            }
+        }
+        out
+    }
+
+    fn first_of(&self, kind: Kind) -> Option<String> {
+        self.received().flat_map(|r| &r.channels).find(|c| c.kind == Some(kind)).map(|c| c.topic.clone())
     }
 
     /// The cloud topic to draw: the chosen one, else the first advertised.
     pub fn cloud_topic(&self) -> Option<String> {
-        self.settings.cloud_topic.clone().or_else(|| self.topics_of(Kind::PointCloud).next().map(str::to_string))
+        self.settings.cloud_topic.clone().or_else(|| self.first_of(Kind::PointCloud))
     }
 
     /// The joint-state topic that poses the robot: the chosen one, else the first advertised.
     pub fn joint_topic(&self) -> Option<String> {
-        self.settings.joint_topic.clone().or_else(|| self.topics_of(Kind::JointStates).next().map(str::to_string))
+        self.settings.joint_topic.clone().or_else(|| self.first_of(Kind::JointStates))
     }
 
-    /// The last URDF load: the model, or why it didn't load; `None` with no URDF set.
-    pub fn robot_load(&self) -> Option<&Result<Model, String>> {
-        self.robot.as_ref().map(|(_, m)| m)
+    pub fn image_topic(&self) -> Option<String> {
+        self.settings.image_topic.clone().or_else(|| self.first_of(Kind::Image))
     }
 
-    /// The loaded robot, if its URDF loaded.
+    pub fn description_topic(&self) -> Option<String> {
+        self.settings.description_topic.clone().or_else(|| self.first_of(Kind::RobotDescription))
+    }
+
+    /// The drawn cloud and its topic, from whichever connection has it.
+    pub fn cloud(&self) -> Option<&(String, Arc<PointCloud>)> {
+        self.received().find_map(|r| r.cloud.as_ref())
+    }
+
+    pub fn joints(&self) -> Option<&(String, HashMap<String, f64>)> {
+        self.received().find_map(|r| r.joints.as_ref())
+    }
+
+    /// The shown image, before annotations.
+    pub fn shown_image(&self) -> Option<&(String, Arc<Image>)> {
+        self.received().find_map(|r| r.image.as_ref())
+    }
+
+    /// The error a topic last reported, on any connection.
+    pub fn error(&self, topic: &str) -> Option<&String> {
+        self.received().find_map(|r| r.errors.get(topic))
+    }
+
+    fn visible(&self, topic: &str) -> bool {
+        !self.settings.hidden_topics.contains(topic)
+    }
+
+    /// The annotations drawn on the shown image: every visible annotation topic's newest.
+    pub fn annotations(&self) -> impl Iterator<Item = &Annotation> {
+        self.received().flat_map(|r| &r.annotations).filter(|(t, _)| self.visible(t)).flat_map(|(_, a)| a)
+    }
+
+    /// Visible text topics with their newest message.
+    pub fn texts(&self) -> impl Iterator<Item = (&String, &String)> {
+        self.received().flat_map(|r| &r.texts).filter(|(t, _)| self.visible(t))
+    }
+
+    pub fn stats(&self) -> impl Iterator<Item = (&String, &Vec<Diagnostic>)> {
+        self.received().flat_map(|r| &r.stats).filter(|(t, _)| self.visible(t))
+    }
+
+    /// The URDF file's load: the model, or why it didn't load; `None` with no file set.
+    pub fn robot_file(&self) -> Option<&Result<Model, String>> {
+        self.robot_file.as_ref().map(|(_, m)| m)
+    }
+
+    /// The described robot's topic and load, once its topic has sent a URDF.
+    pub fn robot_description(&self) -> Option<(&str, &Result<Model, String>)> {
+        self.robot_description.as_ref().map(|(t, _, m)| (t.as_str(), m))
+    }
+
+    pub fn robot_mismatch(&self) -> Option<&str> {
+        self.robot_mismatch.as_deref()
+    }
+
+    /// The robot drawn: the file's, unless a server describes a different robot, which wins (a
+    /// file that matches still draws, for its meshes and colours); else whichever loaded.
     pub fn robot_model(&self) -> Option<&Model> {
-        self.robot_load().and_then(|m| m.as_ref().ok())
+        let file = self.robot_file().and_then(|m| m.as_ref().ok());
+        let described = self.robot_description().and_then(|(_, m)| m.as_ref().ok());
+        match (file, described) {
+            (Some(_), Some(d)) if self.robot_mismatch.is_some() => Some(d),
+            (f, d) => f.or(d),
+        }
     }
 
-    /// The loaded robot, when it's also switched on.
+    /// The robot drawn, when it's also switched on.
     pub fn shown_robot(&self) -> Option<&Model> {
         self.robot_model().filter(|_| self.settings.show_robot)
     }
@@ -279,76 +328,80 @@ impl State {
     /// editing the file).
     pub fn load_robot(&mut self) {
         self.settings.robot_urdf = self.urdf_edit.text.trim().to_string();
-        self.robot = None;
-    }
-
-    pub fn topics_of(&self, kind: Kind) -> impl Iterator<Item = &str> {
-        self.received.channels.iter().filter(move |c| c.kind == Some(kind)).map(|c| c.topic.as_str())
+        self.robot_file = None;
     }
 
     fn wanted(&self) -> Wanted {
-        let mut topics: HashSet<String> = self.topics_of(Kind::Transforms).map(str::to_string).collect();
+        let s = &self.settings;
+        let mut topics: HashSet<String> = self.topics_of(Kind::Transforms).into_iter().collect();
         // Hidden points aren't fetched (a 1.4 M-point cloud at 10 Hz is ~160 MB/s); the last one
         // stays, so turning them back on shows it until the next arrives.
-        if self.settings.show_points {
+        if s.show_points {
             topics.extend(self.cloud_topic());
         }
-        if self.settings.show_poses {
-            topics.extend(self.topics_of(Kind::Poses).filter(|t| !self.settings.hidden_topics.contains(*t)).map(str::to_string));
+        let visible = |kind| self.topics_of(kind).into_iter().filter(|t| self.visible(t));
+        if s.show_poses {
+            topics.extend(visible(Kind::Poses));
         }
         if self.shown_robot().is_some() {
             topics.extend(self.joint_topic());
         }
-        Wanted { topics, color: self.settings.color.clone() }
+        // Always: the description says which robot the server drives, shown or not.
+        topics.extend(self.description_topic());
+        if s.show_image {
+            topics.extend(self.image_topic());
+            topics.extend(visible(Kind::Annotations));
+        }
+        if s.show_text {
+            topics.extend(visible(Kind::Text));
+        }
+        if s.show_stats {
+            topics.extend(visible(Kind::Stats));
+        }
+        Wanted { topics, color: s.color.clone() }
     }
 
-    /// Runs at the start of every frame (`AppSpec::poll`); true when it changed anything.
-    pub fn sync(&mut self) -> bool {
+    /// Runs at the start of every frame (`AppSpec::poll`) with the UI clock; true when it changed
+    /// anything.
+    pub fn sync(&mut self, clock: f64, tx: &mut Tx) -> bool {
         let mut changed = false;
-        if self.settings.url != self.conn.url {
-            // A new server: drop the old connection and everything it delivered.
-            self.conn = Connection::open(&self.settings.url, self.conn.generation + 1, &self.post);
-            self.received = Received::default();
-            self.framed = Framed::Nothing;
-            self.dirty = true;
+        self.sync_connections();
+        self.sync_robot();
+        let (joint_topic, cloud_topic, image_topic) = (self.joint_topic(), self.cloud_topic(), self.image_topic());
+        for r in self.conns.iter_mut().map(|c| &mut c.received) {
+            // A switched joint topic: the old topic's positions don't apply.
+            if r.joints.as_ref().is_some_and(|(t, _)| Some(t) != joint_topic.as_ref()) {
+                r.joints = None;
+                self.robot_dirty = true;
+            }
+            // A switched cloud topic: stop drawing the old one rather than mislabel it.
+            if r.cloud.as_ref().is_some_and(|(t, _)| Some(t) != cloud_topic.as_ref()) {
+                r.cloud = None;
+                self.dirty = true;
+            }
+            if r.image.as_ref().is_some_and(|(t, _)| Some(t) != image_topic.as_ref()) {
+                r.image = None;
+                self.image_dirty = true;
+            }
+            let hidden = &self.settings.hidden_topics;
+            r.poses.retain(|(topic, _), _| !hidden.contains(topic));
+            r.trails.retain(|(topic, _), _| !hidden.contains(topic));
         }
-        let urdf = self.settings.robot_urdf.trim();
-        let want = (!urdf.is_empty()).then(|| urdf.to_string());
-        if self.robot.as_ref().map(|(p, _)| p) != want.as_ref() {
-            self.robot = want.map(|path| {
-                let model = robot::load(Path::new(&path), viewport::MAX_ROBOT_VERTICES);
-                match &model {
-                    Ok(m) => eprintln!(
-                        "lantern: loaded {} from {path} in {:.1} ms: {} links, {} movable joints, {} parts, {} vertices, {} problems",
-                        m.robot.name, m.load_ms, m.robot.links.len(), m.robot.movable().count(), m.mesh.parts.len(), m.mesh.vertices.len(), m.problems.len(),
-                    ),
-                    Err(e) => eprintln!("lantern: can't load {path}: {e}"),
-                }
-                (path, model)
-            });
-            self.dirty = true;
+        if let Some(due) = self.expire(clock) {
+            tx.wake_at(due);
         }
-        // A switched joint topic: the old topic's positions don't apply.
-        if self.received.joints.as_ref().is_some_and(|(t, _)| Some(t) != self.joint_topic().as_ref()) {
-            self.received.joints = None;
-            self.robot_dirty = true;
-        }
-        // A switched cloud topic: stop drawing the old one rather than mislabel it.
-        if self.received.cloud.as_ref().is_some_and(|(t, _)| Some(t) != self.cloud_topic().as_ref()) {
-            self.received.cloud = None;
-            self.dirty = true;
-        }
-        let hidden = &self.settings.hidden_topics;
-        self.received.poses.retain(|(topic, _), _| !hidden.contains(topic));
         let wanted = self.wanted();
-        if wanted != self.conn.sent {
-            self.conn.source.want(wanted.clone());
-            self.conn.sent = wanted;
-        }
+        self.conns.iter_mut().for_each(|c| c.want(&wanted));
         if self.settings != self.applied {
-            self.settings.save();
+            self.to_save().save();
             self.applied = self.settings.clone();
             self.dirty = true;
+            self.image_dirty = true;
+        }
+        if self.image_dirty {
+            self.image_dirty = false;
+            self.draw_image();
+            changed = true;
         }
         if self.dirty {
             self.dirty = false;
@@ -366,6 +419,92 @@ impl State {
         changed
     }
 
+    /// Opens a connection for every listed server that has none, and closes the ones no longer
+    /// listed (dropping a source disconnects it, and drops what it delivered).
+    fn sync_connections(&mut self) {
+        let want = &self.settings.connections;
+        let before = self.conns.len();
+        self.conns.retain(|c| want.contains(&c.url));
+        let kept = self.conns.len();
+        for url in want {
+            if !self.conns.iter().any(|c| &c.url == url) {
+                self.conns.push(Connection::open(url, self.next_conn, &self.post));
+                self.next_conn += 1;
+            }
+        }
+        self.conns.sort_by_key(|c| want.iter().position(|u| *u == c.url));
+        if kept != before || self.conns.len() != kept {
+            self.dirty = true;
+            self.image_dirty = true;
+            // Nothing left from before: frame the new data as at startup.
+            if kept == 0 {
+                self.framed = Framed::Nothing;
+            }
+        }
+    }
+
+    /// Loads the URDF file when its path changes, and the described robot when its topic sends a
+    /// different URDF; then compares the two.
+    fn sync_robot(&mut self) {
+        let mut loaded = false;
+        let urdf = self.settings.robot_urdf.trim();
+        let want = (!urdf.is_empty()).then(|| urdf.to_string());
+        if self.robot_file.as_ref().map(|(p, _)| p) != want.as_ref() {
+            self.robot_file = want.map(|path| {
+                let model = robot::load(Path::new(&path), viewport::MAX_ROBOT_VERTICES);
+                log_load(&path, &model);
+                (path, model)
+            });
+            loaded = true;
+        }
+        let topic = self.description_topic();
+        let text = topic.as_ref().and_then(|t| self.received().find_map(|r| r.descriptions.get(t)));
+        let current = self.robot_description.as_ref().map(|(t, x, _)| (t, x));
+        if current != topic.as_ref().zip(text) {
+            self.robot_description = topic.zip(text.cloned()).map(|(topic, text)| {
+                let model = robot::load_text(&text, viewport::MAX_ROBOT_VERTICES);
+                log_load(&topic, &model);
+                (topic, text, model)
+            });
+            loaded = true;
+        }
+        if loaded {
+            let file = self.robot_file.as_ref().and_then(|(p, m)| Some((p, m.as_ref().ok()?)));
+            let described = self.robot_description.as_ref().and_then(|(t, _, m)| Some((t, m.as_ref().ok()?)));
+            self.robot_mismatch = file.zip(described).and_then(|((path, f), (topic, d))| {
+                let why = f.robot.kinematic_difference(&d.robot)?;
+                let file = Path::new(path).file_name().map_or(path.clone(), |n| n.to_string_lossy().into_owned());
+                Some(format!("{file} ({}) isn't the robot {topic} describes ({}): {why}. Drawing {topic}'s.", f.robot.name, d.robot.name))
+            });
+            self.dirty = true;
+        }
+    }
+
+    /// Expires every connection's poses and trails (`Received::expire`); returns when the next
+    /// is due, for the frame clock to wake then.
+    fn expire(&mut self, now: f64) -> Option<f64> {
+        let (timeout, trail) = (self.settings.pose_timeout as f64, self.settings.trail as f64);
+        let mut due: Option<f64> = None;
+        for r in self.conns.iter_mut().map(|c| &mut c.received) {
+            let (dropped, next) = r.expire(now, timeout, trail);
+            self.dirty |= dropped;
+            due = match (due, next) {
+                (Some(a), Some(b)) => Some(a.min(b)),
+                (a, b) => a.or(b),
+            };
+        }
+        due
+    }
+
+    /// Draws the annotations into a copy of the shown image, for the image card.
+    fn draw_image(&mut self) {
+        let Some((_, image)) = self.shown_image().filter(|_| self.settings.show_image) else { return };
+        let annotations: Vec<&Annotation> = self.annotations().collect();
+        let mut rgba = image.rgba.clone();
+        annotate::draw(&mut rgba, image.width, image.height, annotations);
+        self.image.set(image.width, image.height, rgba);
+    }
+
     /// Frames the camera on the data the first time there is some (see `Framed`).
     fn frame(&mut self) {
         if self.display.bounds.is_none() {
@@ -377,7 +516,7 @@ impl State {
             Framed::Robot(c) => c == self.camera,
             Framed::Cloud => return,
         };
-        if self.received.cloud.is_some() {
+        if self.cloud().is_some() {
             if untouched {
                 self.camera = (self.frame_with)(self);
             }
@@ -392,37 +531,41 @@ impl State {
     fn pose_robot(&self, root: Pose) -> Option<PosedRobot> {
         let m = self.shown_robot()?;
         let none = HashMap::new();
-        let joints = self.received.joints.as_ref().map_or(&none, |(_, j)| j);
+        let joints = self.joints().map_or(&none, |(_, j)| j);
         let links = m.robot.link_poses(joints).iter().map(|p| root.then(p).matrix()).collect();
         Some(PosedRobot { root, links })
     }
 
-    fn fixed_frame(&self) -> Option<String> {
+    fn fixed_frame(&self, tf: &TfTree) -> Option<String> {
         if let Some(f) = &self.settings.fixed_frame {
             return Some(f.clone());
         }
-        let r = &self.received;
-        let data_frame = r.cloud.as_ref().map(|(_, c)| c.frame_id.clone())
-            .or_else(|| r.poses.values().next().map(|p| p.frame_id.clone()));
+        let data_frame = self.cloud().map(|(_, c)| c.frame_id.clone())
+            .or_else(|| self.received().find_map(|r| r.poses.values().next()).map(|(_, p)| p.frame_id.clone()));
         let robot_root = self.shown_robot().map(|m| m.robot.links[0].clone());
-        Some(r.tf.root_of(&anchor_frame(data_frame, robot_root, &r.tf.frames())?))
+        Some(tf.root_of(&anchor_frame(data_frame, robot_root, &tf.frames())?))
     }
 
     fn derive(&self) -> Display {
-        let (s, r) = (&self.settings, &self.received);
-        let mut d = Display { fixed: self.fixed_frame(), ..Display::default() };
-        let Some(fixed) = d.fixed.clone() else { return d };
+        let s = &self.settings;
+        let mut tf = TfTree::default();
+        self.received().for_each(|r| tf.extend(&r.tf));
+        let mut d = Display { fixed: self.fixed_frame(&tf), ..Display::default() };
+        let Some(fixed) = d.fixed.clone() else {
+            d.tf = tf;
+            return d;
+        };
         // The cloud topic's error first: a cloud refused or undecodable is why the view is empty.
         let mut problems: Vec<String> = self.cloud_topic().iter()
             .filter(|_| s.show_points)
-            .filter_map(|t| r.errors.get(t).map(|e| format!("{t}: {e}")))
+            .filter_map(|t| self.error(t).map(|e| format!("{t}: {e}")))
             .collect();
 
         // The cloud: placement, a sample of its points in the display frame for bounds and the
         // height ramp (16 Ki points: percentiles to well under 1%).
         let mut sample: Vec<Vec3> = Vec::new();
-        if let Some((topic, c)) = &r.cloud {
-            match r.tf.lookup(&fixed, &c.frame_id) {
+        if let Some((topic, c)) = self.cloud() {
+            match tf.lookup(&fixed, &c.frame_id) {
                 Some(p) => {
                     let m = p.then(&c.origin).matrix();
                     d.cloud_model = Some(m);
@@ -439,8 +582,8 @@ impl State {
         let mut marks: Vec<Vec3> = Vec::new();
         if s.show_frames {
             let mut origins = BTreeMap::new();
-            for f in r.tf.frames() {
-                if let Some(p) = r.tf.lookup(&fixed, &f) {
+            for f in tf.frames() {
+                if let Some(p) = tf.lookup(&fixed, &f) {
                     let m = p.matrix();
                     lines.axes(m, axis, 2.5);
                     let o = m.transform_point3(Vec3::ZERO);
@@ -451,39 +594,60 @@ impl State {
                     origins.insert(f, o);
                 }
             }
-            for (parent, child) in r.tf.edges() {
+            for (parent, child) in tf.edges() {
                 if let (Some(&a), Some(&b)) = (origins.get(parent), origins.get(child)) {
                     lines.segment(a, b, 1.5, TREE_COLOR);
                 }
             }
         }
         if s.show_poses {
-            for ((topic, _), poses) in &r.poses {
-                let Some(frame) = r.tf.lookup(&fixed, &poses.frame_id) else {
-                    problems.push(format!("{topic}: no transform from {} to {fixed}", poses.frame_id));
-                    continue;
-                };
-                for item in &poses.items {
-                    let m = frame.then(&item.pose).matrix();
-                    lines.axes(m, axis * 0.6, 3.0);
-                    let o = m.transform_point3(Vec3::ZERO);
-                    marks.push(o);
-                    if let (true, Some(l)) = (s.show_labels, &item.label) {
-                        d.labels.push((l.clone(), o));
+            for r in self.received() {
+                for ((topic, _), (_, poses)) in &r.poses {
+                    let Some(frame) = tf.lookup(&fixed, &poses.frame_id) else {
+                        problems.push(format!("{topic}: no transform from {} to {fixed}", poses.frame_id));
+                        continue;
+                    };
+                    for item in &poses.items {
+                        let m = frame.then(&item.pose).matrix();
+                        lines.axes(m, axis * 0.6, 3.0);
+                        let o = m.transform_point3(Vec3::ZERO);
+                        marks.push(o);
+                        if let (true, Some(l)) = (s.show_labels, &item.label) {
+                            d.labels.push((l.clone(), o));
+                        }
+                        if let Some(v) = item.velocity {
+                            let v = frame.rotation.as_quat() * v.as_vec3();
+                            lines.arrow(o, o + v * VELOCITY_LOOKAHEAD_S, 2.5, VELOCITY_COLOR);
+                        }
                     }
-                    if let Some(v) = item.velocity {
-                        let v = frame.rotation.as_quat() * v.as_vec3();
-                        lines.arrow(o, o + v * VELOCITY_LOOKAHEAD_S, 2.5, VELOCITY_COLOR);
+                }
+                for t in r.trails.values() {
+                    let Some(frame) = tf.lookup(&fixed, &t.frame_id) else { continue };
+                    let at = |p: &DVec3| frame.then(&Pose { translation: *p, rotation: Default::default() }).translation.as_vec3();
+                    let pts: Vec<Vec3> = t.points.iter().map(|(_, p)| at(p)).collect();
+                    for w in pts.windows(2) {
+                        lines.segment(w[0], w[1], 2.0, TRAIL_COLOR);
                     }
                 }
             }
         }
         if let Some(m) = self.shown_robot() {
             let root = &m.robot.links[0];
-            let placed = r.tf.lookup(&fixed, root).unwrap_or_else(|| {
+            let placed = tf.lookup(&fixed, root).unwrap_or_else(|| {
                 d.robot_note = Some(format!("No transform from {root} to {fixed}: drawn at {fixed}'s origin"));
                 Pose::IDENTITY
             });
+            // Joint names the model doesn't have mean the server drives some other robot.
+            if let Some((topic, joints)) = self.joints() {
+                let movable: HashSet<&str> = m.robot.movable().collect();
+                let mut unknown: Vec<&str> = joints.keys().map(String::as_str).filter(|n| !movable.contains(n)).collect();
+                unknown.sort();
+                if !unknown.is_empty() {
+                    let shown = unknown.iter().take(3).copied().collect::<Vec<_>>().join(", ");
+                    let more = if unknown.len() > 3 { format!(" and {} more", unknown.len() - 3) } else { String::new() };
+                    problems.insert(0, format!("{topic} names joints {} doesn't have: {shown}{more}", m.robot.name));
+                }
+            }
             d.robot = self.pose_robot(placed);
             marks.extend(d.robot.iter().flat_map(|r| &r.links).map(|l| l.transform_point3(Vec3::ZERO)));
         }
@@ -494,7 +658,7 @@ impl State {
         if let (Some((_, radius)), false) = (d.bounds, sample.is_empty()) {
             d.grid_cell = 10f32.powf((radius / 12.0).log10().round());
         }
-        d.shade = match r.cloud.as_ref().map(|(_, c)| &c.color) {
+        d.shade = match self.cloud().map(|(_, c)| &c.color) {
             Some(PointColor::Rgb) => Shade::Rgb,
             Some(PointColor::Field { min, max, .. }) => Shade::Field { lo: *min, hi: *max },
             _ => match percentiles(sample.iter().map(|p| p.z).collect(), 0.02, 0.98) {
@@ -504,6 +668,7 @@ impl State {
             },
         };
         d.problem = problems.into_iter().next();
+        d.tf = tf;
         d
     }
 
@@ -528,7 +693,7 @@ impl State {
         let s = &self.settings;
         View {
             camera: self.camera,
-            cloud: match (&self.received.cloud, self.display.cloud_model) {
+            cloud: match (self.cloud(), self.display.cloud_model) {
                 (Some((_, c)), Some(m)) if s.show_points => Some((c, m)),
                 _ => None,
             },
@@ -551,6 +716,16 @@ impl State {
             Some((c, _)) => c.points.len().div_ceil(self.settings.decimate as usize),
             None => 0,
         }
+    }
+}
+
+fn log_load(from: &str, model: &Result<Model, String>) {
+    match model {
+        Ok(m) => eprintln!(
+            "lantern: loaded {} from {from} in {:.1} ms: {} links, {} movable joints, {} parts, {} vertices, {} problems",
+            m.robot.name, m.load_ms, m.robot.links.len(), m.robot.movable().count(), m.mesh.parts.len(), m.mesh.vertices.len(), m.problems.len(),
+        ),
+        Err(e) => eprintln!("lantern: can't load {from}: {e}"),
     }
 }
 

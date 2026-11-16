@@ -13,16 +13,17 @@ The protocol works with and without ROS:
 - **ROS 2:** run [`foxglove_bridge`](https://github.com/foxglove/foxglove-sdk/tree/main/ros/src/foxglove_bridge),
   and Lantern reads ROS messages (CDR) from it.
 - **No ROS:** any program using a Foxglove SDK (Python, C++, Rust) publishes `foxglove.*`
-  protobuf messages directly. This is the path kpd will use.
+  protobuf messages directly.
 
 Lantern is pure Rust. Building or running it needs no ROS installation.
 
 ```sh
 cargo run --release                          # window; connects to ws://localhost:8765
+cargo run --release -- --connect ws://a:8765 --connect ws://b:8765 --urdf robot.urdf   # this run only
 ```
 
 In the viewport, drag to orbit, Shift-drag or middle-drag to pan, and scroll to zoom. The side
-panel holds the view controls. The settings button opens the Settings page: server URL, topics,
+panel holds the view controls. The settings button opens the Settings page: servers, topics,
 fixed frame, labels, axis length, the robot's URDF and joint-state topic, and colour by any
 numeric field. Settings are saved to
 `$XDG_CONFIG_HOME/lantern/settings.json` (`~/.config/lantern/settings.json` by default).
@@ -34,7 +35,12 @@ numeric field. Settings are saved to
 | Point cloud | `sensor_msgs/msg/PointCloud2` | `foxglove.PointCloud` |
 | Transforms | `tf2_msgs/msg/TFMessage`, `geometry_msgs/msg/TransformStamped` | `foxglove.FrameTransform`, `foxglove.FrameTransforms` |
 | Poses | `geometry_msgs/msg/PoseStamped`, `PoseArray`, `nav_msgs/msg/Odometry` | `foxglove.PoseInFrame`, `PosesInFrame`, `Odometry` |
-| Joint states | `sensor_msgs/msg/JointState` | `json`, schema named `sensor_msgs/msg/JointState` (Foxglove has no joint-state schema) |
+| Joint states | `sensor_msgs/msg/JointState` | `foxglove.JointStates`, or `json` with schema named `sensor_msgs/msg/JointState` |
+| Robot description | `std_msgs/msg/String` on a `robot_description` topic | `json`, the same |
+| Camera image | `sensor_msgs/msg/Image`, `CompressedImage` | `foxglove.RawImage`, `CompressedImage` |
+| Image annotations | | `foxglove.ImageAnnotations` |
+| Text | `std_msgs/msg/String` | `json`, the same |
+| Stats | `diagnostic_msgs/msg/DiagnosticArray` | `json`, the same |
 
 - Other topics are listed in Settings as "No decoder".
 - One point cloud topic is drawn at a time; all transform topics are read; pose topics can be
@@ -61,7 +67,7 @@ To add a message type, add one row to `DECODERS` in [src/decode/mod.rs](src/deco
 write a function that turns the message into a `scene` type. To add another transport (a file,
 a different protocol), implement `Source` in [src/source.rs](src/source.rs).
 
-### Publishing from kpd (no ROS)
+### Publishing without ROS
 
 With the [Foxglove Python SDK](https://pypi.org/project/foxglove-sdk/):
 
@@ -70,7 +76,7 @@ import foxglove
 from foxglove import messages as fm
 from foxglove.channels import FrameTransformsChannel, OdometryChannel, PointCloudChannel, PosesInFrameChannel
 
-foxglove.start_server(name="kpd", port=8765)  # Lantern's default URL is ws://localhost:8765
+foxglove.start_server(name="my-robot", port=8765)  # Lantern's default URL is ws://localhost:8765
 tf, objects = FrameTransformsChannel("/tf"), OdometryChannel("/objects")
 points, markers = PointCloudChannel("/points"), PosesInFrameChannel("/markers")
 
@@ -179,13 +185,13 @@ uv pip install --python /tmp/fxenv/bin/python foxglove-sdk==0.31.0
 ```
 
 For the robot model, [scripts/robot_fixture.py](scripts/robot_fixture.py) expands the KUKA LBR
-Med 7 URDF from kuka-policy-deployment's pyfri submodule (lunarlab-gatech/pyfri, Apache-2.0) and
+Med 7 URDF from a checkout of [pyfri](https://github.com/lunarlab-gatech/pyfri) (Apache-2.0) and
 copies its visual meshes into `fixtures/med7/`. `serve.py --robot-pose home|reach` adds fixed
-joint states on `/joint_states`: SDK JSON, or the ROS message with `--via ros`. `home` is kpd's
-`HOME_Q`.
+joint states on `/joint_states`: SDK JSON (`--joints proto` for `foxglove.JointStates`), or the
+ROS message with `--via ros`.
 
 ```sh
-python scripts/robot_fixture.py [path/to/kuka-policy-deployment]   # needs its .venv (xacro)
+python scripts/robot_fixture.py path/to/pyfri --xacro path/to/xacro
 SETTINGS='{"robot_urdf": "'$PWD'/fixtures/med7/med7.urdf"}' \
   scripts/snap-live.sh out/robot "--cloud table --robot-pose reach" - settings
 ```

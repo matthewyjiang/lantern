@@ -1,22 +1,30 @@
-//! The window: the viewport card with its overlays, and on the right either the side panel
-//! (quick display controls) or the Settings page (connection, topics, frames, robot, display). Every
-//! control here edits `State::settings` or the camera; `State::sync` applies the edit.
+//! The window: the viewport card with its overlays (camera image, text, stats), and on the right
+//! either the side panel (quick display controls) or the Settings page (connections, topics,
+//! frames, poses, robot, display). Every control here edits `State::settings` or the camera;
+//! `State::sync` applies the edit.
 
 use std::collections::BTreeSet;
 
 use glam::Vec3;
 use rune::tok::{self, TextStyle, motion, type_};
+use rune::color::srgb_decode;
 use rune::{Color, Cx, Drag, El, Phase, PointerButton, ScrollSpec, Tx, WheelEvent, col, effect, el, oklch, oklcha, row, text, text_input};
 
 use crate::app::State;
+use crate::connection::Connection;
 use crate::decode::{ColorChoice, Kind};
-use crate::scene::PointColor;
+use crate::scene::{Annotation, Level, PointColor};
 use crate::settings::Settings;
 use crate::source::Status;
 use crate::viewport::{self, Shade};
 
 const SIDEBAR_W: f32 = 296.0;
 const SETTINGS_W: f32 = 440.0;
+/// The Settings page's side margin. Inside its scroll area, so the wheel scrolls the page over
+/// the margins too.
+const SETTINGS_PAD: f32 = 22.0;
+/// Text and stats cards over the viewport.
+const CARD_W: f32 = 340.0;
 const SMALL: TextStyle = TextStyle::new(11.0, 500.0);
 /// Topic, frame and URL text: names people type and match character for character.
 const MONO: TextStyle = TextStyle::new(12.0, 500.0).mono();
@@ -47,15 +55,23 @@ fn viewport_pane(s: &State, cx: &mut Cx<State>) -> El {
         .clip_rounded(tok::radius::LG)
         .border(1.0, oklcha(1.0, 0.0, 0.0, 0.07))
         .child(stage);
-    if let Some(size) = cx.layout_size("viewport") {
+    let size = cx.layout_size("viewport");
+    if let Some(size) = size {
         for label in frame_labels(s, size) {
             card = card.child(label);
         }
     }
+    let right = col().key("overlay-right").gap(8.0).items_end().child(hints()).children(text_cards(s)).children(stats_card(s));
+    // The status chip wraps short of the right column (hints, text and stats cards).
+    let chip_w = match (size, cx.layout_size("overlay-right")) {
+        (Some([vw, _]), Some([rw, _])) => (vw - rw - 3.0 * 14.0).clamp(200.0, 520.0),
+        _ => 520.0,
+    };
     card = card
-        .child(col().gap(8.0).child(point_badge(s)).children(status_chip(s)).pin(Some(14.0), Some(14.0), None, None))
-        .child(hints().pin(None, Some(14.0), Some(14.0), None))
-        .children(legend(s).map(|l| l.pin(Some(14.0), None, None, Some(14.0))));
+        .child(col().gap(8.0).items_start().child(point_badge(s)).children(status_chip(s, chip_w)).pin(Some(14.0), Some(14.0), None, None))
+        .child(right.pin(None, Some(14.0), Some(14.0), None))
+        .children(legend(s).map(|l| l.pin(Some(14.0), None, None, Some(14.0))))
+        .children(size.and_then(|size| image_card(s, size)).map(|c| c.pin(None, None, Some(14.0), Some(14.0))));
     el().grow(1.0).h_full().padding(10.0).pr(0.0).child(card)
 }
 
@@ -103,7 +119,7 @@ fn glass() -> El {
 /// How many points are drawn, so Density and the Point cloud toggle read back.
 fn point_badge(s: &State) -> El {
     let t = tok::theme(true);
-    let label = match &s.received.cloud {
+    let label = match s.cloud() {
         None => "No point cloud".to_string(),
         Some((topic, c)) => {
             let (total, drawn) = (c.points.len(), s.drawn_points());
@@ -117,30 +133,39 @@ fn point_badge(s: &State) -> El {
     glass().px(10.0).py(7.0).child(text(label).key("point-count").font(type_::MONO_CAPTION.features("tnum")).color(t.text_secondary))
 }
 
-/// Says why the view is empty or incomplete; absent when everything draws.
-fn status_chip(s: &State) -> Option<El> {
-    // The connection first, then a URDF that didn't load (its section in the side panel only
-    // exists once one has), then what the data is missing.
-    let connection = match &s.received.status {
-        Status::Failed { error } => Some(format!("Can't reach {}: {error}", s.settings.url)),
-        Status::Connecting => Some(format!("Connecting to {}…", s.settings.url)),
-        Status::Connected { .. } => None,
+/// Says why the view is empty or incomplete, at most `max_w` wide; absent when everything draws.
+fn status_chip(s: &State, max_w: f32) -> Option<El> {
+    // The connections first, then the robot (a URDF that didn't load, or one that isn't the
+    // robot the server describes), then what the data is missing.
+    let conns = s.connections();
+    let connection = if conns.is_empty() {
+        Some("No servers: add one in Settings".to_string())
+    } else {
+        conns.iter().find_map(|c| match &c.received.status {
+            Status::Failed { error } => Some(format!("Can't reach {}: {error}", c.url)),
+            Status::Connecting => Some(format!("Connecting to {}…", c.url)),
+            Status::Connected { .. } => None,
+        })
     };
-    let robot = match s.robot_load() {
-        Some(Err(e)) => Some(format!("Robot: {e}")),
+    let robot = match (s.robot_file(), s.robot_description(), s.robot_mismatch()) {
+        (_, _, Some(m)) => Some(format!("Robot: {m}")),
+        (Some(Err(e)), _, _) => Some(format!("Robot: {e}")),
+        (_, Some((topic, Err(e))), _) => Some(format!("Robot from {topic}: {e}")),
         _ => None,
     };
-    let data = match (&s.display.problem, &s.received.server_warning) {
+    let warning = conns.iter().find_map(|c| c.received.server_warning.as_ref());
+    let data = match (&s.display.problem, warning) {
         (Some(p), _) => Some(p.clone()),
         (None, Some(w)) => Some(format!("Server: {w}")),
-        (None, None) if s.received.channels.is_empty() => Some("Connected; the server offers no topics yet".into()),
+        (None, None) if conns.iter().all(|c| c.received.channels.is_empty()) => Some("Connected; the server offers no topics yet".into()),
         _ => None,
     };
     let msg = connection.or(robot).or(data)?;
-    Some(glass().px(10.0).py(7.0).max_w(520.0).child(
+    Some(glass().px(10.0).py(7.0).child(
         row().gap(8.0).items_center()
             .child(el().size(7.0, 7.0).radius(3.5).fill(oklch(0.78, 0.15, 70.0)))
-            .child(text(msg).key("status-chip").font(type_::LABEL).color(tok::theme(true).text).max_lines(2)),
+            // The dot, its gap and the padding take 35 pt.
+            .child(text(msg).key("status-chip").font(type_::LABEL).color(tok::theme(true).text).max_w(max_w - 35.0).max_lines(3)),
     ))
 }
 
@@ -166,7 +191,7 @@ fn legend(s: &State) -> Option<El> {
         (0.0, "#30123b"), (0.1, "#4662d7"), (0.2, "#36aaf9"), (0.3, "#1ae4b6"), (0.4, "#72fe5e"),
         (0.5, "#c8ef34"), (0.6, "#faba39"), (0.7, "#f66b19"), (0.8, "#ca2a04"), (0.9, "#930c01"), (1.0, "#7a0403"),
     ];
-    let field = match s.received.cloud.as_ref().map(|(_, c)| &c.color) {
+    let field = match s.cloud().map(|(_, c)| &c.color) {
         Some(PointColor::Field { name, .. }) => name.clone(),
         _ => String::new(),
     };
@@ -196,11 +221,97 @@ fn compact(v: f32) -> String {
     if v.abs() >= 100.0 || v == v.round() { format!("{v:.0}") } else { format!("{v:.2}") }
 }
 
+/// An annotation colour (sRGB 0–1, as Foxglove gives it) as a UI colour.
+fn srgb([r, g, b, a]: [f32; 4]) -> Color {
+    Color { r: srgb_decode(r), g: srgb_decode(g), b: srgb_decode(b), a }
+}
+
+/// The shown image with its annotations, in the viewport's lower right: up to 40% of the
+/// viewport's width and 45% of its height, at the image's aspect ratio. Text annotations are set
+/// over it at their image positions (Foxglove's: the text's lower left).
+fn image_card(s: &State, [vw, vh]: [f32; 2]) -> Option<El> {
+    if !s.settings.show_image {
+        return None;
+    }
+    let (topic, image) = s.shown_image()?;
+    let t = tok::theme(true);
+    let (iw, ih) = (image.width as f32, image.height as f32);
+    let w = (vw * 0.4).min(480.0).min(vh * 0.45 * iw / ih);
+    let scale = w / iw;
+    let mut picture = el().key("image-card").size(w, ih * scale).radius(tok::radius::SM).pixels(&s.image);
+    for a in s.annotations() {
+        let Annotation::Text { at, text: label, size, color, background } = a else { continue };
+        let px = (size * scale).max(9.0);
+        let mut chip = el().absolute(at[0] * scale, at[1] * scale - px * 1.3).px(2.0)
+            .child(text(label.clone()).font(TextStyle::new(px, 500.0)).color(srgb(*color)));
+        if background[3] > 0.0 {
+            chip = chip.fill(srgb(*background)).radius(2.0);
+        }
+        picture = picture.child(chip);
+    }
+    Some(glass().padding(6.0).child(
+        col().gap(5.0)
+            .child(row().px(2.0).gap(8.0).justify_between()
+                .child(text(topic.clone()).font(MONO_SMALL).color(t.text_secondary).truncate())
+                .child(text(format!("{}×{}", image.width, image.height)).font(MONO_SMALL.features("tnum")).color(t.text_secondary)))
+            .child(picture),
+    ))
+}
+
+/// The newest message of each visible text topic.
+fn text_cards(s: &State) -> Vec<El> {
+    if !s.settings.show_text {
+        return Vec::new();
+    }
+    let t = tok::theme(true);
+    s.texts().map(|(topic, body)| {
+        glass().key(format!("text-{topic}")).w(CARD_W).px(10.0).py(8.0).child(
+            col().gap(4.0)
+                .child(text(topic.clone()).font(MONO_SMALL).color(t.text_secondary).truncate())
+                .child(text(body.clone()).font(MONO_SMALL).color(t.text).wrap().max_lines(10)),
+        )
+    }).collect()
+}
+
+/// Every visible stats topic's statuses: level, name and message, then each reading.
+fn stats_card(s: &State) -> Option<El> {
+    if !s.settings.show_stats {
+        return None;
+    }
+    let t = tok::theme(true);
+    let mut body = col().gap(8.0);
+    let mut any = false;
+    for (_, statuses) in s.stats() {
+        for d in statuses {
+            any = true;
+            let hue = match d.level {
+                Level::Ok => oklch(0.78, 0.17, 150.0),
+                Level::Warn => oklch(0.8, 0.15, 75.0),
+                Level::Error => oklch(0.66, 0.2, 25.0),
+                Level::Stale => t.text_secondary,
+            };
+            let mut block = col().gap(3.0).child(
+                row().gap(7.0).items_center()
+                    .child(el().size(7.0, 7.0).radius(3.5).fill(hue))
+                    .child(text(d.name.clone()).font(type_::LABEL).color(t.text))
+                    .child(text(d.message.clone()).font(type_::LABEL).color(t.text_secondary).truncate().grow(1.0).min_w(0.0)),
+            );
+            for (k, v) in &d.values {
+                block = block.child(row().pl(14.0).gap(8.0).justify_between()
+                    .child(text(k.clone()).font(SMALL).color(t.text_secondary).truncate().min_w(0.0))
+                    .child(text(v.clone()).font(MONO_SMALL.features("tnum")).color(t.text)));
+            }
+            body = body.child(block);
+        }
+    }
+    any.then(|| glass().key("stats-card").w(CARD_W).px(10.0).py(8.0).child(body))
+}
+
 // ---- side panel ----
 
 fn header(s: &State) -> El {
     let t = tok::theme(true);
-    let (dot, line) = connection_line(s);
+    let (dot, line) = connections_line(s);
     row().items_center().gap(10.0)
         .child(lantern_mark())
         .child(col().gap(3.0).grow(1.0).min_w(0.0)
@@ -210,13 +321,26 @@ fn header(s: &State) -> El {
                 .child(text(line).key("connection").font(type_::LABEL).color(t.text_secondary).truncate())))
 }
 
-/// The connection's colour and one-line summary.
-fn connection_line(s: &State) -> (Color, String) {
-    match &s.received.status {
-        Status::Connected { server } if server.is_empty() => (oklch(0.78, 0.17, 150.0), format!("Connected · {}", host(&s.settings.url))),
-        Status::Connected { server } => (oklch(0.78, 0.17, 150.0), format!("{server} · {}", host(&s.settings.url))),
-        Status::Connecting => (oklch(0.78, 0.15, 70.0), format!("Connecting to {}", host(&s.settings.url))),
-        Status::Failed { .. } => (oklch(0.66, 0.2, 25.0), format!("Offline · {}", host(&s.settings.url))),
+/// One connection's colour and one-line summary.
+fn connection_line(c: &Connection) -> (Color, String) {
+    match &c.received.status {
+        Status::Connected { server } if server.is_empty() => (oklch(0.78, 0.17, 150.0), format!("Connected · {}", host(&c.url))),
+        Status::Connected { server } => (oklch(0.78, 0.17, 150.0), format!("{server} · {}", host(&c.url))),
+        Status::Connecting => (oklch(0.78, 0.15, 70.0), format!("Connecting to {}", host(&c.url))),
+        Status::Failed { .. } => (oklch(0.66, 0.2, 25.0), format!("Offline · {}", host(&c.url))),
+    }
+}
+
+/// Every connection, summarised: one names its server, several are counted.
+fn connections_line(s: &State) -> (Color, String) {
+    match s.connections() {
+        [] => (tok::theme(true).text_secondary, "No servers".into()),
+        [c] => connection_line(c),
+        all => {
+            let up = all.iter().filter(|c| matches!(c.received.status, Status::Connected { .. })).count();
+            let dot = all.iter().map(|c| connection_line(c).0).find(|&d| d != oklch(0.78, 0.17, 150.0)).unwrap_or(oklch(0.78, 0.17, 150.0));
+            (dot, format!("{up} of {} servers connected", all.len()))
+        }
     }
 }
 
@@ -232,7 +356,11 @@ fn sidebar(s: &State) -> El {
         .child(toggle_row("grid", "Grid", st.show_grid, |s| s.settings.show_grid ^= true))
         .child(toggle_row("points", "Point cloud", st.show_points, |s| s.settings.show_points ^= true))
         .child(toggle_row("frames", "TF frames", st.show_frames, |s| s.settings.show_frames ^= true))
-        .child(toggle_row("poses", "Poses", st.show_poses, |s| s.settings.show_poses ^= true));
+        .child(toggle_row("poses", "Poses", st.show_poses, |s| s.settings.show_poses ^= true))
+        // Only when a server offers them: nothing to show or hide before.
+        .children((!s.topics_of(Kind::Image).is_empty()).then(|| toggle_row("image", "Camera image", st.show_image, |s| s.settings.show_image ^= true)))
+        .children((!s.topics_of(Kind::Text).is_empty()).then(|| toggle_row("text", "Text", st.show_text, |s| s.settings.show_text ^= true)))
+        .children((!s.topics_of(Kind::Stats).is_empty()).then(|| toggle_row("stats", "Stats", st.show_stats, |s| s.settings.show_stats ^= true)));
 
     let cloud = section("Point cloud")
         .child(field("Color", color_choices("color", s, false)))
@@ -264,7 +392,7 @@ fn sidebar(s: &State) -> El {
 fn color_choices(key: &'static str, s: &State, full: bool) -> El {
     let mut options = vec![(ColorChoice::Auto, "Auto".to_string()), (ColorChoice::Height, "Height".to_string())];
     if full {
-        let fields = s.received.cloud.as_ref().map(|(_, c)| c.fields.clone()).unwrap_or_default();
+        let fields = s.cloud().map(|(_, c)| c.fields.clone()).unwrap_or_default();
         for f in fields.into_iter().filter(|f| !matches!(f.as_str(), "x" | "y" | "z")) {
             options.push((ColorChoice::Field(f.clone()), f));
         }
@@ -298,91 +426,130 @@ fn settings_page(s: &State) -> El {
             .child(text("Changes apply to the view as you make them").font(type_::LABEL).color(t.text_secondary)))
         .child(done);
 
-    let body = col().w_full().gap(28.0).pb(24.0)
+    let body = col().w_full().gap(28.0).px(SETTINGS_PAD).pb(24.0)
         .child(connection_section(s))
         .child(topics_section(s))
         .child(frames_section(s))
+        .child(poses_section(s))
         .child(robot_section(s))
         .child(display_section(s));
 
-    col().key("settings").w(SETTINGS_W).h_full().px(22.0).pt(22.0).gap(20.0).min_h(0.0)
-        .child(top)
-        .child(el().w_full().h(1.0).fill(t.separator))
+    col().key("settings").w(SETTINGS_W).h_full().pt(22.0).gap(20.0).min_h(0.0)
+        .child(top.px(SETTINGS_PAD))
+        .child(el().mx(SETTINGS_PAD).h(1.0).fill(t.separator))
         .child(col().key("settings-scroll").grow(1.0).min_h(0.0).w_full().scroll(ScrollSpec { stick_bottom: false }).scroll_edge_fade(16.0).child(body))
 }
 
 fn connection_section(s: &State) -> El {
     let t = tok::theme(true);
-    let (dot, line) = connection_line(s);
     let input = el().key("url-field").grow(1.0).min_w(0.0).h(32.0).px(10.0).radius(tok::radius::MD).clip_rounded(tok::radius::MD).fill(t.card).border(1.0, t.card_border).center_y()
         .child(
             text_input(&s.url_edit, MONO)
                 .key("url")
+                .w_full()
                 .single_line()
                 .color(t.text)
                 .placeholder("ws://localhost:8765", t.text_secondary)
                 .on_edit(|s: &mut State| &mut s.url_edit)
                 .on_submit(|s: &mut State, tx: &mut Tx| {
-                    s.settings.url = s.url_edit.text.trim().to_string();
+                    s.add_connection();
                     tx.blur();
                 }),
         );
-    let connect = button("connect", "Connect", |s| s.settings.url = s.url_edit.text.trim().to_string()).grow(0.0).w(92.0).min_w(92.0);
-    let detail = match &s.received.status {
-        Status::Failed { error } => error.clone(),
-        _ => line,
-    };
-    section("Connection")
-        .child(text("Foxglove WebSocket server: foxglove_bridge for ROS 2, or any app using a Foxglove SDK.").font(type_::LABEL).color(t.text_secondary).max_lines(3))
-        .child(row().gap(8.0).child(input).child(connect))
-        .child(row().gap(8.0).items_center()
-            .child(el().size(7.0, 7.0).radius(3.5).fill(dot))
-            .child(text(detail).key("connection-detail").font(type_::LABEL).color(t.text_secondary).grow(1.0).max_lines(3)))
+    let add = button("connect", "Add", State::add_connection).grow(0.0).w(92.0).min_w(92.0);
+    let mut sec = section("Connections")
+        .child(text("Foxglove WebSocket servers: foxglove_bridge for ROS 2, or any app using a Foxglove SDK. Lantern reads them all at once.").font(type_::LABEL).color(t.text_secondary).max_lines(3));
+    if !s.connections().is_empty() {
+        let mut list = col().key("connections").radius(tok::radius::MD).fill(t.card).border(1.0, t.card_border);
+        for (i, c) in s.connections().iter().enumerate() {
+            let (dot, line) = connection_line(c);
+            let detail = match &c.received.status {
+                Status::Failed { error } => error.clone(),
+                _ => line,
+            };
+            let url = c.url.clone();
+            let remove = el().key(format!("remove-{i}")).role("button").label(format!("Remove {}", c.url)).focusable(true)
+                .h(26.0).px(10.0).center().radius(tok::radius::SM).hover(t.hover).press(t.press)
+                .on_press(move |s: &mut State| s.settings.connections.retain(|u| *u != url))
+                .child(text("Remove").font(type_::LABEL).color(t.text_secondary));
+            if i > 0 {
+                list = list.child(el().w_full().h(1.0).fill(t.separator));
+            }
+            list = list.child(row().key(format!("connection-{i}")).px(12.0).py(9.0).gap(10.0).items_center()
+                .child(el().size(7.0, 7.0).radius(3.5).fill(dot))
+                .child(col().gap(2.0).grow(1.0).min_w(0.0)
+                    .child(text(c.url.clone()).font(MONO).color(t.text).truncate())
+                    .child(text(detail).key(format!("connection-detail-{i}")).font(SMALL).color(t.text_secondary).max_lines(3)))
+                .child(remove));
+        }
+        sec = sec.child(list);
+    }
+    sec.child(row().gap(8.0).child(input).child(add))
 }
 
 fn topics_section(s: &State) -> El {
     let t = tok::theme(true);
     let sec = section("Topics");
-    if s.received.channels.is_empty() {
-        return sec.child(text("No topics yet. Topics appear here as the server advertises them.").font(type_::LABEL).color(t.text_secondary).max_lines(3));
+    let conns = s.connections();
+    let total: usize = conns.iter().map(|c| c.received.channels.len()).sum();
+    if total == 0 {
+        return sec.child(text("No topics yet. Topics appear here as the servers advertise them.").font(type_::LABEL).color(t.text_secondary).max_lines(3));
     }
-    let cloud_topic = s.cloud_topic();
-    let joint_topic = s.joint_topic();
+    let picked = [
+        (Kind::PointCloud, s.cloud_topic()),
+        (Kind::JointStates, s.joint_topic()),
+        (Kind::Image, s.image_topic()),
+        (Kind::RobotDescription, s.description_topic()),
+    ];
     let mut list = col().key("topics").radius(tok::radius::MD).fill(t.card).border(1.0, t.card_border);
-    for (i, c) in s.received.channels.iter().enumerate() {
-        let key = format!("topic-{i}");
-        let (badge, control): (El, El) = match c.kind {
-            Some(Kind::PointCloud) => {
-                let on = cloud_topic.as_deref() == Some(c.topic.as_str());
-                let topic = c.topic.clone();
-                (kind_badge(Kind::PointCloud), radio_dot(&format!("{key}-show"), &c.topic, on, move |s| s.settings.cloud_topic = Some(topic.clone())))
+    let mut i = 0;
+    for conn in conns.iter().filter(|c| !c.received.channels.is_empty()) {
+        // With several servers, each one's topics sit under its address.
+        if conns.len() > 1 {
+            if i > 0 {
+                list = list.child(el().w_full().h(1.0).fill(t.separator));
             }
-            Some(Kind::Poses) => {
-                let on = !s.settings.hidden_topics.contains(&c.topic);
-                let topic = c.topic.clone();
-                (kind_badge(Kind::Poses), switch(&format!("{key}-show"), &c.topic, on, move |s| toggle_in(&mut s.settings.hidden_topics, &topic)))
-            }
-            Some(Kind::Transforms) => (kind_badge(Kind::Transforms), text("Always on").font(type_::LABEL).color(t.text_secondary)),
-            Some(Kind::JointStates) => {
-                let on = joint_topic.as_deref() == Some(c.topic.as_str());
-                let topic = c.topic.clone();
-                (kind_badge(Kind::JointStates), radio_dot(&format!("{key}-show"), &c.topic, on, move |s| s.settings.joint_topic = Some(topic.clone())))
-            }
-            None => (unsupported_badge(), el()),
-        };
-        let mut info = col().gap(2.0).grow(1.0).min_w(0.0)
-            .child(text(c.topic.clone()).font(MONO).color(if c.kind.is_some() { t.text } else { t.text_secondary }).truncate())
-            .child(text(format!("{} · {}", c.schema, c.encoding)).font(SMALL).color(t.text_secondary).truncate());
-        if let Some(err) = s.received.errors.get(&c.topic) {
-            info = info.child(text(err.clone()).key(format!("{key}-error")).font(SMALL).color(oklch(0.72, 0.17, 25.0)).max_lines(2));
+            list = list.child(row().px(12.0).pt(8.0).pb(4.0).child(text(host(&conn.url).to_string()).font(MONO_SMALL).color(t.text_secondary)));
         }
-        if i > 0 {
-            list = list.child(el().w_full().h(1.0).fill(t.separator));
+        for c in &conn.received.channels {
+            let key = format!("topic-{i}");
+            let topic = c.topic.clone();
+            let control: El = match c.kind {
+                Some(kind @ (Kind::PointCloud | Kind::JointStates | Kind::Image | Kind::RobotDescription)) => {
+                    let on = picked.iter().any(|(k, p)| *k == kind && p.as_deref() == Some(c.topic.as_str()));
+                    radio_dot(&format!("{key}-show"), &c.topic, on, move |s| {
+                        let slot = match kind {
+                            Kind::PointCloud => &mut s.settings.cloud_topic,
+                            Kind::JointStates => &mut s.settings.joint_topic,
+                            Kind::Image => &mut s.settings.image_topic,
+                            _ => &mut s.settings.description_topic,
+                        };
+                        *slot = Some(topic.clone());
+                    })
+                }
+                Some(Kind::Poses | Kind::Annotations | Kind::Text | Kind::Stats) => {
+                    let on = !s.settings.hidden_topics.contains(&c.topic);
+                    switch(&format!("{key}-show"), &c.topic, on, move |s| toggle_in(&mut s.settings.hidden_topics, &topic))
+                }
+                Some(Kind::Transforms) => text("Always on").font(type_::LABEL).color(t.text_secondary),
+                None => el(),
+            };
+            let badge = c.kind.map_or_else(unsupported_badge, kind_badge);
+            let mut info = col().gap(2.0).grow(1.0).min_w(0.0)
+                .child(text(c.topic.clone()).font(MONO).color(if c.kind.is_some() { t.text } else { t.text_secondary }).truncate())
+                .child(text(format!("{} · {}", c.schema, c.encoding)).font(SMALL).color(t.text_secondary).truncate());
+            if let Some(err) = conn.received.errors.get(&c.topic) {
+                info = info.child(text(err.clone()).key(format!("{key}-error")).font(SMALL).color(oklch(0.72, 0.17, 25.0)).max_lines(2));
+            }
+            if i > 0 && conns.len() == 1 {
+                list = list.child(el().w_full().h(1.0).fill(t.separator));
+            }
+            list = list.child(row().key(key).px(12.0).py(9.0).gap(10.0).items_center().child(badge).child(info).child(control));
+            i += 1;
         }
-        list = list.child(row().key(key).px(12.0).py(9.0).gap(10.0).items_center().child(badge).child(info).child(control));
     }
-    let supported = s.received.channels.iter().filter(|c| c.kind.is_some()).count();
-    sec.child(text(format!("{} topics, {supported} Lantern can draw", s.received.channels.len())).font(type_::LABEL).color(t.text_secondary)).child(list)
+    let supported = conns.iter().flat_map(|c| &c.received.channels).filter(|c| c.kind.is_some()).count();
+    sec.child(text(format!("{total} topics, {supported} Lantern can draw")).font(type_::LABEL).color(t.text_secondary)).child(list)
 }
 
 fn toggle_in(set: &mut BTreeSet<String>, topic: &str) {
@@ -397,6 +564,11 @@ fn kind_badge(kind: Kind) -> El {
         Kind::Transforms => 150.0,
         Kind::Poses => 70.0,
         Kind::JointStates => 310.0,
+        Kind::Image => 200.0,
+        Kind::Annotations => 230.0,
+        Kind::Text => 110.0,
+        Kind::Stats => 30.0,
+        Kind::RobotDescription => 340.0,
     };
     el().w(84.0).h(20.0).radius(10.0).center().fill(oklcha(0.75, 0.12, hue, 0.16))
         .child(text(kind.label()).font(SMALL).color(oklch(0.84, 0.1, hue)))
@@ -410,7 +582,7 @@ fn unsupported_badge() -> El {
 
 fn frames_section(s: &State) -> El {
     let t = tok::theme(true);
-    let frames = s.received.tf.frames();
+    let frames = s.display.tf.frames();
     let list = auto_picker("fixed-frame", "frame", &s.settings.fixed_frame, s.display.fixed.as_deref(), &frames, "not seen yet", |s, v| s.settings.fixed_frame = v);
     section("Frames")
         .child(field_note("Fixed frame", "Everything is drawn in this frame. Auto uses the root of the transform tree the point cloud is in."))
@@ -418,6 +590,15 @@ fn frames_section(s: &State) -> El {
         .child(toggle_row("labels", "Frame labels", s.settings.show_labels, |s| s.settings.show_labels ^= true))
         .child(field("Axis length", segmented("axis", &[(0.05, "5 cm"), (0.1, "10 cm"), (0.25, "25 cm"), (0.5, "50 cm"), (1.0, "1 m")], s.settings.axis_length, |s, v| s.settings.axis_length = v)))
         .child(text(format!("{} frames received", frames.len())).font(type_::LABEL).color(t.text_secondary))
+}
+
+fn poses_section(s: &State) -> El {
+    let t = tok::theme(true);
+    let st = &s.settings;
+    section("Poses")
+        .child(field("Expire after", segmented("pose-timeout", &[(0.0, "Never"), (0.5, "0.5 s"), (2.0, "2 s"), (10.0, "10 s")], st.pose_timeout, |s, v| s.settings.pose_timeout = v)))
+        .child(text("A pose its topic hasn't sent again in this time is removed.").font(type_::LABEL).color(t.text_secondary).max_lines(2))
+        .child(field("Trail", segmented("trail", &[(0.0, "Off"), (5.0, "5 s"), (15.0, "15 s"), (60.0, "60 s")], st.trail, |s, v| s.settings.trail = v)))
 }
 
 fn robot_section(s: &State) -> El {
@@ -428,6 +609,7 @@ fn robot_section(s: &State) -> El {
         .child(
             text_input(&s.urdf_edit, MONO)
                 .key("urdf")
+                .w_full()
                 .single_line()
                 .color(t.text)
                 .placeholder("/path/to/robot.urdf", t.text_secondary)
@@ -441,15 +623,33 @@ fn robot_section(s: &State) -> El {
     let mut sec = section("Robot")
         .child(field_note("URDF file", "Plain URDF (run xacro first). STL meshes, by path relative to the file, file:// or package://."))
         .child(row().gap(8.0).child(input).child(button("load-urdf", "Load", State::load_robot).grow(0.0).w(92.0).min_w(92.0)));
-    let status = match s.robot_load() {
-        None => text("No robot loaded").font(type_::LABEL).color(t.text_secondary),
+    let summary = |m: &crate::robot::Model| format!(
+        "{}: {} links, {} joints, {} meshes · loaded in {:.0} ms",
+        m.robot.name, m.robot.links.len(), m.robot.movable().count(), m.mesh.parts.len(), m.load_ms,
+    );
+    let status = match s.robot_file() {
+        None => text("No file loaded").font(type_::LABEL).color(t.text_secondary),
         Some(Err(e)) => text(e.clone()).font(type_::LABEL).color(error).max_lines(4),
-        Some(Ok(m)) => text(format!(
-            "{}: {} links, {} joints, {} meshes · loaded in {:.0} ms",
-            m.robot.name, m.robot.links.len(), m.robot.movable().count(), m.mesh.parts.len(), m.load_ms,
-        )).font(type_::LABEL).color(t.text_secondary).max_lines(2),
+        Some(Ok(m)) => text(summary(m)).font(type_::LABEL).color(t.text_secondary).max_lines(2),
     };
     sec = sec.child(status.key("robot-status"));
+
+    // A server that sends its URDF on a robot_description topic says which robot it drives.
+    let descriptions = s.topics_of(Kind::RobotDescription);
+    if !descriptions.is_empty() {
+        let list = auto_picker("description-topic", "description", &st.description_topic, descriptions.first().map(String::as_str), &descriptions, "not advertised", |s, v| s.settings.description_topic = v);
+        let status = match s.robot_description() {
+            None => text("Nothing received yet").font(type_::LABEL).color(t.text_secondary),
+            Some((_, Err(e))) => text(e.clone()).font(type_::LABEL).color(error).max_lines(4),
+            Some((_, Ok(m))) => text(summary(m)).font(type_::LABEL).color(t.text_secondary).max_lines(2),
+        };
+        sec = sec.child(field_note("Robot description", "The URDF a server sends (std_msgs/msg/String). It wins over a file that isn't the same robot."))
+            .child(list)
+            .child(status.key("description-status"));
+    }
+    if let Some(m) = s.robot_mismatch() {
+        sec = sec.child(text(m.to_string()).key("robot-mismatch").font(type_::LABEL).color(error).max_lines(5));
+    }
     let Some(m) = s.robot_model() else { return sec };
     // A model can load with some visuals missing: say which, a few at a time.
     const SHOWN: usize = 3;
@@ -463,14 +663,14 @@ fn robot_section(s: &State) -> El {
         sec = sec.child(text(note.clone()).font(type_::LABEL).color(t.text_secondary).max_lines(3));
     }
 
-    let topics: Vec<String> = s.topics_of(Kind::JointStates).map(str::to_string).collect();
+    let topics = s.topics_of(Kind::JointStates);
     let list = auto_picker("joint-topic", "joints", &st.joint_topic, topics.first().map(String::as_str), &topics, "not advertised", |s, v| s.settings.joint_topic = v);
     let movable: Vec<&str> = m.robot.movable().collect();
-    let received = match &s.received.joints {
+    let received = match s.joints() {
         Some((topic, j)) => format!("{} of {} joints received on {topic}", movable.iter().filter(|n| j.contains_key(**n)).count(), movable.len()),
         None => "No joint states yet: drawn at the URDF's zero pose".to_string(),
     };
-    sec.child(field_note("Joint states", "sensor_msgs/msg/JointState, from foxglove_bridge (CDR) or a Foxglove SDK app (JSON)."))
+    sec.child(field_note("Joint states", "sensor_msgs/msg/JointState (CDR from foxglove_bridge, or JSON from an SDK app), or foxglove.JointStates."))
         .child(list)
         .child(text(received).key("joints-received").font(type_::LABEL).color(t.text_secondary).max_lines(2))
         .child(toggle_row("robot-full", "Show robot", st.show_robot, |s| s.settings.show_robot ^= true))
@@ -514,6 +714,9 @@ fn display_section(s: &State) -> El {
         .child(point_size_field("size-full", st))
         .child(density_field("decimate-full", st))
         .child(toggle_row("grid-full", "Grid", st.show_grid, |s| s.settings.show_grid ^= true))
+        .child(toggle_row("image-full", "Camera image", st.show_image, |s| s.settings.show_image ^= true))
+        .child(toggle_row("text-full", "Text", st.show_text, |s| s.settings.show_text ^= true))
+        .child(toggle_row("stats-full", "Stats", st.show_stats, |s| s.settings.show_stats ^= true))
 }
 
 // The side panel and the Settings page both offer these (keyed apart).
