@@ -89,8 +89,9 @@ impl Decoder {
 }
 
 /// ROS 2 messages arrive as `cdr` through foxglove_bridge; Foxglove's own schemas as
-/// `protobuf` from the Foxglove SDKs; ROS types an SDK app logs as JSON (Foxglove has no schema
-/// of its own for them) as `json` under the ROS type's name.
+/// `protobuf` from the Foxglove SDKs (any app that serves the protocol without ROS); ROS types an
+/// SDK app logs as JSON (Foxglove has no schema of its own for them) as `json` under the ROS
+/// type's name.
 const DECODERS: &[Decoder] = &[
     // Topic-specific rows first: `decoder_for` takes the first match.
     row("cdr", "std_msgs/msg/String", Some("robot_description"), Kind::RobotDescription, ros::robot_description),

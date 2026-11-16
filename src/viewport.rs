@@ -602,8 +602,8 @@ const RESOLVE_STRIDE: u64 = wgpu::QUERY_RESOLVE_BUFFER_ALIGNMENT;
 
 /// `bytes` in a storage buffer: `old` refilled when they fit, else a new buffer. A sensor's
 /// clouds are about the same size, and refilling halves a 1.37 M-point cloud's upload against a
-/// new 22 MB buffer each time (README, "Ingesting a cloud"). An empty binding is invalid, so
-/// empty data binds 48 zero bytes (one line segment, three points).
+/// new 22 MB buffer each time (docs, Performance: "Ingesting a cloud"). An empty binding is
+/// invalid, so empty data binds 48 zero bytes (one line segment, three points).
 fn storage(device: &wgpu::Device, queue: &wgpu::Queue, label: &str, old: Option<&wgpu::Buffer>, bytes: &[u8]) -> wgpu::Buffer {
     match old.filter(|b| !bytes.is_empty() && b.size() >= bytes.len() as u64) {
         Some(b) => {

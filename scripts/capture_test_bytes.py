@@ -1,6 +1,6 @@
 """Writes the decoder test fixtures in src/decode/testdata/ from the reference serializers:
-rclpy's CDR (what foxglove_bridge forwards) and the Foxglove Python SDK's protobuf (what SDK
-apps publish). The Rust tests in src/decode/mod.rs assert on exactly these values.
+rclpy's CDR (what foxglove_bridge forwards) and the Foxglove Python SDK's protobuf (what an
+SDK app publishes). The Rust tests in src/decode/mod.rs assert on exactly these values.
 
 Needs ROS 2 (for rclpy) and foxglove-sdk; neither is needed to build or run Lantern:
     source /opt/ros/humble/setup.bash

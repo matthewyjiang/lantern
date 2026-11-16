@@ -4,15 +4,16 @@ WebSocket protocol, plus the transforms that place it and a few fixed object pos
 Two paths, the two Lantern supports:
 
   --via sdk  The Foxglove Python SDK serves foxglove.* protobuf on ws://127.0.0.1:8765, as any
-             SDK app does. Colour as separate red/green/blue bytes (Foxglove's convention).
+             app without ROS can. Colour as separate red/green/blue bytes (Foxglove's convention).
   --via ros  rclpy publishes ROS 2 messages (PointCloud2, TFMessage on /tf_static, Odometry,
              PoseArray); run foxglove_bridge next to it and Lantern connects to the bridge.
              Colour as PCL's packed float `rgb`.
 
 --robot-pose home|reach adds the KUKA Med 7's joint states on /joint_states, fixed: as JSON under
-the sensor_msgs/msg/JointState schema name through the SDK (README, "Publishing without ROS"; or
-foxglove.JointStates protobuf with --joints proto), or as the ROS message through the bridge.
-Load fixtures/med7/med7.urdf (scripts/robot_fixture.py) in Lantern to see it.
+the sensor_msgs/msg/JointState schema name through the SDK (the shape the docs' "Publish to
+Lantern" guide describes; or foxglove.JointStates protobuf with --joints proto), or as the ROS
+message through the bridge. Load fixtures/med7/med7.urdf (scripts/robot_fixture.py) in Lantern
+to see it.
 
 SDK only, for Lantern's other displays:
   --robot-description PATH  the URDF at PATH on /robot_description (std_msgs/msg/String, JSON)

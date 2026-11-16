@@ -1,0 +1,111 @@
+---
+title: Getting started
+description: Build Lantern on Arch Linux with cargo, run it, and find your way around the window.
+---
+
+import { Aside, Steps } from '@astrojs/starlight/components';
+
+Lantern is one Rust binary. Building it needs Rust and a C compiler; running it needs a GPU with a
+Vulkan driver and a Linux desktop (Wayland or X11). It needs no ROS installation, even when the
+data comes from ROS.
+
+## Install the packages
+
+On a plain Arch install:
+
+```sh
+sudo pacman -S --needed base-devel git rustup \
+    vulkan-icd-loader fontconfig libxkbcommon
+rustup default stable
+```
+
+Then the Vulkan driver for your GPU, if you don't have one yet:
+
+| GPU | Package |
+| --- | --- |
+| AMD | `vulkan-radeon` |
+| Intel | `vulkan-intel` |
+| NVIDIA | `nvidia-utils` (with `nvidia` or `nvidia-open`) |
+
+`vulkaninfo --summary` (from `vulkan-tools`) should list your GPU. Lantern renders through wgpu's
+Vulkan backend only, so a machine without a Vulkan driver opens no window.
+
+<Aside title="Why so few packages">
+	The binary links only against the base C runtime (libc, libm, libgcc_s). It loads Vulkan, fontconfig, xkbcommon and the windowing
+	libraries (`wayland`, or `libx11`, `libxcursor`, `libxi` and `libxkbcommon-x11` on X11) when it
+	starts, so they're needed at run time, not to build. Any Arch desktop already has the windowing
+	ones.
+</Aside>
+
+Lantern needs Rust 1.88 or newer (it uses let chains, and wgpu needs 1.87); `rustup default
+stable` gets that.
+
+## Build and run
+
+<Steps>
+
+1. Clone the repository.
+
+   ```sh
+   git clone https://github.com/matthewyjiang/lantern.git
+   cd lantern
+   ```
+
+2. Build and run a release build.
+
+   ```sh
+   cargo run --release
+   ```
+
+   The first build fetches [Rune](https://github.com/anomalyco/rune), Lantern's UI library, from
+   git at a pinned commit (`631e8a6`) and compiles wgpu, so it takes a while. Later builds are incremental.
+   Use a release build: a debug build of the renderer is much slower.
+
+3. Optionally, put `lantern` on your `PATH` (`~/.cargo/bin`).
+
+   ```sh
+   cargo install --locked --path .
+   ```
+
+</Steps>
+
+## The window
+
+Lantern opens straight into the viewport and connects to `ws://localhost:8765`. If nothing is
+serving there yet, a status chip over the viewport says `Connecting to ws://localhost:8765…`,
+then `Can't reach ws://localhost:8765: …`, and Lantern keeps retrying every second. Start a
+source (next page) and it connects on its own.
+
+![Lantern's window: a table scan coloured by intensity, two labelled objects, TF axes and a KUKA arm in the viewport, with the side panel on the right.](../../../screenshots/robot-home-sdk.png)
+
+The top of the side panel shows the connection: a green dot and the server's name once
+connected. The chip at the viewport's top left counts the points drawn.
+
+| Input | Does |
+| --- | --- |
+| Drag | Orbit |
+| Shift-drag, or middle-drag | Pan |
+| Scroll | Zoom |
+
+The side panel holds what you change while looking:
+
+- **Displays:** grid, point cloud, TF frames and poses, each on or off, plus camera image, text
+  and stats once a server offers them.
+- **Point cloud:** colour (Auto or Height), point size, and density (every point, ½, ¼ or ⅛).
+- **Robot:** show/hide and opacity, once a robot model is loaded.
+- **Camera:** Reset view, and Top down.
+
+The settings button (the slider icon) opens the [Settings page](/lantern/guides/settings/), for everything else:
+the servers, topics, the fixed frame, pose expiry and trails, and the robot's URDF.
+
+To read other servers or load a robot for one run without changing your settings:
+
+```sh
+cargo run --release -- --connect ws://a:8765 --connect ws://b:8765 --urdf robot.urdf
+```
+
+## Next
+
+- [Connect a source](/lantern/connect/): foxglove_bridge, a Foxglove SDK app, or the replay
+  server that needs no robot.
+- [Load a robot model](/lantern/guides/robot-model/) from a URDF.
