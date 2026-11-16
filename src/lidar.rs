@@ -45,14 +45,10 @@ pub struct Cloud {
     pub points: Vec<Point>,
     /// Where the sensor was for each sweep.
     pub poses: Vec<Vec3>,
-    pub sensor: Sensor,
-    /// Wall time `simulate` took, milliseconds.
-    pub scan_ms: f64,
 }
 
 /// Sweeps until the cloud holds at least `target` points (whole sweeps, so usually a few more).
 pub fn simulate(target: usize) -> Cloud {
-    let started = std::time::Instant::now();
     let scene = Scene::street();
     let sensor = Sensor::default();
     let mut points = Vec::with_capacity(target + 300_000);
@@ -62,7 +58,7 @@ pub fn simulate(target: usize) -> Cloud {
         points.extend(sweep(&scene, &sensor, pose, poses.len() as u32));
         poses.push(pose);
     }
-    Cloud { points, poses, sensor, scan_ms: started.elapsed().as_secs_f64() * 1000.0 }
+    Cloud { points, poses }
 }
 
 /// One full revolution from `pose`, beams split across up to eight threads.
@@ -282,7 +278,8 @@ mod tests {
     fn simulate_reaches_the_target_in_whole_sweeps_and_repeats_exactly() {
         let a = simulate(1_000_000);
         assert!(a.points.len() >= 1_000_000);
-        let per_sweep = a.sensor.beams as usize * a.sensor.azimuth_steps as usize;
+        let sensor = Sensor::default();
+        let per_sweep = sensor.beams as usize * sensor.azimuth_steps as usize;
         assert!(a.points.len() < 1_000_000 + per_sweep, "stops after the sweep that crossed the target");
         for (k, pose) in a.poses.iter().enumerate() {
             assert!(pose.y.abs() < ROAD_HALF_WIDTH, "sweep {k} taken off the road");

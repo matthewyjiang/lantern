@@ -13,7 +13,7 @@ use std::sync::Arc;
 
 use glam::Vec3;
 use rune::tok::{self, motion, type_};
-use rune::{App, AppSpec, Color, Cx, Drag, El, Phase, PointerButton, Tx, WheelEvent, col, effect, el, oklch, oklcha, row, spacer, text};
+use rune::{App, AppSpec, Color, Cx, Drag, El, Phase, PointerButton, Tx, WheelEvent, col, effect, el, oklch, oklcha, row, text};
 
 use camera::OrbitCamera;
 use lidar::Cloud;
@@ -134,16 +134,17 @@ fn glass() -> El {
     el().fill(oklcha(0.16, 0.006, 265.0, 0.78)).radius(tok::radius::MD).border(1.0, oklcha(1.0, 0.0, 0.0, 0.06))
 }
 
+/// How many points the viewport is drawing, so Density and the Point cloud toggle read back.
 fn scan_badge(s: &State) -> El {
     let t = tok::theme(true);
-    let live = el().size(7.0, 7.0).radius(3.5).fill(oklch(0.78, 0.17, 152.0));
-    glass().px(10.0).py(7.0).child(
-        row().items_center().gap(8.0)
-            .child(live)
-            .child(text("map").font(type_::LABEL).color(t.text))
-            .child(text("·").font(type_::LABEL).color(t.text_secondary))
-            .child(text(format!("{} points", thousands(s.cloud.points.len()))).font(type_::MONO_CAPTION.features("tnum")).color(t.text_secondary)),
-    )
+    let total = s.cloud.points.len();
+    let drawn = drawn_points(s);
+    let label = if drawn == total { format!("{} points", thousands(total)) } else { format!("{} of {} points", thousands(drawn), thousands(total)) };
+    glass().px(10.0).py(7.0).child(text(label).key("point-count").font(type_::MONO_CAPTION.features("tnum")).color(t.text_secondary))
+}
+
+fn drawn_points(s: &State) -> usize {
+    if s.show_points { s.cloud.points.len().div_ceil(s.decimate as usize) } else { 0 }
 }
 
 fn hints() -> El {
@@ -208,21 +209,11 @@ fn sidebar(s: &State) -> El {
             .child(button("top", "Top down", |s| s.camera = top_view(&s.cloud))),
     );
 
-    let c = &s.cloud;
-    let drawn = if s.show_points { c.points.len().div_ceil(s.decimate as usize) } else { 0 };
-    let scan = section("Scan")
-        .child(stat("Points drawn", thousands(drawn)))
-        .child(stat("Sweeps", c.poses.len().to_string()))
-        .child(stat("Beams × steps", format!("{} × {}", c.sensor.beams, c.sensor.azimuth_steps)))
-        .child(stat("Simulated in", format!("{:.0} ms", c.scan_ms)));
-
     col().key("sidebar").w(SIDEBAR_W).h_full().px(20.0).py(22.0).gap(26.0)
         .child(header)
         .child(displays)
         .child(cloud)
         .child(camera)
-        .child(spacer())
-        .child(scan)
 }
 
 /// A small lantern glyph: a warm light in a rounded frame.
@@ -242,26 +233,22 @@ fn field(label: &str, control: El) -> El {
     col().gap(6.0).child(text(label).font(type_::LABEL).color(t.text)).child(control)
 }
 
-fn stat(label: &str, value: String) -> El {
-    let t = tok::theme(true);
-    row().justify_between().items_center()
-        .child(text(label).font(type_::BODY).color(t.text_secondary))
-        .child(text(value).font(type_::MONO_CAPTION.features("tnum")).color(t.text))
-}
-
+/// A labelled switch. The whole row is the control (one tap target, one focus stop, one
+/// accessible switch); the track and knob only draw its state.
 fn toggle_row(key: &'static str, label: &'static str, on: bool, flip: fn(&mut State)) -> El {
     let t = tok::theme(true);
     let knob = el().key(format!("{key}-knob")).size(18.0, 18.0).radius(9.0).fill(t.knob)
         .shadow(1.0, 2.0, t.knob_shadow)
         .absolute(if on { 18.0 } else { 2.0 }, 2.0);
-    let switch = el().key(key).role("switch").label(label).checked(on).focusable(true).size(38.0, 22.0).radius(11.0)
+    let track = el().key(format!("{key}-track")).size(38.0, 22.0).radius(11.0)
         .fill(if on { tok::accent(0, true) } else { t.control_off })
         .motion(motion::SNAPPY)
         .child(knob);
-    row().key(format!("{key}-row")).h(30.0).items_center().justify_between()
+    row().key(key).role("switch").label(label).checked(on).focusable(true)
+        .h(30.0).items_center().justify_between()
         .on_press(flip)
         .child(text(label).font(type_::BODY).color(t.text))
-        .child(switch)
+        .child(track)
 }
 
 /// Equal-width options in a track; the chosen one sits raised.

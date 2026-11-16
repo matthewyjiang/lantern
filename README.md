@@ -12,6 +12,7 @@ cargo run --release                                    # window
 target/release/lantern --snap out/default.png [--scene top|intensity|street]
 target/release/lantern --script scripts/interact.json --snap out/interact.png --at 1.8
 scripts/bench.sh [frames] [trials]                     # timing table → out/bench.tsv
+scripts/audit-controls.sh                              # every control must change the view
 ```
 
 Viewport: drag to orbit, Shift-drag or middle-drag to pan, scroll to zoom.
