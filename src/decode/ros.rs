@@ -106,6 +106,18 @@ pub fn pose_array(bytes: &[u8], _: &ColorChoice) -> Result<Decoded, DecodeError>
     Ok(Decoded::Poses(Poses { frame_id, items }))
 }
 
+/// `sensor_msgs/JointState`: header, name, position, velocity, effort (velocity and effort
+/// unused).
+pub fn joint_state(bytes: &[u8], _: &ColorChoice) -> Result<Decoded, DecodeError> {
+    let mut r = Cdr::new(bytes)?;
+    header(&mut r)?;
+    let n = r.seq_len(4)?;
+    let names = (0..n).map(|_| r.string()).collect::<Result<Vec<_>, _>>()?;
+    let m = r.seq_len(8)?;
+    let positions = (0..m).map(|_| r.f64()).collect::<Result<Vec<_>, _>>()?;
+    super::joints(names, positions)
+}
+
 /// `nav_msgs/Odometry`: header, child_frame_id, PoseWithCovariance, TwistWithCovariance
 /// (covariances are fixed `float64[36]`, no length prefix). The twist is in the child frame.
 pub fn odometry(bytes: &[u8], _: &ColorChoice) -> Result<Decoded, DecodeError> {

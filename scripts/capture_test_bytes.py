@@ -103,4 +103,13 @@ o.x, o.y, o.z, o.w = ODOM_Q
 odom.twist.twist.linear.x = 0.2
 odom.twist.twist.angular.z = 0.5
 write("odometry.cdr", serialize_message(odom))
+# Three joints with velocities (unused by Lantern); the JSON twin is in the Rust test.
+from sensor_msgs.msg import JointState
+
+js = JointState()
+js.header.frame_id = ""
+js.name = ["lbr_joint_0", "lbr_joint_1", "lbr_joint_2"]
+js.position = [0.5, -1.25, 2.0]
+js.velocity = [0.0, 0.0, 0.0]
+write("jointstate.cdr", serialize_message(js))
 write("odometry.pb", fm.Odometry(frame_id="world", body_frame_id="cup", pose=fpose(ODOM_T, ODOM_Q), linear_velocity=fm.Vector3(x=0.2, y=0.0, z=0.0), angular_velocity=fm.Vector3(x=0.0, y=0.0, z=0.5)).encode())

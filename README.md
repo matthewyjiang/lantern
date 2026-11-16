@@ -4,8 +4,9 @@
 
 A small RViz stand-in in Rust on [Rune](https://github.com/anomalyco/rune) (pinned at `631e8a6`).
 Lantern connects to a [Foxglove WebSocket](https://github.com/foxglove/foxglove-sdk/blob/main/docs/spec/websocket/README.md)
-server and draws what it sends: a point cloud, the TF tree, and poses with their names and
-velocities, in a 3D viewport with a grid.
+server and draws what it sends: a point cloud, the TF tree, poses with their names and
+velocities, and a robot model (URDF and meshes) posed by joint states, in a 3D viewport with a
+grid.
 
 The protocol works with and without ROS:
 
@@ -22,16 +23,18 @@ cargo run --release                          # window; connects to ws://localhos
 
 In the viewport, drag to orbit, Shift-drag or middle-drag to pan, and scroll to zoom. The side
 panel holds the view controls. The settings button opens the Settings page: server URL, topics,
-fixed frame, labels, axis length, and colour by any numeric field. Settings are saved to
+fixed frame, labels, axis length, the robot's URDF and joint-state topic, and colour by any
+numeric field. Settings are saved to
 `$XDG_CONFIG_HOME/lantern/settings.json` (`~/.config/lantern/settings.json` by default).
 
 ## What it reads
 
-| Kind | ROS 2 via foxglove_bridge (`cdr`) | Foxglove SDK (`protobuf`) |
+| Kind | ROS 2 via foxglove_bridge (`cdr`) | Foxglove SDK (`protobuf`, or `json` where noted) |
 | --- | --- | --- |
 | Point cloud | `sensor_msgs/msg/PointCloud2` | `foxglove.PointCloud` |
 | Transforms | `tf2_msgs/msg/TFMessage`, `geometry_msgs/msg/TransformStamped` | `foxglove.FrameTransform`, `foxglove.FrameTransforms` |
 | Poses | `geometry_msgs/msg/PoseStamped`, `PoseArray`, `nav_msgs/msg/Odometry` | `foxglove.PoseInFrame`, `PosesInFrame`, `Odometry` |
+| Joint states | `sensor_msgs/msg/JointState` | `json`, schema named `sensor_msgs/msg/JointState` (Foxglove has no joint-state schema) |
 
 - Other topics are listed in Settings as "No decoder".
 - One point cloud topic is drawn at a time; all transform topics are read; pose topics can be
@@ -49,6 +52,10 @@ Limits, each shown when hit:
   the status.
 - Poses stay drawn until their topic is unadvertised or hidden, or the connection changes. There
   is no expiry yet, so an object a publisher stops sending stays at its last pose.
+- A robot can have up to 5,592,405 mesh vertices (1,864,135 triangles), the same 128 MiB binding
+  at 24 bytes per vertex. A bigger model fails to load (checked before each mesh is processed),
+  and the status chip and Settings name the link, the count and the cap.
+  The KUKA Med 7 has 501,186.
 
 To add a message type, add one row to `DECODERS` in [src/decode/mod.rs](src/decode/mod.rs) and
 write a function that turns the message into a `scene` type. To add another transport (a file,
@@ -75,7 +82,60 @@ markers.log(fm.PosesInFrame(frame_id="camera", poses=[...]))  # e.g. ArUco detec
 points.log(fm.PointCloud(frame_id="camera", point_stride=16, fields=[...], data=...))
 ```
 
+Joint states, for the robot model. Foxglove has no joint-state schema, so log the ROS message's
+shape as JSON under its name; Lantern matches the schema name (the SDK sends the `title`) and
+reads `name` and `position`:
+
+```python
+joints = foxglove.Channel("/joint_states", schema={
+    "title": "sensor_msgs/msg/JointState",
+    "type": "object",
+    "properties": {
+        "name": {"type": "array", "items": {"type": "string"}},
+        "position": {"type": "array", "items": {"type": "number"}},
+    },
+})
+joints.log({"name": [f"lbr_joint_{k}" for k in range(7)], "position": list(q)})  # radians, every control tick
+```
+
+The names must match the URDF's joints (`lbr_joint_0`..`lbr_joint_6` for the Med 7). Through
+foxglove_bridge, a ROS `sensor_msgs/msg/JointState` on any topic works the same way.
+
 [scripts/serve.py](scripts/serve.py) is a complete working example (`serve_sdk`).
+
+## Robot model
+
+Like RViz's RobotModel display. In Settings → Robot, enter a URDF path and press Load (or
+Enter). The side panel then gets a Robot section with show/hide and opacity, both also on the
+Settings page.
+
+- **URDF only.** Expand xacro once: `xacro robot.urdf.xacro > robot.urdf`. A xacro file is
+  refused with that instruction.
+- **Meshes** are STL (binary or ASCII), plus the `box`, `cylinder` and `sphere` primitives.
+  Filenames resolve as RViz's do: relative to the URDF, absolute, `file://`, or
+  `package://pkg/...`, with pkg looked up in `ROS_PACKAGE_PATH`, `AMENT_PREFIX_PATH`
+  (`<prefix>/share/pkg`), or as a directory named pkg at or above the URDF (a source checkout).
+  A mesh that can't be drawn (a DAE, a missing file) is listed under the load status, and the
+  rest of the robot still draws. An unknown geometry element or a `floating`/`planar` joint
+  fails the whole load, with the reason. A load that fails shows in the viewport's status chip.
+- **Joints:** revolute, continuous, prismatic, fixed, and `mimic`. Positions come from the
+  joint-state topic chosen in Settings (Auto picks the first one advertised). Messages that carry
+  only some joints merge. A joint with no position yet sits at zero, and Settings shows "n of m
+  joints received". Positions outside the URDF's joint limits are drawn as sent, not clamped.
+- **Placement:** the URDF's root link is placed in the fixed frame through TF when TF connects
+  them (for example `world` from `robot_state_publisher`). Otherwise it's drawn at the fixed
+  frame's origin, and Settings says so. With no cloud or poses, Auto picks the robot's root as
+  the fixed frame if TF knows it, else the TF tree's root, else (no TF at all) the robot's root.
+- **Drawing:** colours come from URDF materials, with light grey where there are none.
+  Normals are recomputed with a 40° crease angle, because STL normals are often unusable. Below
+  100% opacity (or with a translucent material), the robot shows the points, grid, TF axes and
+  poses behind and inside it, but not its own hidden faces (depth prepass). Lines in front of a
+  translucent robot take a faint tint from it.
+- **Loading** takes 40–48 ms for the Med 7 (8 STL files, 167 k triangles; the Settings status
+  shows the time). It runs on the UI thread when the path changes, so that one frame is late.
+
+Not yet: posing links from TF alone (without joint states), the URDF sent over a topic
+(`/robot_description`), collision geometry, and DAE/OBJ meshes.
 
 ## Layout
 
@@ -84,12 +144,13 @@ points.log(fm.PointCloud(frame_id="camera", point_stride=16, fields=[...], data=
 | `src/source.rs` | `Source` trait; `FoxgloveWs`: WebSocket client thread (tungstenite), subscribes to what the app wants, reconnects |
 | `src/decode/` | `(encoding, schema)` → decoder table; ROS CDR and Foxglove protobuf decoders; point field extraction |
 | `src/scene.rs` | What gets drawn, independent of message types: clouds, transforms, poses, the TF tree |
-| `src/app.rs` | App state: applies source events, syncs settings with the source, derives the display (fixed frame, lines, labels, bounds) |
+| `src/app.rs` | App state: applies source events, syncs settings with the source, loads the robot, derives the display (fixed frame, lines, labels, bounds, link poses) |
+| `src/robot/` | URDF parsing and forward kinematics (`urdf.rs`), STL and primitive meshes with smoothed normals (`mesh.rs`), loading and mesh path resolution (`mod.rs`) |
 | `src/settings.rs` | Persisted settings |
 | `src/ui.rs` | Side panel, Settings page, viewport overlays |
 | `src/camera.rs` | Orbit camera (REP 103, z up), reversed infinite depth |
 | `src/viewport.rs` | Rune `Compositor`: offscreen 3D pass blitted into an `El::effect` slot, GPU timer |
-| `src/viewport.wgsl` | Sky and grid, points (vertex-pulled quads), lines, blit |
+| `src/viewport.wgsl` | Sky and grid, points (vertex-pulled quads), robot (lit meshes), lines, blit |
 | `src/main.rs` | Wiring, the source-to-app event inbox, headless scenes |
 
 ## Dev data and headless proofs
@@ -117,11 +178,27 @@ uv pip install --python /tmp/fxenv/bin/python foxglove-sdk==0.31.0
 /tmp/fxenv/bin/python scripts/serve.py --cloud table --via ros    # rclpy; run foxglove_bridge too
 ```
 
+For the robot model, [scripts/robot_fixture.py](scripts/robot_fixture.py) expands the KUKA LBR
+Med 7 URDF from kuka-policy-deployment's pyfri submodule (lunarlab-gatech/pyfri, Apache-2.0) and
+copies its visual meshes into `fixtures/med7/`. `serve.py --robot-pose home|reach` adds fixed
+joint states on `/joint_states`: SDK JSON, or the ROS message with `--via ros`. `home` is kpd's
+`HOME_Q`.
+
+```sh
+python scripts/robot_fixture.py [path/to/kuka-policy-deployment]   # needs its .venv (xacro)
+SETTINGS='{"robot_urdf": "'$PWD'/fixtures/med7/med7.urdf"}' \
+  scripts/snap-live.sh out/robot "--cloud table --robot-pose reach" - settings
+```
+
+The kinematics test checks link poses in both poses against pinocchio 4.1.0 on the same URDF
+(committed as `src/robot/testdata/med7.urdf`).
+
 Scripts:
 
 ```sh
 scripts/snap-live.sh out/live "--cloud table" - settings top      # serve, then headless snaps
 scripts/snap-live.sh out/live "--cloud table" "-:--script scripts/interact.json"
+# snap-live.sh env: URL (server), or SETTINGS (a whole settings.json to start from)
 scripts/audit-controls.sh      # every control must change the viewport (pixel diff vs baseline)
 scripts/bench.sh 3             # timing table → out/bench.tsv, raw logs in out/bench/
 ```
@@ -147,6 +224,8 @@ Spread across trials is ≤ 0.002 ms on GPU p50.
 | 4 pt points | 1,366,408 | 0.17–0.18 ms | 1.087 (1.096) ms |
 | All points + PNG readback every frame | 1,366,408 | 0.16 ms | 0.492 (0.515) ms |
 | All points, new cloud at 10 Hz | 1,366,408 | 0.18 ms (p95 9.4–9.5 ms) | 0.492 (0.516) ms |
+| All points + robot (Med 7, 501,186 vertices) | 1,366,408 | 0.18 ms | 0.511–0.515 (0.535–0.538) ms |
+| Robot only, points off | 0 | 0.18 ms | 0.062 (0.065–0.066) ms |
 
 How to read these:
 
@@ -176,6 +255,13 @@ How to read these:
   Paced, the samples alternate between idle clocks (P8, ~340 MHz) and 1.63 GHz. The paced GPU time
   is within 2.5% of the unpaced one (0.494 vs 0.482 ms), so the draws themselves run at about
   1.6 GHz. These are not peak-clock numbers.
+
+- **The robot** adds 0.029 ms on its own (0.062 vs 0.033 ms with points off) and 0.017–0.020 ms
+  on top of the full cloud. Both runs log 501,186 robot vertices drawn on every frame. Each frame
+  draws them twice (depth prepass, then colour), about 1.0 M vertex invocations, plus the parts'
+  matrices written per frame (8 × 80 bytes). CPU per frame is unchanged at 0.18 ms. Loading the
+  URDF is a one-time cost. It runs synchronously (41 ms in these runs), so that first frame takes
+  66–67 ms instead of the usual 23 ms.
 
 ### What bounds the point draw
 
