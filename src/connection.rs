@@ -87,8 +87,6 @@ pub struct Picked {
     pub cloud: Option<String>,
     pub joints: Option<String>,
     pub image: Option<String>,
-    /// Trails are on: single poses record where they've been.
-    pub trail: bool,
 }
 
 /// What an event changed, beyond `Received` itself.
@@ -103,8 +101,9 @@ pub struct Changed {
 }
 
 impl Received {
-    /// Takes one event from this connection's source; `clock` (UI seconds) stamps poses.
-    pub fn apply(&mut self, e: Event, clock: f64, picked: &Picked) -> Changed {
+    /// Takes one event from this connection's source; `clock` (UI seconds) stamps poses, and
+    /// with `trail` on, single poses record where they've been.
+    pub fn apply(&mut self, e: Event, clock: f64, picked: &Picked, trail: bool) -> Changed {
         let mut changed = Changed::default();
         let display = match e {
             Event::Status(s) => {
@@ -148,13 +147,15 @@ impl Received {
                         true
                     }
                     Decoded::Poses(mut p) => {
-                        // A lone unnamed pose (PoseStamped, PoseInFrame) is named by its topic.
+                        // Keyed by the message's own label, before naming: an unlabelled array
+                        // keeps one key whatever its length, so each message replaces the last.
+                        let label = p.items.first().and_then(|i| i.label.clone()).unwrap_or_default();
+                        // A lone unnamed pose (PoseStamped, PoseInFrame) is drawn named by its topic.
                         if let [item] = &mut p.items[..] {
                             item.label.get_or_insert_with(|| topic.clone());
                         }
-                        let label = p.items.first().and_then(|i| i.label.clone()).unwrap_or_default();
                         let key = (topic, label);
-                        if let ([item], true) = (&p.items[..], picked.trail) {
+                        if let ([item], true) = (&p.items[..], trail) {
                             let t = self.trails.entry(key.clone()).or_insert_with(|| Trail { frame_id: p.frame_id.clone(), points: VecDeque::new() });
                             if t.frame_id != p.frame_id {
                                 *t = Trail { frame_id: p.frame_id.clone(), points: VecDeque::new() };
@@ -244,9 +245,28 @@ mod tests {
     use super::*;
     use crate::scene::{Pose, Tracked};
 
+    /// An unlabelled pose message on /tracked with a pose at each x.
+    fn poses_at(xs: &[f64]) -> Event {
+        let item = |x| Tracked { pose: Pose { translation: DVec3::new(x, 0.0, 0.0), ..Pose::IDENTITY }, label: None, velocity: None };
+        Event::Data { topic: "/tracked".into(), data: Decoded::Poses(Poses { frame_id: "world".into(), items: xs.iter().map(|&x| item(x)).collect() }) }
+    }
+
     fn pose_at(x: f64) -> Event {
-        let item = Tracked { pose: Pose { translation: DVec3::new(x, 0.0, 0.0), ..Pose::IDENTITY }, label: None, velocity: None };
-        Event::Data { topic: "/tracked".into(), data: Decoded::Poses(Poses { frame_id: "world".into(), items: vec![item] }) }
+        poses_at(&[x])
+    }
+
+    // An array (PoseArray, PosesInFrame) whose length goes 2, 1, 0 replaces itself each time:
+    // the two poses don't stay drawn next to the one.
+    #[test]
+    fn an_unlabelled_array_replaces_itself_whatever_its_length() {
+        let picked = Picked { cloud: None, joints: None, image: None };
+        let mut r = Received::default();
+        let drawn = |r: &Received| r.poses.values().map(|(_, p)| p.items.len()).collect::<Vec<_>>();
+        r.apply(poses_at(&[0.0, 1.0]), 0.0, &picked, false);
+        r.apply(poses_at(&[2.0]), 0.1, &picked, false);
+        assert_eq!(drawn(&r), [1]);
+        r.apply(poses_at(&[]), 0.2, &picked, false);
+        assert_eq!(drawn(&r), [0]);
     }
 
     // A pose sent at 0, 1 and 2 s, with a 2 s timeout and a 1.5 s trail: the trail
@@ -254,12 +274,12 @@ mod tests {
     // topic goes quiet, the pose and its trail go at 2 + 2.
     #[test]
     fn poses_expire_and_trails_keep_only_their_window() {
-        let picked = Picked { cloud: None, joints: None, image: None, trail: true };
+        let picked = Picked { cloud: None, joints: None, image: None };
         let mut r = Received::default();
         for t in [0.0, 1.0, 2.0] {
-            r.apply(pose_at(t), t, &picked);
+            r.apply(pose_at(t), t, &picked, true);
         }
-        let key = ("/tracked".to_string(), "/tracked".to_string());
+        let key = ("/tracked".to_string(), String::new());
         assert_eq!(r.expire(2.4, 2.0, 1.5), (true, Some(2.5)));
         assert_eq!(r.trails[&key].points.iter().map(|(at, _)| *at).collect::<Vec<_>>(), [1.0, 2.0]);
         assert!(r.poses.contains_key(&key), "labelled by its topic, and still fresh");

@@ -173,7 +173,8 @@ pub fn robot_description(bytes: &[u8], _: &ColorChoice) -> Result<Decoded, Decod
 pub fn diagnostic_array(bytes: &[u8], _: &ColorChoice) -> Result<Decoded, DecodeError> {
     let mut r = Cdr::new(bytes)?;
     header(&mut r)?;
-    // A status is at least 1 (level) + 3 pad + four empty strings and an empty sequence.
+    // A status is at least 1 (level) + 3 pad + three empty strings (4-byte length + NUL, padded)
+    // and an empty sequence's 4-byte count.
     let n = r.seq_len(20)?;
     let mut out = Vec::with_capacity(n);
     for _ in 0..n {

@@ -123,8 +123,7 @@ mod tests {
     }
 
     // A red ring of diameter 10 around (16, 16) and a 1 px green square outline through pixel
-    // centres: pixels on the shapes
-    // take their colour, pixels inside them keep the picture's.
+    // centres: pixels on the shapes take their colour, pixels inside them keep the picture's.
     #[test]
     fn shapes_cover_their_outline_and_leave_the_inside() {
         let (w, h) = (32, 32);

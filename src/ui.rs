@@ -25,6 +25,25 @@ const SETTINGS_W: f32 = 440.0;
 const SETTINGS_PAD: f32 = 22.0;
 /// Text and stats cards over the viewport.
 const CARD_W: f32 = 340.0;
+/// The camera image card's widest: a 640 px frame at 3/4, so it stays an inset on a large window.
+const IMAGE_MAX_W: f32 = 480.0;
+/// Lines of a text message shown before "…".
+const TEXT_LINES: usize = 10;
+/// Text cards and stats statuses shown over the viewport before "and N more": together about the
+/// height of the viewport beside Settings in a 1280×800 window. Settings → Topics hides topics.
+const TEXT_CARDS: usize = 3;
+const STATUSES: usize = 6;
+
+/// Status colours: fine, waiting, failed.
+fn good() -> Color {
+    oklch(0.78, 0.17, 150.0)
+}
+fn waiting() -> Color {
+    oklch(0.78, 0.15, 70.0)
+}
+fn failed() -> Color {
+    oklch(0.66, 0.2, 25.0)
+}
 const SMALL: TextStyle = TextStyle::new(11.0, 500.0);
 /// Topic, frame and URL text: names people type and match character for character.
 const MONO: TextStyle = TextStyle::new(12.0, 500.0).mono();
@@ -135,8 +154,9 @@ fn point_badge(s: &State) -> El {
 
 /// Says why the view is empty or incomplete, at most `max_w` wide; absent when everything draws.
 fn status_chip(s: &State, max_w: f32) -> Option<El> {
-    // The connections first, then the robot (a URDF that didn't load, or one that isn't the
-    // robot the server describes), then what the data is missing.
+    // The first two of: the connections, the robot (a URDF that didn't load, or one that isn't
+    // the robot the server describes), what the data is missing. Two, so a server that's
+    // offline doesn't hide what's wrong with the others' data.
     let conns = s.connections();
     let connection = if conns.is_empty() {
         Some("No servers: add one in Settings".to_string())
@@ -160,13 +180,20 @@ fn status_chip(s: &State, max_w: f32) -> Option<El> {
         (None, None) if conns.iter().all(|c| c.received.channels.is_empty()) => Some("Connected; the server offers no topics yet".into()),
         _ => None,
     };
-    let msg = connection.or(robot).or(data)?;
-    Some(glass().px(10.0).py(7.0).child(
-        row().gap(8.0).items_center()
-            .child(el().size(7.0, 7.0).radius(3.5).fill(oklch(0.78, 0.15, 70.0)))
-            // The dot, its gap and the padding take 35 pt.
-            .child(text(msg).key("status-chip").font(type_::LABEL).color(tok::theme(true).text).max_w(max_w - 35.0).max_lines(3)),
-    ))
+    let messages: Vec<String> = [connection, robot, data].into_iter().flatten().take(2).collect();
+    if messages.is_empty() {
+        return None;
+    }
+    let mut lines = col().key("status-chip").gap(4.0);
+    for m in messages {
+        lines = lines.child(
+            row().gap(8.0).items_center()
+                .child(el().size(7.0, 7.0).radius(3.5).fill(waiting()))
+                // The dot, its gap and the padding take 35 pt.
+                .child(text(m).font(type_::LABEL).color(tok::theme(true).text).max_w(max_w - 35.0).max_lines(3)),
+        );
+    }
+    Some(glass().px(10.0).py(7.0).child(lines))
 }
 
 fn hints() -> El {
@@ -227,8 +254,8 @@ fn srgb([r, g, b, a]: [f32; 4]) -> Color {
 }
 
 /// The shown image with its annotations, in the viewport's lower right: up to 40% of the
-/// viewport's width and 45% of its height, at the image's aspect ratio. Text annotations are set
-/// over it at their image positions (Foxglove's: the text's lower left).
+/// viewport's width, `IMAGE_MAX_W`, and 45% of its height, at the image's aspect ratio. Text
+/// annotations are set over it at their image positions (Foxglove's: the text's lower left).
 fn image_card(s: &State, [vw, vh]: [f32; 2]) -> Option<El> {
     if !s.settings.show_image {
         return None;
@@ -236,13 +263,15 @@ fn image_card(s: &State, [vw, vh]: [f32; 2]) -> Option<El> {
     let (topic, image) = s.shown_image()?;
     let t = tok::theme(true);
     let (iw, ih) = (image.width as f32, image.height as f32);
-    let w = (vw * 0.4).min(480.0).min(vh * 0.45 * iw / ih);
+    let w = (vw * 0.4).min(IMAGE_MAX_W).min(vh * 0.45 * iw / ih);
     let scale = w / iw;
     let mut picture = el().key("image-card").size(w, ih * scale).radius(tok::radius::SM).pixels(&s.image);
     for a in s.annotations() {
         let Annotation::Text { at, text: label, size, color, background } = a else { continue };
+        // 9 pt at the least, to stay legible on a small card; the chip's top is a line (Rune's
+        // default 1.25 × size) above the text's lower left.
         let px = (size * scale).max(9.0);
-        let mut chip = el().absolute(at[0] * scale, at[1] * scale - px * 1.3).px(2.0)
+        let mut chip = el().absolute(at[0] * scale, at[1] * scale - px * 1.25).px(2.0)
             .child(text(label.clone()).font(TextStyle::new(px, 500.0)).color(srgb(*color)));
         if background[3] > 0.0 {
             chip = chip.fill(srgb(*background)).radius(2.0);
@@ -258,53 +287,63 @@ fn image_card(s: &State, [vw, vh]: [f32; 2]) -> Option<El> {
     ))
 }
 
-/// The newest message of each visible text topic.
+/// "and N more …", when a card shows only the first of its items.
+fn more(n: usize, what: &str) -> Option<El> {
+    (n > 0).then(|| text(format!("and {n} more {what}: hide topics in Settings")).font(SMALL).color(tok::theme(true).text_secondary))
+}
+
+/// The newest message of the first `TEXT_CARDS` visible text topics.
 fn text_cards(s: &State) -> Vec<El> {
     if !s.settings.show_text {
         return Vec::new();
     }
     let t = tok::theme(true);
-    s.texts().map(|(topic, body)| {
+    let texts: Vec<_> = s.texts().collect();
+    let mut cards: Vec<El> = texts.iter().take(TEXT_CARDS).map(|(topic, body)| {
         glass().key(format!("text-{topic}")).w(CARD_W).px(10.0).py(8.0).child(
             col().gap(4.0)
-                .child(text(topic.clone()).font(MONO_SMALL).color(t.text_secondary).truncate())
-                .child(text(body.clone()).font(MONO_SMALL).color(t.text).wrap().max_lines(10)),
+                .child(text(topic.to_string()).font(MONO_SMALL).color(t.text_secondary).truncate())
+                .child(text(body.to_string()).font(MONO_SMALL).color(t.text).max_lines(TEXT_LINES)),
         )
-    }).collect()
+    }).collect();
+    cards.extend(more(texts.len().saturating_sub(TEXT_CARDS), "text topics").map(|m| glass().w(CARD_W).px(10.0).py(6.0).child(m)));
+    cards
 }
 
-/// Every visible stats topic's statuses: level, name and message, then each reading.
+/// The first `STATUSES` of every visible stats topic's statuses: level, name and message, then
+/// each reading.
 fn stats_card(s: &State) -> Option<El> {
     if !s.settings.show_stats {
         return None;
     }
     let t = tok::theme(true);
     let mut body = col().gap(8.0);
-    let mut any = false;
-    for (_, statuses) in s.stats() {
-        for d in statuses {
-            any = true;
-            let hue = match d.level {
-                Level::Ok => oklch(0.78, 0.17, 150.0),
-                Level::Warn => oklch(0.8, 0.15, 75.0),
-                Level::Error => oklch(0.66, 0.2, 25.0),
-                Level::Stale => t.text_secondary,
-            };
-            let mut block = col().gap(3.0).child(
-                row().gap(7.0).items_center()
-                    .child(el().size(7.0, 7.0).radius(3.5).fill(hue))
-                    .child(text(d.name.clone()).font(type_::LABEL).color(t.text))
-                    .child(text(d.message.clone()).font(type_::LABEL).color(t.text_secondary).truncate().grow(1.0).min_w(0.0)),
-            );
-            for (k, v) in &d.values {
-                block = block.child(row().pl(14.0).gap(8.0).justify_between()
-                    .child(text(k.clone()).font(SMALL).color(t.text_secondary).truncate().min_w(0.0))
-                    .child(text(v.clone()).font(MONO_SMALL.features("tnum")).color(t.text)));
-            }
-            body = body.child(block);
-        }
+    let statuses: Vec<_> = s.stats().flat_map(|(_, d)| d).collect();
+    if statuses.is_empty() {
+        return None;
     }
-    any.then(|| glass().key("stats-card").w(CARD_W).px(10.0).py(8.0).child(body))
+    for d in statuses.iter().take(STATUSES) {
+        let hue = match d.level {
+            Level::Ok => good(),
+            Level::Warn => waiting(),
+            Level::Error => failed(),
+            Level::Stale => t.text_secondary,
+        };
+        let mut block = col().gap(3.0).child(
+            row().gap(7.0).items_center()
+                .child(el().size(7.0, 7.0).radius(3.5).fill(hue))
+                .child(text(d.name.clone()).font(type_::LABEL).color(t.text))
+                .child(text(d.message.clone()).font(type_::LABEL).color(t.text_secondary).truncate().grow(1.0).min_w(0.0)),
+        );
+        for (k, v) in &d.values {
+            block = block.child(row().pl(14.0).gap(8.0).justify_between()
+                .child(text(k.clone()).font(SMALL).color(t.text_secondary).truncate().min_w(0.0))
+                .child(text(v.clone()).font(MONO_SMALL.features("tnum")).color(t.text)));
+        }
+        body = body.child(block);
+    }
+    body = body.children(more(statuses.len().saturating_sub(STATUSES), "statuses"));
+    Some(glass().key("stats-card").w(CARD_W).px(10.0).py(8.0).child(body))
 }
 
 // ---- side panel ----
@@ -324,10 +363,10 @@ fn header(s: &State) -> El {
 /// One connection's colour and one-line summary.
 fn connection_line(c: &Connection) -> (Color, String) {
     match &c.received.status {
-        Status::Connected { server } if server.is_empty() => (oklch(0.78, 0.17, 150.0), format!("Connected · {}", host(&c.url))),
-        Status::Connected { server } => (oklch(0.78, 0.17, 150.0), format!("{server} · {}", host(&c.url))),
-        Status::Connecting => (oklch(0.78, 0.15, 70.0), format!("Connecting to {}", host(&c.url))),
-        Status::Failed { .. } => (oklch(0.66, 0.2, 25.0), format!("Offline · {}", host(&c.url))),
+        Status::Connected { server } if server.is_empty() => (good(), format!("Connected · {}", host(&c.url))),
+        Status::Connected { server } => (good(), format!("{server} · {}", host(&c.url))),
+        Status::Connecting => (waiting(), format!("Connecting to {}", host(&c.url))),
+        Status::Failed { .. } => (failed(), format!("Offline · {}", host(&c.url))),
     }
 }
 
@@ -337,8 +376,15 @@ fn connections_line(s: &State) -> (Color, String) {
         [] => (tok::theme(true).text_secondary, "No servers".into()),
         [c] => connection_line(c),
         all => {
-            let up = all.iter().filter(|c| matches!(c.received.status, Status::Connected { .. })).count();
-            let dot = all.iter().map(|c| connection_line(c).0).find(|&d| d != oklch(0.78, 0.17, 150.0)).unwrap_or(oklch(0.78, 0.17, 150.0));
+            let status = |f: fn(&Status) -> bool| all.iter().filter(|c| f(&c.received.status)).count();
+            let up = status(|s| matches!(s, Status::Connected { .. }));
+            let dot = if status(|s| matches!(s, Status::Failed { .. })) > 0 {
+                failed()
+            } else if up < all.len() {
+                waiting()
+            } else {
+                good()
+            };
             (dot, format!("{up} of {} servers connected", all.len()))
         }
     }
@@ -495,13 +541,8 @@ fn topics_section(s: &State) -> El {
     if total == 0 {
         return sec.child(text("No topics yet. Topics appear here as the servers advertise them.").font(type_::LABEL).color(t.text_secondary).max_lines(3));
     }
-    let picked = [
-        (Kind::PointCloud, s.cloud_topic()),
-        (Kind::JointStates, s.joint_topic()),
-        (Kind::Image, s.image_topic()),
-        (Kind::RobotDescription, s.description_topic()),
-    ];
     let mut list = col().key("topics").radius(tok::radius::MD).fill(t.card).border(1.0, t.card_border);
+    // Rows are keyed topic-0, topic-1, … across every server.
     let mut i = 0;
     for conn in conns.iter().filter(|c| !c.received.channels.is_empty()) {
         // With several servers, each one's topics sit under its address.
@@ -511,20 +552,17 @@ fn topics_section(s: &State) -> El {
             }
             list = list.child(row().px(12.0).pt(8.0).pb(4.0).child(text(host(&conn.url).to_string()).font(MONO_SMALL).color(t.text_secondary)));
         }
-        for c in &conn.received.channels {
+        for (row_in_group, c) in conn.received.channels.iter().enumerate() {
             let key = format!("topic-{i}");
             let topic = c.topic.clone();
             let control: El = match c.kind {
+                // One topic of the kind is drawn: pick it.
                 Some(kind @ (Kind::PointCloud | Kind::JointStates | Kind::Image | Kind::RobotDescription)) => {
-                    let on = picked.iter().any(|(k, p)| *k == kind && p.as_deref() == Some(c.topic.as_str()));
+                    let on = s.topic(kind).as_deref() == Some(c.topic.as_str());
                     radio_dot(&format!("{key}-show"), &c.topic, on, move |s| {
-                        let slot = match kind {
-                            Kind::PointCloud => &mut s.settings.cloud_topic,
-                            Kind::JointStates => &mut s.settings.joint_topic,
-                            Kind::Image => &mut s.settings.image_topic,
-                            _ => &mut s.settings.description_topic,
-                        };
-                        *slot = Some(topic.clone());
+                        if let Some(slot) = s.settings.picked_mut(kind) {
+                            *slot = Some(topic.clone());
+                        }
                     })
                 }
                 Some(Kind::Poses | Kind::Annotations | Kind::Text | Kind::Stats) => {
@@ -541,7 +579,7 @@ fn topics_section(s: &State) -> El {
             if let Some(err) = conn.received.errors.get(&c.topic) {
                 info = info.child(text(err.clone()).key(format!("{key}-error")).font(SMALL).color(oklch(0.72, 0.17, 25.0)).max_lines(2));
             }
-            if i > 0 && conns.len() == 1 {
+            if row_in_group > 0 {
                 list = list.child(el().w_full().h(1.0).fill(t.separator));
             }
             list = list.child(row().key(key).px(12.0).py(9.0).gap(10.0).items_center().child(badge).child(info).child(control));

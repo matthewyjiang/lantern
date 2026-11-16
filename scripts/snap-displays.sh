@@ -77,6 +77,11 @@ shot description-mismatch "{$local8765, \"robot_urdf\": \"$med7\"}" 3
 shot description-mismatch-settings "{$local8765, \"robot_urdf\": \"$med7\"}" 3 $open_settings
 stop
 same description-same description-only
+# The described robot's meshes aren't on this machine (the testdata copy has none next to it):
+# the file's robot draws, and the status says why.
+serve description-no-meshes 8765 "--cloud none --robot-pose reach --robot-description $PWD/src/robot/testdata/med14.urdf"
+shot description-no-meshes "{$local8765, \"robot_urdf\": \"$med7\"}" 3
+stop
 
 # Poses over the table: /once is sent once, /tracked keeps moving. Kept forever, /once is there
 # at 4 s; with a 2 s timeout it is gone.

@@ -7,7 +7,7 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-use crate::decode::ColorChoice;
+use crate::decode::{ColorChoice, Kind};
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -20,7 +20,7 @@ pub struct Settings {
     url: Option<String>,
     /// The point cloud topic to draw; `None` draws the first one advertised.
     pub cloud_topic: Option<String>,
-    /// Pose topics the user switched off (new topics show by default).
+    /// Pose, annotation, text and stats topics the user switched off (new topics show by default).
     pub hidden_topics: BTreeSet<String>,
     /// The frame the scene is drawn in; `None` uses the root of the TF tree the data is in.
     pub fixed_frame: Option<String>,
@@ -99,6 +99,28 @@ fn path() -> Option<PathBuf> {
 }
 
 impl Settings {
+    /// The setting that picks the one topic drawn, for kinds drawn one topic at a time; `None`
+    /// for kinds where every topic is drawn (each can be hidden instead).
+    pub fn picked(&self, kind: Kind) -> Option<&Option<String>> {
+        match kind {
+            Kind::PointCloud => Some(&self.cloud_topic),
+            Kind::JointStates => Some(&self.joint_topic),
+            Kind::Image => Some(&self.image_topic),
+            Kind::RobotDescription => Some(&self.description_topic),
+            Kind::Transforms | Kind::Poses | Kind::Annotations | Kind::Text | Kind::Stats => None,
+        }
+    }
+
+    pub fn picked_mut(&mut self, kind: Kind) -> Option<&mut Option<String>> {
+        match kind {
+            Kind::PointCloud => Some(&mut self.cloud_topic),
+            Kind::JointStates => Some(&mut self.joint_topic),
+            Kind::Image => Some(&mut self.image_topic),
+            Kind::RobotDescription => Some(&mut self.description_topic),
+            Kind::Transforms | Kind::Poses | Kind::Annotations | Kind::Text | Kind::Stats => None,
+        }
+    }
+
     /// Values a hand-edited file can get wrong, put right; an old single `url` becomes the
     /// connection list.
     fn checked(mut self) -> Settings {
@@ -112,7 +134,8 @@ impl Settings {
             decimate: self.decimate.max(1),
             robot_opacity: self.robot_opacity.clamp(0.0, 1.0),
             pose_timeout: self.pose_timeout.max(0.0),
-            trail: self.trail.max(0.0),
+            // The longest trail the UI offers: each is redrawn whole on every display rebuild.
+            trail: self.trail.clamp(0.0, 60.0),
             ..self
         }
     }

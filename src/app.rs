@@ -26,8 +26,10 @@ pub struct State {
     pub settings: Settings,
     /// Settings as last saved and applied.
     applied: Settings,
-    /// Command-line values, which last for this run (see `to_save`).
+    /// Command-line values, which last for this run, and the file's values for the same
+    /// fields (see `to_save`).
     overrides: Overrides,
+    from_file: Settings,
     /// One per `settings.connections` entry, in that order.
     conns: Vec<Connection>,
     next_conn: u64,
@@ -41,7 +43,7 @@ pub struct State {
     /// The URDF a `robot_description` topic sent: topic, text, and the model or why not.
     robot_description: Option<(String, String, Result<Model, String>)>,
     /// How the file's robot differs from the described one, when both loaded and they differ.
-    robot_mismatch: Option<String>,
+    robot_mismatch: Option<Mismatch>,
     /// Joint positions changed: `sync` re-poses the robot without rebuilding the display.
     robot_dirty: bool,
     /// The shown image with its annotations drawn in, and whether a new image or annotation
@@ -61,14 +63,21 @@ pub struct State {
     pub drag_seen: (f32, f32),
 }
 
-/// What the command line set, and what the settings file had for the same fields. Saving writes
-/// the file's value back for any field still at the command line's, so `--urdf` for one run
-/// doesn't replace the URDF the UI remembers; a field changed in the UI saves as changed.
+/// The URDF file and the described robot differ: how, and which is drawn.
+struct Mismatch {
+    message: String,
+    /// The described robot wins, unless none of its meshes are on this machine (a robot's
+    /// `package://` paths usually aren't) and the file's are.
+    draw_described: bool,
+}
+
+/// What the command line set. Saving writes the file's value back for any field still at the
+/// command line's, so `--urdf` for one run doesn't replace the URDF the UI remembers; a field
+/// changed in the UI saves as changed.
 #[derive(Default)]
 pub struct Overrides {
     pub connections: Option<Vec<String>>,
     pub robot_urdf: Option<String>,
-    file: Option<Settings>,
 }
 
 /// What the camera was last framed on. A robot alone frames the view; a cloud arriving later
@@ -135,8 +144,8 @@ const TRAIL_COLOR: [f32; 4] = [1.0, 0.55, 0.15, 0.9];
 const VELOCITY_LOOKAHEAD_S: f32 = 1.0;
 
 impl State {
-    pub fn new(mut settings: Settings, mut overrides: Overrides, post: Post) -> State {
-        overrides.file = Some(settings.clone());
+    pub fn new(mut settings: Settings, overrides: Overrides, post: Post) -> State {
+        let from_file = settings.clone();
         if let Some(c) = &overrides.connections {
             settings.connections = c.clone();
         }
@@ -152,6 +161,7 @@ impl State {
             applied: settings.clone(),
             settings,
             overrides,
+            from_file,
             dirty: true,
             display: Display::default(),
             robot_file: None,
@@ -179,7 +189,7 @@ impl State {
     /// user hasn't changed since swapped back for the file's.
     fn to_save(&self) -> Settings {
         let mut s = self.settings.clone();
-        let (o, Some(file)) = (&self.overrides, &self.overrides.file) else { return s };
+        let (o, file) = (&self.overrides, &self.from_file);
         if o.connections.as_ref() == Some(&s.connections) {
             s.connections = file.connections.clone();
         }
@@ -211,13 +221,13 @@ impl State {
         for (id, e) in events {
             // Per event: a connection's new channel list can change what Auto picks.
             let picked = Picked {
-                cloud: self.cloud_topic(),
-                joints: self.joint_topic(),
-                image: self.image_topic(),
-                trail: self.settings.trail > 0.0,
+                cloud: self.topic(Kind::PointCloud),
+                joints: self.topic(Kind::JointStates),
+                image: self.topic(Kind::Image),
             };
+            let trail = self.settings.trail > 0.0;
             let Some(conn) = self.conns.iter_mut().find(|c| c.id == id) else { continue };
-            let changed = conn.received.apply(e, clock, &picked);
+            let changed = conn.received.apply(e, clock, &picked, trail);
             self.dirty |= changed.display;
             self.robot_dirty |= changed.robot;
             self.image_dirty |= changed.image;
@@ -239,22 +249,11 @@ impl State {
         self.received().flat_map(|r| &r.channels).find(|c| c.kind == Some(kind)).map(|c| c.topic.clone())
     }
 
-    /// The cloud topic to draw: the chosen one, else the first advertised.
-    pub fn cloud_topic(&self) -> Option<String> {
-        self.settings.cloud_topic.clone().or_else(|| self.first_of(Kind::PointCloud))
-    }
-
-    /// The joint-state topic that poses the robot: the chosen one, else the first advertised.
-    pub fn joint_topic(&self) -> Option<String> {
-        self.settings.joint_topic.clone().or_else(|| self.first_of(Kind::JointStates))
-    }
-
-    pub fn image_topic(&self) -> Option<String> {
-        self.settings.image_topic.clone().or_else(|| self.first_of(Kind::Image))
-    }
-
-    pub fn description_topic(&self) -> Option<String> {
-        self.settings.description_topic.clone().or_else(|| self.first_of(Kind::RobotDescription))
+    /// The one topic of `kind` drawn (the cloud, the joint states posing the robot, the image,
+    /// the robot description): the chosen one, else the first advertised. `None` for kinds where
+    /// every topic is drawn.
+    pub fn topic(&self, kind: Kind) -> Option<String> {
+        self.settings.picked(kind)?.clone().or_else(|| self.first_of(kind))
     }
 
     /// The drawn cloud and its topic, from whichever connection has it.
@@ -305,16 +304,17 @@ impl State {
     }
 
     pub fn robot_mismatch(&self) -> Option<&str> {
-        self.robot_mismatch.as_deref()
+        self.robot_mismatch.as_ref().map(|m| m.message.as_str())
     }
 
     /// The robot drawn: the file's, unless a server describes a different robot, which wins (a
-    /// file that matches still draws, for its meshes and colours); else whichever loaded.
+    /// file that matches still draws, for its meshes and colours; see `Mismatch`); else whichever
+    /// loaded.
     pub fn robot_model(&self) -> Option<&Model> {
         let file = self.robot_file().and_then(|m| m.as_ref().ok());
         let described = self.robot_description().and_then(|(_, m)| m.as_ref().ok());
         match (file, described) {
-            (Some(_), Some(d)) if self.robot_mismatch.is_some() => Some(d),
+            (Some(_), Some(d)) if self.robot_mismatch.as_ref().is_some_and(|m| m.draw_described) => Some(d),
             (f, d) => f.or(d),
         }
     }
@@ -337,19 +337,19 @@ impl State {
         // Hidden points aren't fetched (a 1.4 M-point cloud at 10 Hz is ~160 MB/s); the last one
         // stays, so turning them back on shows it until the next arrives.
         if s.show_points {
-            topics.extend(self.cloud_topic());
+            topics.extend(self.topic(Kind::PointCloud));
         }
         let visible = |kind| self.topics_of(kind).into_iter().filter(|t| self.visible(t));
         if s.show_poses {
             topics.extend(visible(Kind::Poses));
         }
         if self.shown_robot().is_some() {
-            topics.extend(self.joint_topic());
+            topics.extend(self.topic(Kind::JointStates));
         }
         // Always: the description says which robot the server drives, shown or not.
-        topics.extend(self.description_topic());
+        topics.extend(self.topic(Kind::RobotDescription));
         if s.show_image {
-            topics.extend(self.image_topic());
+            topics.extend(self.topic(Kind::Image));
             topics.extend(visible(Kind::Annotations));
         }
         if s.show_text {
@@ -367,7 +367,7 @@ impl State {
         let mut changed = false;
         self.sync_connections();
         self.sync_robot();
-        let (joint_topic, cloud_topic, image_topic) = (self.joint_topic(), self.cloud_topic(), self.image_topic());
+        let (joint_topic, cloud_topic, image_topic) = (self.topic(Kind::JointStates), self.topic(Kind::PointCloud), self.topic(Kind::Image));
         for r in self.conns.iter_mut().map(|c| &mut c.received) {
             // A switched joint topic: the old topic's positions don't apply.
             if r.joints.as_ref().is_some_and(|(t, _)| Some(t) != joint_topic.as_ref()) {
@@ -457,7 +457,7 @@ impl State {
             });
             loaded = true;
         }
-        let topic = self.description_topic();
+        let topic = self.topic(Kind::RobotDescription);
         let text = topic.as_ref().and_then(|t| self.received().find_map(|r| r.descriptions.get(t)));
         let current = self.robot_description.as_ref().map(|(t, x, _)| (t, x));
         if current != topic.as_ref().zip(text) {
@@ -474,7 +474,14 @@ impl State {
             self.robot_mismatch = file.zip(described).and_then(|((path, f), (topic, d))| {
                 let why = f.robot.kinematic_difference(&d.robot)?;
                 let file = Path::new(path).file_name().map_or(path.clone(), |n| n.to_string_lossy().into_owned());
-                Some(format!("{file} ({}) isn't the robot {topic} describes ({}): {why}. Drawing {topic}'s.", f.robot.name, d.robot.name))
+                let draw_described = !d.mesh.parts.is_empty() || f.mesh.parts.is_empty();
+                let drawing = if draw_described {
+                    format!("Drawing {topic}'s.")
+                } else {
+                    format!("Drawing {file}: none of {topic}'s meshes are on this machine.")
+                };
+                let message = format!("{file} ({}) isn't the robot {topic} describes ({}): {why}. {drawing}", f.robot.name, d.robot.name);
+                Some(Mismatch { message, draw_described })
             });
             self.dirty = true;
         }
@@ -484,15 +491,13 @@ impl State {
     /// is due, for the frame clock to wake then.
     fn expire(&mut self, now: f64) -> Option<f64> {
         let (timeout, trail) = (self.settings.pose_timeout as f64, self.settings.trail as f64);
-        let mut due: Option<f64> = None;
-        for r in self.conns.iter_mut().map(|c| &mut c.received) {
-            let (dropped, next) = r.expire(now, timeout, trail);
-            self.dirty |= dropped;
-            due = match (due, next) {
-                (Some(a), Some(b)) => Some(a.min(b)),
-                (a, b) => a.or(b),
-            };
-        }
+        let mut dropped = false;
+        let due = self.conns.iter_mut().filter_map(|c| {
+            let (gone, next) = c.received.expire(now, timeout, trail);
+            dropped |= gone;
+            next
+        }).reduce(f64::min);
+        self.dirty |= dropped;
         due
     }
 
@@ -556,7 +561,7 @@ impl State {
             return d;
         };
         // The cloud topic's error first: a cloud refused or undecodable is why the view is empty.
-        let mut problems: Vec<String> = self.cloud_topic().iter()
+        let mut problems: Vec<String> = self.topic(Kind::PointCloud).iter()
             .filter(|_| s.show_points)
             .filter_map(|t| self.error(t).map(|e| format!("{t}: {e}")))
             .collect();

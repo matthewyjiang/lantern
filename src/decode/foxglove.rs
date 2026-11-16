@@ -295,6 +295,9 @@ struct PointsAnnotation {
     points: Vec<Point2>,
     #[prost(message, optional, tag = "4")]
     outline_color: Option<Color>,
+    /// Per point (POINTS) or segment colours; Lantern draws a shape in one colour, the first.
+    #[prost(message, repeated, tag = "5")]
+    outline_colors: Vec<Color>,
     #[prost(message, optional, tag = "6")]
     fill_color: Option<Color>,
     #[prost(double, tag = "7")]
@@ -349,7 +352,8 @@ pub fn image_annotations(bytes: &[u8], _: &ColorChoice) -> Result<Decoded, Decod
             other => return Err(DecodeError::new(format!("points annotation has unknown type {other}"))),
         };
         let points = p.points.into_iter().map(|q| point2(Some(q))).collect();
-        out.push(Annotation::Points { kind, points, color: rgba(p.outline_color), fill: rgba(p.fill_color), thickness: p.thickness as f32 });
+        let color = p.outline_color.or_else(|| p.outline_colors.into_iter().next());
+        out.push(Annotation::Points { kind, points, color: rgba(color), fill: rgba(p.fill_color), thickness: p.thickness as f32 });
     }
     for t in m.texts {
         out.push(Annotation::Text { at: point2(t.position), text: t.text, size: t.font_size as f32, color: rgba(t.text_color), background: rgba(t.background_color) });

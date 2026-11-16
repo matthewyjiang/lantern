@@ -94,7 +94,7 @@ pub struct Image {
 }
 
 /// A shape drawn over an image, in its pixel coordinates (origin top-left, y down). Colours are
-/// linear 0–1 RGBA as Foxglove gives them; alpha 0 draws nothing (an unset fill).
+/// sRGB 0–1 RGBA as Foxglove gives them; alpha 0 draws nothing (an unset fill).
 #[derive(Clone, Debug, PartialEq)]
 pub enum Annotation {
     Circle { center: [f32; 2], diameter: f32, thickness: f32, outline: [f32; 4], fill: [f32; 4] },

@@ -179,7 +179,6 @@ impl Robot {
         Ok(Robot { name: robot.attribute("name").unwrap_or("robot").to_string(), links, joints, visuals })
     }
 
-    /// Joints that take a position (not fixed, not mimicking another), in tree order.
     /// How `self` and `other` differ as mechanisms, or `None` when they're the same: the same
     /// root, joints (by name) between the same links, moving the same way, placed alike within a
     /// micrometre. Names, visuals and colours don't count, so two files of one arm (different
@@ -218,6 +217,7 @@ impl Robot {
         None
     }
 
+    /// Joints that take a position (not fixed, not mimicking another), in tree order.
     pub fn movable(&self) -> impl Iterator<Item = &str> {
         self.joints.iter().filter(|j| j.motion != Motion::Fixed && j.mimic.is_none()).map(|j| j.name.as_str())
     }
