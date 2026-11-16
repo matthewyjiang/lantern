@@ -140,10 +140,27 @@ The repo checks the app the way a user sees it, headless, through Rune's tooling
 
 ```sh
 cargo test
-scripts/snap-live.sh out/live "--cloud table" - settings top   # serve, then headless snapshots
-scripts/audit-controls.sh                                      # every control must change the viewport
-scripts/bench.sh 3                                             # timing table → out/bench.tsv
+scripts/snap-live.sh out/live "--cloud table" - settings top      # serve, then headless snapshots
+scripts/snap-live.sh out/live "--cloud table" "-:--script scripts/interact.json"
+scripts/audit-controls.sh      # every control must change the viewport (pixel diff vs baseline)
+scripts/bench.sh 3             # timing table → out/bench.tsv, raw logs in out/bench/
 ```
 
-`snap-live.sh` starts the replay server and renders snapshots of the named scenes (`top`,
-`height`, `intensity`, `settings`). Most screenshots on this site come from it.
+- **`cargo test`** covers the decoders, against bytes from the reference serializers
+  (`src/decode/testdata/`), and the robot's forward kinematics, against pinocchio 4.1.0 on the
+  same URDF (`src/robot/testdata/med7.urdf`) in two poses.
+- **`snap-live.sh OUT_DIR "SERVE ARGS" SCENE...`** starts `scripts/serve.py` with the given
+  arguments, then renders each scene headless once data has arrived. `-` is the default state;
+  Rune flags can follow a colon, as in `-:--script scripts/interact.json`, which drags, zooms and
+  taps a control. Settings go to a throwaway config directory. Set `URL` to read another server,
+  or `SETTINGS` to start from a whole `settings.json`, for example with a robot loaded:
+
+  ```sh
+  SETTINGS='{"robot_urdf": "'$PWD'/fixtures/med7/med7.urdf"}' \
+    scripts/snap-live.sh out/robot "--cloud table --robot-pose reach" - settings
+  ```
+
+- **Scenes** (`--scene`) are `top`, `height`, `intensity` and `settings`, plus the timing scenes
+  `no-points`, `half`, `quarter`, `size-1` and `size-4`. Scenes don't save settings.
+
+Most screenshots on this site come from `snap-live.sh`.

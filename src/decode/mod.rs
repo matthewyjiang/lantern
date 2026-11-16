@@ -69,7 +69,7 @@ impl Decoder {
 }
 
 /// ROS 2 messages arrive as `cdr` through foxglove_bridge; Foxglove's own schemas as
-/// `protobuf` from the Foxglove SDKs (what kpd publishes with).
+/// `protobuf` from the Foxglove SDKs (any app that serves the protocol without ROS).
 const DECODERS: &[Decoder] = &[
     Decoder { encoding: "cdr", schema: "sensor_msgs/msg/PointCloud2", kind: Kind::PointCloud, decode: ros::point_cloud2 },
     Decoder { encoding: "cdr", schema: "tf2_msgs/msg/TFMessage", kind: Kind::Transforms, decode: ros::tf_message },
@@ -84,8 +84,8 @@ const DECODERS: &[Decoder] = &[
     Decoder { encoding: "protobuf", schema: "foxglove.PosesInFrame", kind: Kind::Poses, decode: foxglove::poses_in_frame },
     Decoder { encoding: "protobuf", schema: "foxglove.Odometry", kind: Kind::Poses, decode: foxglove::odometry },
     Decoder { encoding: "cdr", schema: "sensor_msgs/msg/JointState", kind: Kind::JointStates, decode: ros::joint_state },
-    // Foxglove has no joint-state schema; an SDK app (kpd) logs the ROS message's shape as JSON
-    // under its name: `{"name": [...], "position": [...]}` (README, "Publishing from kpd").
+    // Foxglove has no joint-state schema; an SDK app logs the ROS message's shape as JSON under
+    // its name: `{"name": [...], "position": [...]}` (docs, "Publish to Lantern").
     Decoder { encoding: "json", schema: "sensor_msgs/msg/JointState", kind: Kind::JointStates, decode: json::joint_state },
 ];
 

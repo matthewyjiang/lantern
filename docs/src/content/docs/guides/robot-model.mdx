@@ -67,8 +67,8 @@ names.
 - **ROS 2:** any `sensor_msgs/msg/JointState` topic through foxglove_bridge, such as
   `/joint_states` from your driver or `joint_state_publisher`.
 - **Foxglove SDK:** Foxglove has no joint-state schema, so publish the ROS message's shape as
-  JSON under its name. [Using Lantern with kpd](/lantern/guides/kpd/#joint-states) shows the
-  channel.
+  JSON under its name. [Publish to Lantern](/lantern/guides/publishing/#joint-states) shows
+  the channel.
 
 **Settings → Robot → Joint states** picks the topic. **Auto** uses the first one advertised and
 names it. Messages that carry only some joints merge, so separate arm and gripper publishers
@@ -102,18 +102,18 @@ fixed frame if TF knows it, else the TF tree's root, else (no TF at all) the rob
 
 ## Try it with the Med 7
 
-The repo has a fixture for the KUKA LBR Med 7 that kpd drives.
+The repo has a fixture for the KUKA LBR Med 7.
 [`scripts/robot_fixture.py`](https://github.com/matthewyjiang/lantern/blob/main/scripts/robot_fixture.py)
-expands its URDF from kuka-policy-deployment's `pyfri` submodule and copies the visual meshes
-into `fixtures/med7/`. It needs a kuka-policy-deployment checkout with its `.venv` (for xacro).
+expands a Med 7 description (a directory with `med7.urdf.xacro` and `meshes/med7/visual/`) and
+copies the visual meshes into `fixtures/med7/`. It needs `xacro` (`pip install xacro`).
 
 ```sh
-python scripts/robot_fixture.py ~/path/to/kuka-policy-deployment
+python scripts/robot_fixture.py path/to/robots [path/to/xacro]
 /tmp/fxenv/bin/python scripts/serve.py --cloud table --robot-pose home
 ```
 
 Then load `fixtures/med7/med7.urdf` in **Settings → Robot**. `--robot-pose` publishes fixed joint
-states on `/joint_states`: `home` is kpd's `HOME_Q`, and `reach` turns every joint. With
+states on `/joint_states`: `home` is the arm's usual home pose, and `reach` turns every joint. With
 `--via ros` they go out as the ROS message through foxglove_bridge instead.
 
 ## Limits

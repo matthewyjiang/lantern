@@ -57,7 +57,7 @@ See [Supported topics](/lantern/reference/topics/) for the message types Lantern
 Any program can serve the protocol with a
 [Foxglove SDK](https://github.com/foxglove/foxglove-sdk) (Python, C++ or Rust) and publish
 Foxglove's own schemas (`foxglove.PointCloud`, `foxglove.FrameTransforms`, ...) as protobuf.
-This is the path for code that doesn't run ROS, like [kpd](/lantern/guides/kpd/).
+This is the path for code that doesn't run ROS.
 
 ```sh
 pip install foxglove-sdk
@@ -99,7 +99,7 @@ Run it with `python ring.py`, and Lantern, on its default URL, draws the ring 1.
 `world`, with the server's `name` at the top of the side panel:
 
 ![Lantern drawing the 3,600-point ring around the lidar frame, 1.2 m above world, with my-app · localhost:8765 at the top of the side panel.](../../assets/first-cloud.png)
-[Using Lantern with kpd](/lantern/guides/kpd/) has a fuller example with poses and joint states.
+[Publish to Lantern](/lantern/guides/publishing/) has a fuller example with poses and joint states.
 
 ## No robot: the replay server
 
@@ -122,7 +122,7 @@ uv pip install --python /tmp/fxenv/bin/python foxglove-sdk==0.31.0 numpy
 /tmp/fxenv/bin/python scripts/serve.py --cloud table
 ```
 
-Serves `foxglove.*` protobuf on `ws://127.0.0.1:8765` itself, the way kpd will.
+Serves `foxglove.*` protobuf on `ws://127.0.0.1:8765` itself, the way any app on a Foxglove SDK does.
 
 </TabItem>
 <TabItem label="ROS 2 + foxglove_bridge">

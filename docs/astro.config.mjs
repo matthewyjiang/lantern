@@ -26,7 +26,7 @@ export default defineConfig({
 				},
 				{
 					label: 'Guides',
-					items: ['guides/settings', 'guides/robot-model', 'guides/kpd'],
+					items: ['guides/settings', 'guides/robot-model', 'guides/publishing'],
 				},
 				{
 					label: 'Reference',

@@ -13,7 +13,7 @@ Lantern decodes a channel when it knows its (encoding, schema) pair. Everything 
 | Point cloud | `sensor_msgs/msg/PointCloud2` | `foxglove.PointCloud` |
 | Transforms | `tf2_msgs/msg/TFMessage`, `geometry_msgs/msg/TransformStamped` | `foxglove.FrameTransform`, `foxglove.FrameTransforms` |
 | Poses | `geometry_msgs/msg/PoseStamped`, `geometry_msgs/msg/PoseArray`, `nav_msgs/msg/Odometry` | `foxglove.PoseInFrame`, `foxglove.PosesInFrame`, `foxglove.Odometry` |
-| Joint states | `sensor_msgs/msg/JointState` | `sensor_msgs/msg/JointState` as `json` (Foxglove has no joint-state schema; see [kpd](/lantern/guides/kpd/#joint-states)) |
+| Joint states | `sensor_msgs/msg/JointState` | `sensor_msgs/msg/JointState` as `json` (Foxglove has no joint-state schema; see [Publish to Lantern](/lantern/guides/publishing/#joint-states)) |
 
 Lantern decodes by schema name, so it doesn't need the schema text the server sends. Foxglove's
 `json`-encoded versions of its own schemas aren't read; the SDKs' typed channels send protobuf.
