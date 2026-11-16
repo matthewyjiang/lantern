@@ -349,14 +349,17 @@ pub fn image_annotations(bytes: &[u8], _: &ColorChoice) -> Result<Decoded, Decod
             2 => PointsKind::Loop,
             3 => PointsKind::Strip,
             4 => PointsKind::Lines,
-            other => return Err(DecodeError::new(format!("points annotation has unknown type {other}"))),
+            // UNKNOWN (0) or newer: nothing to draw, but the message's other shapes still are.
+            _ => continue,
         };
         let points = p.points.into_iter().map(|q| point2(Some(q))).collect();
         let color = p.outline_color.or_else(|| p.outline_colors.into_iter().next());
         out.push(Annotation::Points { kind, points, color: rgba(color), fill: rgba(p.fill_color), thickness: p.thickness as f32 });
     }
     for t in m.texts {
-        out.push(Annotation::Text { at: point2(t.position), text: t.text, size: t.font_size as f32, color: rgba(t.text_color), background: rgba(t.background_color) });
+        // An unset text colour would be transparent: white, as Foxglove draws it.
+        let color = t.text_color.map_or([1.0; 4], |c| rgba(Some(c)));
+        out.push(Annotation::Text { at: point2(t.position), text: t.text, size: t.font_size as f32, color, background: rgba(t.background_color) });
     }
     Ok(Decoded::Annotations(out))
 }

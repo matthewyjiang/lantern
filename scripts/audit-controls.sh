@@ -106,7 +106,7 @@ sett url-enter        changes "[$open, $(ev 0.6 url), {\"t\": 0.7, \"type\": \"k
 # Start on an unreachable address (its connect hangs until the 3 s timeout), add the live server
 # at 2.2 s and remove the dead one at 2.4 s: the dead connection's late failure must not blank
 # the new one.
-dead='{"url": "ws://10.255.255.1:8765"}'
+dead='{"connections": ["ws://10.255.255.1:8765"]}'
 switch="[$open, $(ev 0.6 url), {\"t\": 0.8, \"type\": \"type\", \"text\": \"ws://127.0.0.1:8765\"}, {\"t\": 2.2, \"type\": \"key\", \"name\": \"Enter\"}, $(ev 2.4 remove-0)]"
 at=6 sett switch-from-dead  same    "$switch" "$dead"
 

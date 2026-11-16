@@ -132,7 +132,6 @@ def scene(name):
 def serve_sdk(args, cloud, xyz, frame, mount):
     import foxglove
     from foxglove import messages as fm
-    from foxglove.channels import FrameTransformsChannel, OdometryChannel, PointCloudChannel, PosesInFrameChannel
 
     # The SDK doesn't latch: a client that subscribes between publishes waits for the next one.
     # Publishing again on every subscribe means a new client always gets data straight away,
@@ -152,18 +151,28 @@ def serve_sdk(args, cloud, xyz, frame, mount):
         return fm.Quaternion(x=q[0], y=q[1], z=q[2], w=q[3])
 
     extras = sdk_extras(args, fm, vec, quat)
-    if cloud is None:
+    publish_cloud = cloud_publisher(args, fm, vec, quat, cloud, xyz, frame, mount) if cloud is not None else None
+    if publish_cloud is None:
         print(f"serving on ws://127.0.0.1:{args.port} (no cloud)")
-        try:
-            while True:
-                fresh = subscribed.wait(1.0 / args.hz if args.hz > 0 else None)
-                if fresh:
-                    time.sleep(0.05)
-                    subscribed.clear()
-                extras(fresh)
-        except KeyboardInterrupt:
-            server.stop()
-        return
+    try:
+        while True:
+            # A client subscribes to its channels in one message; let the rest land, then send once.
+            fresh = subscribed.wait(1.0 / args.hz if args.hz > 0 else None)
+            if fresh:
+                time.sleep(0.05)
+                subscribed.clear()
+            if publish_cloud:
+                publish_cloud()
+            extras(fresh)
+    except KeyboardInterrupt:
+        server.stop()
+
+
+def cloud_publisher(args, fm, vec, quat, cloud, xyz, frame, mount):
+    """The cloud, the transform that places it and (for the table) object poses; returns the
+    function that publishes them."""
+    from foxglove.channels import FrameTransformsChannel, OdometryChannel, PointCloudChannel, PosesInFrameChannel
+
     names = ["x", "y", "z"]
     F32, U8 = fm.PackedElementFieldNumericType.Float32, fm.PackedElementFieldNumericType.Uint8
     fields = [fm.PackedElementField(name=n, offset=4 * i, type=F32) for i, n in enumerate(names)]
@@ -187,22 +196,16 @@ def serve_sdk(args, cloud, xyz, frame, mount):
     markers = PosesInFrameChannel("/markers")
     rate = f"at {args.hz} Hz and on subscribe" if args.hz > 0 else "on subscribe only"
     print(f"serving {len(xyz)} points ({len(data)} B) on ws://127.0.0.1:{args.port} {args.topic} {rate}")
-    try:
-        while True:
-            # A client subscribes to its channels in one message; let the rest land, then send once.
-            fresh = subscribed.wait(1.0 / args.hz if args.hz > 0 else None)
-            if fresh:
-                time.sleep(0.05)
-                subscribed.clear()
-            tf.log(fm.FrameTransforms(transforms=[fm.FrameTransform(parent_frame_id="world", child_frame_id=frame, translation=vec(mount[0]), rotation=quat(mount[1]))]))
-            points.log(fm.PointCloud(frame_id=frame, point_stride=stride, fields=fields, data=data))
-            if args.cloud == "table":
-                for name, (p, yaw, v) in OBJECTS.items():
-                    objects.log(fm.Odometry(frame_id="world", body_frame_id=name, pose=fm.Pose(position=vec(p), orientation=quat(yaw_quat(yaw))), linear_velocity=vec(v) if v else None))
-                markers.log(fm.PosesInFrame(frame_id="world", poses=[fm.Pose(position=vec(p), orientation=quat(yaw_quat(y))) for p, y in MARKERS]))
-            extras(fresh)
-    except KeyboardInterrupt:
-        server.stop()
+
+    def publish():
+        tf.log(fm.FrameTransforms(transforms=[fm.FrameTransform(parent_frame_id="world", child_frame_id=frame, translation=vec(mount[0]), rotation=quat(mount[1]))]))
+        points.log(fm.PointCloud(frame_id=frame, point_stride=stride, fields=fields, data=data))
+        if args.cloud == "table":
+            for name, (p, yaw, v) in OBJECTS.items():
+                objects.log(fm.Odometry(frame_id="world", body_frame_id=name, pose=fm.Pose(position=vec(p), orientation=quat(yaw_quat(yaw))), linear_velocity=vec(v) if v else None))
+            markers.log(fm.PosesInFrame(frame_id="world", poses=[fm.Pose(position=vec(p), orientation=quat(yaw_quat(y))) for p, y in MARKERS]))
+
+    return publish
 
 
 def sdk_extras(args, fm, vec, quat):

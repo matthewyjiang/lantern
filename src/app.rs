@@ -66,8 +66,8 @@ pub struct State {
 /// The URDF file and the described robot differ: how, and which is drawn.
 struct Mismatch {
     message: String,
-    /// The described robot wins, unless none of its meshes are on this machine (a robot's
-    /// `package://` paths usually aren't) and the file's are.
+    /// The described robot wins, unless none of its meshes load here (a robot's `package://`
+    /// paths usually aren't on this machine) and the file's do.
     draw_described: bool,
 }
 
@@ -78,6 +78,21 @@ struct Mismatch {
 pub struct Overrides {
     pub connections: Option<Vec<String>>,
     pub robot_urdf: Option<String>,
+}
+
+impl Overrides {
+    /// What to write to the settings file: `settings`, with command-line values the user hasn't
+    /// changed since swapped back for `file`'s.
+    fn to_save(&self, settings: &Settings, file: &Settings) -> Settings {
+        let mut s = settings.clone();
+        if self.connections.as_ref() == Some(&s.connections) {
+            s.connections = file.connections.clone();
+        }
+        if self.robot_urdf.as_ref() == Some(&s.robot_urdf) {
+            s.robot_urdf = file.robot_urdf.clone();
+        }
+        s
+    }
 }
 
 /// What the camera was last framed on. A robot alone frames the view; a cloud arriving later
@@ -183,20 +198,6 @@ impl State {
     pub fn set_unsaved(&mut self, change: fn(&mut Settings)) {
         change(&mut self.settings);
         self.applied = self.settings.clone();
-    }
-
-    /// What `sync` writes to the settings file: the settings, with command-line values the
-    /// user hasn't changed since swapped back for the file's.
-    fn to_save(&self) -> Settings {
-        let mut s = self.settings.clone();
-        let (o, file) = (&self.overrides, &self.from_file);
-        if o.connections.as_ref() == Some(&s.connections) {
-            s.connections = file.connections.clone();
-        }
-        if o.robot_urdf.as_ref() == Some(&s.robot_urdf) {
-            s.robot_urdf = file.robot_urdf.clone();
-        }
-        s
     }
 
     pub fn connections(&self) -> &[Connection] {
@@ -393,7 +394,7 @@ impl State {
         let wanted = self.wanted();
         self.conns.iter_mut().for_each(|c| c.want(&wanted));
         if self.settings != self.applied {
-            self.to_save().save();
+            self.overrides.to_save(&self.settings, &self.from_file).save();
             self.applied = self.settings.clone();
             self.dirty = true;
             self.image_dirty = true;
@@ -478,7 +479,7 @@ impl State {
                 let drawing = if draw_described {
                     format!("Drawing {topic}'s.")
                 } else {
-                    format!("Drawing {file}: none of {topic}'s meshes are on this machine.")
+                    format!("Drawing {file}: none of {topic}'s meshes load here.")
                 };
                 let message = format!("{file} ({}) isn't the robot {topic} describes ({}): {why}. {drawing}", f.robot.name, d.robot.name);
                 Some(Mismatch { message, draw_described })
@@ -560,10 +561,13 @@ impl State {
             d.tf = tf;
             return d;
         };
-        // The cloud topic's error first: a cloud refused or undecodable is why the view is empty.
-        let mut problems: Vec<String> = self.topic(Kind::PointCloud).iter()
-            .filter(|_| s.show_points)
-            .filter_map(|t| self.error(t).map(|e| format!("{t}: {e}")))
+        // The shown cloud's and image's errors first: a cloud or image refused or undecodable is
+        // why it isn't drawn. (Joint names the robot lacks go before even those, below.)
+        let shown = [(Kind::PointCloud, s.show_points), (Kind::Image, s.show_image)];
+        let mut problems: Vec<String> = shown.into_iter()
+            .filter(|(_, on)| *on)
+            .filter_map(|(kind, _)| self.topic(kind))
+            .filter_map(|t| self.error(&t).map(|e| format!("{t}: {e}")))
             .collect();
 
         // The cloud: placement, a sample of its points in the display frame for bounds and the
@@ -767,6 +771,22 @@ fn bounds(sample: &[Vec3], marks: &[Vec3], axis: f32) -> Option<(Vec3, f32)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // `--connect B --urdf cli.urdf` for one run: saving keeps the file's servers and URDF, until
+    // the user changes the servers in the UI, which then save as changed.
+    #[test]
+    fn command_line_values_last_for_the_run_unless_changed() {
+        let mut file = Settings::default();
+        (file.connections, file.robot_urdf) = (vec!["ws://a".into()], "file.urdf".into());
+        let o = Overrides { connections: Some(vec!["ws://b".into()]), robot_urdf: Some("cli.urdf".into()) };
+        let mut running = file.clone();
+        (running.connections, running.robot_urdf, running.axis_length) = (vec!["ws://b".into()], "cli.urdf".into(), 0.5);
+        let saved = o.to_save(&running, &file);
+        assert_eq!((saved.connections, saved.robot_urdf, saved.axis_length), (file.connections.clone(), file.robot_urdf.clone(), 0.5));
+        running.connections.push("ws://c".into());
+        let saved = o.to_save(&running, &file);
+        assert_eq!((saved.connections, saved.robot_urdf), (running.connections.clone(), file.robot_urdf.clone()));
+    }
 
     // The Med 7's root is `world`; a stack that publishes TF under `map` must keep its TF tree
     // drawable (the robot lands at map's origin, with a note) rather than switch to `world`.

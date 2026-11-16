@@ -22,11 +22,13 @@ fn check_size(width: u32, height: u32) -> Result<(), DecodeError> {
 /// `format` is what the message says ("jpeg", "png", ROS's "rgb8; jpeg compressed bgr8"); the
 /// bytes' own signature decides, so a mislabelled image still decodes.
 pub fn compressed(format: &str, data: &[u8]) -> Result<Image, DecodeError> {
+    use image::ImageDecoder;
     let fail = |e: image::ImageError| DecodeError::new(format!("{format:?} image: {e}"));
     let reader = image::ImageReader::new(std::io::Cursor::new(data)).with_guessed_format().map_err(|e| fail(e.into()))?;
-    let (width, height) = reader.into_dimensions().map_err(fail)?;
+    let decoder = reader.into_decoder().map_err(fail)?;
+    let (width, height) = decoder.dimensions();
     check_size(width, height)?;
-    let img = image::load_from_memory(data).map_err(fail)?;
+    let img = image::DynamicImage::from_decoder(decoder).map_err(fail)?;
     Ok(Image { width, height, rgba: img.into_rgba8().into_raw() })
 }
 

@@ -18,7 +18,7 @@ cfg=$(mktemp -d)
 if [[ -n ${SETTINGS:-} ]]; then
   mkdir -p "$cfg/lantern" && printf '%s\n' "$SETTINGS" > "$cfg/lantern/settings.json"
 elif [[ -n ${URL:-} ]]; then
-  mkdir -p "$cfg/lantern" && printf '{"url": "%s"}\n' "$URL" > "$cfg/lantern/settings.json"
+  mkdir -p "$cfg/lantern" && printf '{"connections": ["%s"]}\n' "$URL" > "$cfg/lantern/settings.json"
 fi
 # shellcheck disable=SC2086
 "$py" -u scripts/serve.py $serve_args > "$out/serve.log" 2>&1 &

@@ -98,6 +98,10 @@ fn path() -> Option<PathBuf> {
     Some(base.join("lantern/settings.json"))
 }
 
+/// The longest pose trail, seconds (the UI's longest option): every trail is redrawn whole on
+/// each display rebuild, so a hand-edited hour of a fast topic would be millions of segments.
+const MAX_TRAIL: f32 = 60.0;
+
 impl Settings {
     /// The setting that picks the one topic drawn, for kinds drawn one topic at a time; `None`
     /// for kinds where every topic is drawn (each can be hidden instead).
@@ -124,6 +128,9 @@ impl Settings {
     /// Values a hand-edited file can get wrong, put right; an old single `url` becomes the
     /// connection list.
     fn checked(mut self) -> Settings {
+        if self.trail > MAX_TRAIL {
+            eprintln!("lantern: trail {} s in the settings file is over the {MAX_TRAIL} s limit; using {MAX_TRAIL} s", self.trail);
+        }
         if let Some(url) = self.url.take()
             && !self.connections.contains(&url)
         {
@@ -134,8 +141,7 @@ impl Settings {
             decimate: self.decimate.max(1),
             robot_opacity: self.robot_opacity.clamp(0.0, 1.0),
             pose_timeout: self.pose_timeout.max(0.0),
-            // The longest trail the UI offers: each is redrawn whole on every display rebuild.
-            trail: self.trail.clamp(0.0, 60.0),
+            trail: self.trail.clamp(0.0, MAX_TRAIL),
             ..self
         }
     }
@@ -176,8 +182,8 @@ impl Settings {
 mod tests {
     use super::*;
 
-    // Files written before several connections name one `url`; that's the list now. Scripts
-    // still write `{"url": ...}`.
+    // Files written before several connections name one `url`; that's the list now, and a file
+    // with the list keeps it.
     #[test]
     fn an_old_single_url_becomes_the_connection_list() {
         let old: Settings = serde_json::from_str(r#"{"url": "ws://robot:9090"}"#).unwrap();

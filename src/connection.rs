@@ -167,14 +167,23 @@ impl Received {
                     }
                     // These arrive at the robot's control rate (often 100 Hz or more).
                     Decoded::Joints(js) => {
+                        // Only a joint name not seen before changes the display (it may be one
+                        // the robot lacks); new positions just re-pose the robot.
+                        let mut new_name = false;
                         if picked.joints.as_deref() == Some(topic.as_str()) {
                             match &mut self.joints {
-                                Some((t, positions)) if *t == topic => positions.extend(js),
-                                other => *other = Some((topic, js.into_iter().collect())),
+                                Some((t, positions)) if *t == topic => {
+                                    new_name = js.iter().any(|(n, _)| !positions.contains_key(n));
+                                    positions.extend(js);
+                                }
+                                other => {
+                                    new_name = true;
+                                    *other = Some((topic, js.into_iter().collect()));
+                                }
                             }
                             changed.robot = true;
                         }
-                        cleared
+                        cleared || new_name
                     }
                     Decoded::Image(i) => {
                         if picked.image.as_deref() == Some(topic.as_str()) {

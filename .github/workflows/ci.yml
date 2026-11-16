@@ -13,7 +13,8 @@ permissions:
 
 concurrency:
   group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  # A new push replaces a PR's run; every commit to main keeps its own.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   CARGO_TERM_COLOR: always
@@ -22,8 +23,11 @@ jobs:
   rust:
     name: Clippy and tests
     runs-on: ubuntu-24.04
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
+      # The xkbcommon crate links libxkbcommon at build time (everything else is loaded at run time).
+      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libxkbcommon-dev
       # Pinned, so a new stable's lints don't fail an unchanged tree.
       - uses: dtolnay/rust-toolchain@1.96.0
         with:
@@ -42,15 +46,17 @@ jobs:
   headless:
     name: Headless snapshot (software Vulkan)
     runs-on: ubuntu-24.04
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.96.0
       - uses: Swatinem/rust-cache@v2
-      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends mesa-vulkan-drivers
+      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libxkbcommon-dev mesa-vulkan-drivers
       - uses: actions/setup-python@v5
         with:
           python-version: "3.10"
-      - run: pip install foxglove-sdk==0.31.0 numpy pillow
+      # The versions the local dry run used, in a fresh Python 3.10 venv.
+      - run: pip install foxglove-sdk==0.31.0 numpy==2.2.6 pillow==12.3.0
       # The recorded scans come from PointCloudLibrary/data at a pinned commit, SHA-256 checked.
       - uses: actions/cache@v4
         with:

@@ -86,7 +86,12 @@ fn parse_args() -> (Overrides, Vec<String>) {
             std::process::exit(2);
         });
         match a.as_str() {
-            "--connect" => overrides.connections.get_or_insert_with(Vec::new).push(value()),
+            "--connect" => {
+                let (url, list) = (value(), overrides.connections.get_or_insert_with(Vec::new));
+                if !list.contains(&url) {
+                    list.push(url);
+                }
+            }
             "--urdf" => overrides.robot_urdf = Some(value()),
             _ => rest.push(a),
         }

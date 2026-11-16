@@ -181,8 +181,9 @@ impl Robot {
 
     /// How `self` and `other` differ as mechanisms, or `None` when they're the same: the same
     /// root, joints (by name) between the same links, moving the same way, placed alike within a
-    /// micrometre. Names, visuals and colours don't count, so two files of one arm (different
-    /// mesh paths) match, and two arms that share joint names (KUKA's Med 7 and Med 14) don't.
+    /// micrometre. The robot's name, visuals and colours don't count, so two files of one arm
+    /// (different mesh paths) match, and two arms that share joint names (KUKA's Med 7 and Med 14)
+    /// don't.
     pub fn kinematic_difference(&self, other: &Robot) -> Option<String> {
         const TOLERANCE: f64 = 1e-6;
         if self.links[0] != other.links[0] {

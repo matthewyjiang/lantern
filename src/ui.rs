@@ -153,9 +153,9 @@ fn point_badge(s: &State) -> El {
 
 /// Says why the view is empty or incomplete, at most `max_w` wide; absent when everything draws.
 fn status_chip(s: &State, max_w: f32) -> Option<El> {
-    // The first two of: the connections, the robot (a URDF that didn't load, or one that isn't
-    // the robot the server describes), what the data is missing. Two, so a server that's
-    // offline doesn't hide what's wrong with the others' data.
+    // One line each for the connections, the robot (a URDF that didn't load, or one that isn't
+    // the robot the server describes) and what the data is missing, so a server that's offline
+    // doesn't hide what's wrong with the others' data.
     let conns = s.connections();
     let connection = if conns.is_empty() {
         Some("No servers: add one in Settings".to_string())
@@ -179,7 +179,7 @@ fn status_chip(s: &State, max_w: f32) -> Option<El> {
         (None, None) if conns.iter().all(|c| c.received.channels.is_empty()) => Some("Connected; the server offers no topics yet".into()),
         _ => None,
     };
-    let messages: Vec<String> = [connection, robot, data].into_iter().flatten().take(2).collect();
+    let messages: Vec<String> = [connection, robot, data].into_iter().flatten().collect();
     if messages.is_empty() {
         return None;
     }
