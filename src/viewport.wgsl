@@ -1,6 +1,7 @@
-// Lantern's 3D viewport. Three pipelines draw into the offscreen target in one pass, in order:
-// `sky` (backdrop + ground grid, no depth), `points` (the cloud, depth-tested and written), then
-// `seg` (TF axes and tree, poses, velocities; depth-tested, blended). `blit` then copies the target into
+// Lantern's 3D viewport. These pipelines draw into the offscreen target in one pass, in order:
+// `sky` (backdrop + ground grid, no depth), `points` (the cloud, depth-tested and written),
+// `robot` twice (depth only, then colour where depth matches, blended), then `seg` (TF axes and
+// tree, poses, velocities; depth-tested, blended). `blit` then copies the target into
 // Rune's effect slot inside the UI pass. Rune's CLIP_WGSL is prepended (clip_alpha).
 //
 // Colours are linear: the offscreen target is *Srgb, and `blit` re-encodes when the UI pass
@@ -132,6 +133,45 @@ const QUAD: array<u32, 6> = array<u32, 6>(0u, 1u, 2u, 2u, 1u, 3u);
 
 @fragment fn points_fs(in: PointOut) -> @location(0) vec4f {
     return vec4f(in.color, 1.0);
+}
+
+// ---- robot: mesh parts, each placed by its link's pose ----
+
+// Position and normal per vertex (in the link's frame), three vertices per triangle.
+@group(1) @binding(0) var<storage, read> robot_verts: array<f32>;
+struct Part { model: mat4x4f, color: vec4f }
+// One per part, picked by the instance index: link pose in the display frame, then linear colour
+// and alpha (opacity applied).
+@group(1) @binding(1) var<storage, read> parts: array<Part>;
+
+// `@invariant`: the depth and colour passes must compute bit-identical depths for `Equal`.
+struct RobotOut {
+    @invariant @builtin(position) pos: vec4f,
+    @location(0) world: vec3f,
+    @location(1) normal: vec3f,
+    @location(2) @interpolate(flat) part: u32,
+}
+
+@vertex fn robot_vs(@builtin(vertex_index) v: u32, @builtin(instance_index) i: u32) -> RobotOut {
+    let b = v * 6u;
+    let m = parts[i].model;
+    let world = m * vec4f(robot_verts[b], robot_verts[b + 1u], robot_verts[b + 2u], 1.0);
+    // Link poses are rigid (scale is baked into the vertices), so the model matrix turns normals.
+    let n = (m * vec4f(robot_verts[b + 3u], robot_verts[b + 4u], robot_verts[b + 5u], 0.0)).xyz;
+    return RobotOut(F.view_proj * world, world.xyz, n, i);
+}
+
+// Two-sided (meshes aren't reliably wound): a headlight from the eye so nothing faces into
+// darkness, a key light from above for form, ambient, and a soft highlight.
+@fragment fn robot_fs(in: RobotOut) -> @location(0) vec4f {
+    let c = parts[in.part].color;
+    let to_eye = normalize(F.eye.xyz - in.world);
+    var n = normalize(in.normal);
+    n = select(n, -n, dot(n, to_eye) < 0.0);
+    let key = normalize(vec3f(0.35, 0.25, 1.0));
+    let lit = 0.16 + 0.52 * max(dot(n, to_eye), 0.0) + 0.38 * max(dot(n, key), 0.0);
+    let spec = 0.12 * pow(max(dot(n, normalize(to_eye + key)), 0.0), 48.0);
+    return vec4f((c.rgb * lit + spec) * c.a, c.a);
 }
 
 // ---- seg: thick antialiased lines, expanded in screen space ----

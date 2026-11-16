@@ -9,6 +9,11 @@ Two paths, the two Lantern supports:
              PoseArray); run foxglove_bridge next to it and Lantern connects to the bridge.
              Colour as PCL's packed float `rgb`.
 
+--robot-pose home|reach adds the KUKA Med 7's joint states on /joint_states, fixed: as JSON under
+the sensor_msgs/msg/JointState schema name through the SDK (the shape kpd publishes; README,
+"Publishing from kpd"), or as the ROS message through the bridge. Load fixtures/med7/med7.urdf
+(scripts/robot_fixture.py) in Lantern to see it.
+
 The cloud is the same recorded scan every message; nothing moves. Setup:
     uv venv --python /usr/bin/python3 --system-site-packages /tmp/fxenv
     uv pip install --python /tmp/fxenv/bin/python foxglove-sdk==0.31.0
@@ -42,6 +47,24 @@ MOUNTS = {
 # z = 0.70). The cup has a velocity so its arrow shows; nothing moves.
 OBJECTS = {"cup": ((0.05, 1.10, 0.75), 0.4, (0.1, 0.0, 0.0)), "box": ((-0.35, 1.35, 0.74), -0.9, None)}
 MARKERS = [((0.20, 1.45, 0.70), 0.0), ((-0.50, 1.00, 0.70), 1.2)]
+# Med 7 joint positions, degrees: kpd's HOME_Q, and a reach that turns every joint (the same two
+# poses src/robot/urdf.rs checks against pinocchio).
+ROBOT_POSES = {"home": [0, 30, 0, -60, 0, 90, 0], "reach": [50, 55, -20, -70, 30, 60, -40]}
+JOINTS = [f"lbr_joint_{k}" for k in range(7)]
+# The JSON schema an SDK app declares for joint states: Lantern matches on the title (the SDK
+# sends it as the schema name) and reads `name` and `position`.
+JOINT_STATE_SCHEMA = {
+    "title": "sensor_msgs/msg/JointState",
+    "type": "object",
+    "properties": {
+        "name": {"type": "array", "items": {"type": "string"}},
+        "position": {"type": "array", "items": {"type": "number"}, "description": "rad (revolute) or m (prismatic)"},
+    },
+}
+
+
+def joint_positions(args):
+    return [math.radians(d) for d in ROBOT_POSES[args.robot_pose]] if args.robot_pose else None
 
 
 def quat_between(a, b):
@@ -109,6 +132,8 @@ def serve_sdk(args, cloud, xyz, frame, mount):
     tf = FrameTransformsChannel("/tf")
     objects = OdometryChannel("/objects")
     markers = PosesInFrameChannel("/markers")
+    q = joint_positions(args)
+    joints = foxglove.Channel("/joint_states", schema=JOINT_STATE_SCHEMA) if q else None
     rate = f"at {args.hz} Hz and on subscribe" if args.hz > 0 else "on subscribe only"
     print(f"serving {len(xyz)} points ({len(data)} B) on ws://127.0.0.1:{args.port} {args.topic} {rate}")
     try:
@@ -123,6 +148,8 @@ def serve_sdk(args, cloud, xyz, frame, mount):
                 for name, (p, yaw, v) in OBJECTS.items():
                     objects.log(fm.Odometry(frame_id="world", body_frame_id=name, pose=fm.Pose(position=vec(p), orientation=quat(yaw_quat(yaw))), linear_velocity=vec(v) if v else None))
                 markers.log(fm.PosesInFrame(frame_id="world", poses=[fm.Pose(position=vec(p), orientation=quat(yaw_quat(y))) for p, y in MARKERS]))
+            if joints:
+                joints.log({"name": JOINTS, "position": q})
     except KeyboardInterrupt:
         server.stop()
 
@@ -132,7 +159,7 @@ def serve_ros(args, cloud, xyz, frame, mount):
     from geometry_msgs.msg import Pose, PoseArray, TransformStamped
     from nav_msgs.msg import Odometry
     from rclpy.qos import DurabilityPolicy, QoSProfile
-    from sensor_msgs.msg import PointCloud2, PointField
+    from sensor_msgs.msg import JointState, PointCloud2, PointField
     from tf2_msgs.msg import TFMessage
 
     rclpy.init()
@@ -170,6 +197,8 @@ def serve_ros(args, cloud, xyz, frame, mount):
     points = node.create_publisher(PointCloud2, args.topic, 1)
     objects = node.create_publisher(Odometry, "/objects", 10)
     markers = node.create_publisher(PoseArray, "/markers", 1)
+    q = joint_positions(args)
+    joints = node.create_publisher(JointState, "/joint_states", 10) if q else None
     print(f"publishing {len(xyz)} points ({len(msg.data)} B) on ROS {args.topic} at {args.hz} Hz")
     try:
         while rclpy.ok():
@@ -190,6 +219,10 @@ def serve_ros(args, cloud, xyz, frame, mount):
                 pa.header.frame_id = "world"
                 pa.poses = [pose(p, yaw_quat(y)) for p, y in MARKERS]
                 markers.publish(pa)
+            if joints:
+                js = JointState(name=JOINTS, position=q)
+                js.header.stamp = msg.header.stamp
+                joints.publish(js)
             time.sleep(max(0.0, 1.0 / args.hz - (time.monotonic() - t0)))
     except KeyboardInterrupt:
         pass
@@ -205,5 +238,6 @@ if __name__ == "__main__":
     p.add_argument("--topic", default="/points")
     p.add_argument("--hz", type=float, default=10.0, help="--via sdk: 0 publishes only when a client subscribes")
     p.add_argument("--port", type=int, default=8765, help="--via sdk only")
+    p.add_argument("--robot-pose", choices=list(ROBOT_POSES), help="also publish the Med 7's joint states, fixed at this pose")
     a = p.parse_args()
     (serve_sdk if a.via == "sdk" else serve_ros)(a, *scene(a.cloud))

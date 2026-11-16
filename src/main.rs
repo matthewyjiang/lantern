@@ -10,6 +10,7 @@
 mod app;
 mod camera;
 mod decode;
+mod robot;
 mod scene;
 mod settings;
 mod source;
