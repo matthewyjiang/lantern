@@ -1,0 +1,388 @@
+---
+// The landing page below Starlight's hero: the app itself, the two ways to feed it, what it
+// draws, and where to go next. Screenshots are the repo's headless snapshots (docs/screenshots).
+import { Image } from 'astro:assets';
+import { Code } from '@astrojs/starlight/components';
+
+import robotHome from '../../screenshots/robot-home-sdk.png';
+import terrain from '../../screenshots/terrain-1.37M.png';
+import robotReachTop from '../../screenshots/robot-reach-top.png';
+import rgbd from '../../screenshots/ros-rgbd.png';
+import settings from '../../screenshots/sdk-table-settings.png';
+
+const base = import.meta.env.BASE_URL.replace(/\/$/, '');
+const href = (path: string) => `${base}/${path}`;
+
+const rosSteps = `# Next to your ROS 2 nodes
+sudo apt install ros-$ROS_DISTRO-foxglove-bridge
+ros2 run foxglove_bridge foxglove_bridge`;
+
+const sdkSteps = `import foxglove
+from foxglove.channels import PointCloudChannel
+
+foxglove.start_server(port=8765)
+points = PointCloudChannel("/points")
+points.log(cloud)  # a foxglove.PointCloud`;
+
+const gallery = [
+	{
+		img: terrain,
+		alt: 'An airborne LiDAR scan of hilly terrain, coloured by height from blue to red.',
+		caption: '1,366,408 points of airborne LiDAR, coloured by height.',
+		link: 'reference/topics/',
+		more: 'Point clouds',
+	},
+	{
+		img: robotReachTop,
+		alt: 'A white KUKA arm in a reaching pose, with its TF axes, seen from above.',
+		caption: 'A URDF posed by joint states, with its TF frames.',
+		link: 'guides/robot-model/',
+		more: 'Robot model',
+	},
+	{
+		img: rgbd,
+		alt: 'A room scanned by an RGB-D camera, drawn with its own colours.',
+		caption: 'An RGB-D frame through foxglove_bridge, in its packed colours.',
+		link: 'connect/',
+		more: 'Connect a source',
+	},
+	{
+		img: settings,
+		alt: 'The Settings page beside the viewport, listing topics with their schemas.',
+		caption: 'Every advertised topic, with what Lantern can draw.',
+		link: 'guides/settings/',
+		more: 'Settings',
+	},
+];
+---
+
+<div class="landing not-content">
+	<figure class="stage">
+		<div class="stage-window">
+			<Image
+				src={robotHome}
+				alt="Lantern's window: a KUKA arm standing beside a table scan coloured by intensity, with object labels, TF axes and the side panel."
+				loading="eager"
+				widths={[640, 960, 1280]}
+				sizes="(min-width: 72rem) 67.5rem, 100vw"
+			/>
+		</div>
+		<figcaption>
+			A KUKA LBR Med 7 at kpd's home pose beside a SICK LMS400 table scan, both served by the
+			Foxglove Python SDK.
+		</figcaption>
+	</figure>
+
+	<section class="paths" aria-labelledby="paths-title">
+		<div class="section-head">
+			<h2 id="paths-title">Two ways in, one protocol</h2>
+			<p>
+				Lantern speaks the <a
+					href="https://github.com/foxglove/foxglove-sdk/blob/main/docs/spec/websocket/README.md"
+					>Foxglove WebSocket protocol</a
+				>. foxglove_bridge and the Foxglove SDKs both serve it on port 8765 by default, and
+				<code>ws://localhost:8765</code> is where Lantern connects first.
+			</p>
+		</div>
+		<div class="path-grid">
+			<div class="path">
+				<h3>ROS 2</h3>
+				<p>
+					Run <code>foxglove_bridge</code> next to your nodes. Lantern reads the ROS messages (CDR)
+					it forwards: <code>PointCloud2</code>, <code>/tf</code>, poses, odometry and joint states.
+				</p>
+				<Code code={rosSteps} lang="sh" />
+			</div>
+			<div class="path">
+				<h3>No ROS</h3>
+				<p>
+					Publish <code>foxglove.*</code> messages from Python, C++ or Rust with a Foxglove SDK.
+					This is the path for kpd.
+				</p>
+				<Code code={sdkSteps} lang="python" />
+			</div>
+		</div>
+		<p class="path-more">
+			<a href={href('connect/')}>Connect a source</a> walks through both, plus the replay server
+			for testing without a robot.
+		</p>
+	</section>
+
+	<section class="gallery" aria-labelledby="gallery-title">
+		<div class="section-head">
+			<h2 id="gallery-title">What it draws</h2>
+			<p>
+				The newest message on each topic, in one fixed frame, at 60 fps. These are headless
+				snapshots of the real app.
+			</p>
+		</div>
+		<ul class="shots">
+			{
+				gallery.map((shot) => (
+					<li>
+						<a href={href(shot.link)}>
+							<Image src={shot.img} alt={shot.alt} widths={[480, 800, 1280]} sizes="(min-width: 50rem) 33rem, 100vw" />
+							<span class="shot-caption">
+								<span class="shot-more">{shot.more}</span>
+								{shot.caption}
+							</span>
+						</a>
+					</li>
+				))
+			}
+		</ul>
+	</section>
+
+	<section class="small" aria-labelledby="small-title">
+		<h2 id="small-title">Small on purpose</h2>
+		<div class="small-grid">
+			<p>
+				One Rust binary on <a href="https://github.com/anomalyco/rune">Rune</a> and wgpu. No ROS
+				packages, no Qt, no plugin system. A new message type is one row in a table and one function.
+			</p>
+			<p>
+				A 1.37 M-point cloud draws in 0.5 ms of GPU time and arrives at 10 Hz without dropping a
+				60 fps frame, measured headless on an RTX PRO 5000. <a href={href('reference/performance/')}
+					>How it was measured</a
+				>.
+			</p>
+		</div>
+		<nav class="next" aria-label="Start reading">
+			<a href={href('getting-started/')}><span>Build and run it</span> on Arch with cargo</a>
+			<a href={href('guides/robot-model/')}><span>Load a robot</span> from a URDF</a>
+			<a href={href('reference/architecture/')}><span>Add a source</span> or a message type</a>
+		</nav>
+	</section>
+</div>
+
+<style>
+	.landing {
+		--gap: clamp(3.5rem, 8vw, 6rem);
+		display: flex;
+		flex-direction: column;
+		gap: var(--gap);
+		padding-bottom: 2rem;
+	}
+
+	.landing h2 {
+		font-size: clamp(1.6rem, 1.1rem + 1.6vw, 2.25rem);
+		line-height: 1.15;
+		letter-spacing: -0.02em;
+		color: var(--sl-color-white);
+		text-wrap: balance;
+	}
+
+	.landing h3 {
+		font-size: var(--sl-text-xl);
+		color: var(--sl-color-white);
+	}
+
+	.landing p {
+		color: var(--sl-color-gray-2);
+		line-height: 1.65;
+		max-width: 65ch;
+		text-wrap: pretty;
+	}
+
+	.landing a {
+		color: var(--sl-color-text-accent);
+	}
+
+	.landing code {
+		font-family: var(--__sl-font-mono);
+		font-size: 0.9em;
+		padding: 0.1em 0.3em;
+		border-radius: 0.25rem;
+		background: var(--sl-color-gray-6);
+		color: var(--sl-color-gray-1);
+	}
+
+	.section-head {
+		display: flex;
+		flex-direction: column;
+		gap: 0.75rem;
+		margin-bottom: 2rem;
+	}
+
+	/* The app's window, lit from behind by the lantern. */
+	.stage {
+		position: relative;
+		margin: 0;
+	}
+
+	.stage::before {
+		content: '';
+		position: absolute;
+		inset: 8% 6% 14%;
+		background: radial-gradient(closest-side, oklch(0.84 0.15 80 / 0.28), transparent);
+		filter: blur(48px);
+		z-index: 0;
+		pointer-events: none;
+	}
+
+	.stage-window {
+		position: relative;
+		z-index: 1;
+		border-radius: 0.75rem;
+		overflow: hidden;
+		border: 1px solid oklch(1 0 0 / 0.1);
+		background: oklch(0.16 0.006 265);
+		animation: rise 900ms cubic-bezier(0.22, 1, 0.36, 1) both;
+	}
+
+	.stage-window img {
+		display: block;
+		width: 100%;
+		height: auto;
+	}
+
+	.stage figcaption {
+		position: relative;
+		z-index: 1;
+		margin-top: 0.9rem;
+		font-size: var(--sl-text-sm);
+		color: var(--sl-color-gray-3);
+		text-align: center;
+	}
+
+	@keyframes rise {
+		from {
+			opacity: 0.4;
+			transform: translateY(16px) scale(0.985);
+		}
+	}
+
+	.path-grid {
+		display: grid;
+		grid-template-columns: repeat(auto-fit, minmax(min(100%, 24rem), 1fr));
+		gap: 1.5rem;
+	}
+
+	.path {
+		display: flex;
+		flex-direction: column;
+		gap: 0.9rem;
+		padding: 1.5rem;
+		border-radius: 0.75rem;
+		background: var(--sl-color-gray-6);
+	}
+
+	@media (max-width: 30rem) {
+		.path {
+			padding: 1rem;
+		}
+	}
+
+	.path :global(.expressive-code) {
+		margin-top: auto;
+	}
+
+	.path-more {
+		margin-top: 1.25rem;
+	}
+
+	.shots {
+		list-style: none;
+		padding: 0;
+		margin: 0;
+		display: grid;
+		grid-template-columns: repeat(auto-fit, minmax(min(100%, 26rem), 1fr));
+		gap: 2rem 1.5rem;
+	}
+
+	.shots a {
+		display: flex;
+		flex-direction: column;
+		gap: 0.75rem;
+		text-decoration: none;
+		color: inherit;
+	}
+
+	.shots img {
+		display: block;
+		width: 100%;
+		height: auto;
+		border-radius: 0.5rem;
+		border: 1px solid var(--sl-color-gray-5);
+		transition:
+			transform 400ms cubic-bezier(0.22, 1, 0.36, 1),
+			border-color 400ms cubic-bezier(0.22, 1, 0.36, 1);
+	}
+
+	.shots a:hover img,
+	.shots a:focus-visible img {
+		transform: translateY(-3px);
+		border-color: var(--sl-color-accent);
+	}
+
+	.shot-caption {
+		color: var(--sl-color-gray-2);
+		font-size: var(--sl-text-sm);
+		line-height: 1.5;
+	}
+
+	.shot-more {
+		display: block;
+		font-weight: 600;
+		font-size: var(--sl-text-base);
+		color: var(--sl-color-white);
+		margin-bottom: 0.15rem;
+	}
+
+	.shots a:hover .shot-more {
+		color: var(--sl-color-text-accent);
+	}
+
+	.small {
+		padding-top: var(--gap);
+		border-top: 1px solid var(--sl-color-hairline);
+	}
+
+	.small-grid {
+		display: grid;
+		grid-template-columns: repeat(auto-fit, minmax(min(100%, 22rem), 1fr));
+		gap: 1rem 2.5rem;
+		margin-top: 1.25rem;
+	}
+
+	.next {
+		display: flex;
+		flex-wrap: wrap;
+		gap: 0.75rem;
+		margin-top: 2.5rem;
+	}
+
+	.next a {
+		flex: 1 1 14rem;
+		padding: 1rem 1.25rem;
+		border-radius: 0.5rem;
+		border: 1px solid var(--sl-color-gray-5);
+		color: var(--sl-color-gray-2);
+		text-decoration: none;
+		transition: border-color 200ms ease-out;
+	}
+
+	.next a span {
+		display: block;
+		font-weight: 600;
+		color: var(--sl-color-white);
+	}
+
+	.next a:hover,
+	.next a:focus-visible {
+		border-color: var(--sl-color-accent);
+	}
+
+	@media (prefers-reduced-motion: reduce) {
+		.stage-window {
+			animation: none;
+		}
+		.shots img {
+			transition: none;
+		}
+		.shots a:hover img,
+		.shots a:focus-visible img {
+			transform: none;
+		}
+	}
+</style>

@@ -1,0 +1,107 @@
+---
+title: Settings
+description: The Settings page, section by section, and the settings.json file it saves.
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+The gear button at the top of the side panel opens the Settings page in place of the panel.
+Changes apply to the view as you make them; **Done** closes the page. Everything here is saved
+when it changes, so Lantern opens the next time the way you left it.
+
+![The Settings page next to the viewport: the connection, four topics with their kinds and schemas, and the fixed frame set to Auto (world).](../../../../screenshots/sdk-table-settings.png)
+
+## Connection
+
+The [Foxglove WebSocket](/lantern/connect/) server to read from. Type a URL and press
+**Connect** or Enter. Below the field, a dot and a line show the state: green with the server's
+name when connected, amber while connecting, red with the error when it can't connect.
+
+## Topics
+
+Every topic the server advertises, with its schema and encoding and a badge for what Lantern
+would draw from it. The header counts both: `4 topics, 4 Lantern can draw`.
+
+| Badge | Control | Behaviour |
+| --- | --- | --- |
+| **Point cloud** | Radio | One cloud is drawn at a time. Until you choose, the first one advertised is. |
+| **Poses** | Switch | Each pose topic on or off. New topics start on. |
+| **Transforms** | Always on | Every transform topic is read, so the TF tree is complete. |
+| **Joints** | Radio | The joint-state topic that poses the robot model. Until you choose, the first one advertised. |
+| **No decoder** | | Lantern doesn't read this schema. See [Supported topics](/lantern/reference/topics/). |
+
+A message that fails to decode shows its error in red under its topic. The topic keeps its last
+good message.
+
+## Frames
+
+**Fixed frame** is the frame everything is drawn in. **Auto** names what it picked, for example
+`Auto (world)`: the root of the TF tree that the point cloud's frame is in, or a pose topic's
+frame when there's no cloud. With no data but a robot, it's the robot's root (see
+[placement](/lantern/guides/robot-model/#placement)).
+
+Choose a frame to pin it. A pinned frame that the current data doesn't have stays listed, marked
+`not seen yet`, so a setting from yesterday's robot isn't lost.
+
+**Frame labels** draws each TF frame's name next to its axes. **Axis length** sets the size of
+TF and pose axes, from 5 cm to 1 m. The count below (`3 frames received`) is every frame in the
+TF tree.
+
+## Robot
+
+Where you load a robot model from a URDF, choose its joint-state topic, and show or fade it. The
+[Robot model guide](/lantern/guides/robot-model/) covers it.
+
+## Display
+
+| Setting | Values |
+| --- | --- |
+| **Point color** | **Auto**, **Height**, or any numeric field of the cloud (`intensity`, `ring`, ...) |
+| **Point size (pt)** | 1, 2, 3 or 4 |
+| **Density** | All, ½, ¼ or ⅛: draws every point, or every 2nd, 4th or 8th |
+| **Grid** | On or off |
+
+**Auto** colour uses the first of these the cloud has: packed `rgb`/`rgba`, separate
+`red`/`green`/`blue` fields, `intensity`, then height. A field is mapped through the Turbo
+colour ramp over its 1st to 99th percentile, so a few outliers don't flatten the rest. The legend
+at the viewport's bottom left shows the field and its range.
+
+Hiding the point cloud also unsubscribes from it, so a large cloud stops costing bandwidth. Its
+last message stays, and turning it back on shows that until the next one arrives.
+
+## settings.json
+
+Settings live in `$XDG_CONFIG_HOME/lantern/settings.json`, which is
+`~/.config/lantern/settings.json` by default. Lantern writes it whenever a setting changes. You
+can edit it while Lantern is closed, or hand a whole file to the headless scripts.
+
+```json title="~/.config/lantern/settings.json"
+{
+  "url": "ws://localhost:8765",
+  "cloud_topic": null,
+  "hidden_topics": [],
+  "fixed_frame": null,
+  "color": "Auto",
+  "point_size": 2.0,
+  "decimate": 1,
+  "axis_length": 0.25,
+  "show_grid": true,
+  "show_points": true,
+  "show_frames": true,
+  "show_labels": true,
+  "show_poses": true,
+  "robot_urdf": "",
+  "joint_topic": null,
+  "show_robot": true,
+  "robot_opacity": 1.0
+}
+```
+
+That's the default file. `null` means Auto for `cloud_topic`, `fixed_frame` and `joint_topic`.
+`color` is `"Auto"`, `"Height"`, or `{"Field": "intensity"}`. `decimate` draws every n-th point.
+A missing key takes its default, and a field the cloud doesn't have colours by height.
+
+<Aside type="note">
+	A file that doesn't parse is reported on stderr and replaced by the defaults; Lantern still
+	starts.
+</Aside>

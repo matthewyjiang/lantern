@@ -1,0 +1,166 @@
+---
+title: Connect a source
+description: Point Lantern at foxglove_bridge on ROS 2, at an app using a Foxglove SDK, or at the replay server for testing without a robot.
+---
+
+import { Aside, Tabs, TabItem } from '@astrojs/starlight/components';
+
+Lantern is a client of the
+[Foxglove WebSocket protocol](https://github.com/foxglove/foxglove-sdk/blob/main/docs/spec/websocket/README.md).
+Whatever serves that protocol is a source: foxglove_bridge for ROS 2, or any program using a
+Foxglove SDK. Lantern subscribes only to the topics it's drawing: the chosen point cloud, every
+transform topic, the visible pose topics and the joint-state topic.
+
+## Set the server
+
+The default is `ws://localhost:8765`, the default port of both foxglove_bridge and the SDKs. For
+another machine, open **Settings → Connection**, type the URL and press **Connect** (or Enter).
+The URL is saved with your [settings](/lantern/guides/settings/).
+
+```text
+ws://192.168.1.20:8765
+```
+
+<Aside type="caution" title="Plain ws:// only">
+	Lantern doesn't speak TLS (`wss://`). On a network you don't trust, tunnel the port over SSH
+	and keep the default URL:
+
+    ```sh
+    ssh -N -L 8765:localhost:8765 robot
+    ```
+
+</Aside>
+
+## ROS 2: foxglove_bridge
+
+[foxglove_bridge](https://github.com/foxglove/foxglove-sdk/tree/main/ros/src/foxglove_bridge)
+runs next to your nodes and forwards ROS 2 messages to Lantern in CDR, ROS's own encoding.
+Lantern decodes them itself, so the machine running Lantern doesn't need ROS.
+
+```sh
+sudo apt install ros-$ROS_DISTRO-foxglove-bridge
+ros2 run foxglove_bridge foxglove_bridge
+```
+
+The bridge listens on every interface, port 8765. To keep it on the robot's loopback (for an SSH
+tunnel), pass `--ros-args -p address:=127.0.0.1`; to move it, `-p port:=9090`.
+
+Lantern offers both the subprotocol of the newer SDK-based bridge (`foxglove.sdk.v1`) and the
+older one (`foxglove.websocket.v1`), so recent and older bridge releases both work.
+
+![The Settings page listing ROS 2 topics from foxglove_bridge: PointCloud2, TFMessage, PoseArray and Odometry, each with its schema and cdr encoding.](../../../screenshots/ros-bridge-settings.png)
+
+See [Supported topics](/lantern/reference/topics/) for the message types Lantern reads.
+
+## No ROS: a Foxglove SDK
+
+Any program can serve the protocol with a
+[Foxglove SDK](https://github.com/foxglove/foxglove-sdk) (Python, C++ or Rust) and publish
+Foxglove's own schemas (`foxglove.PointCloud`, `foxglove.FrameTransforms`, ...) as protobuf.
+This is the path for code that doesn't run ROS, like [kpd](/lantern/guides/kpd/).
+
+```sh
+pip install foxglove-sdk
+```
+
+```python title="ring.py"
+import math
+import struct
+import time
+
+import foxglove
+from foxglove import messages as fm
+from foxglove.channels import FrameTransformsChannel, PointCloudChannel
+
+foxglove.start_server(name="my-app", port=8765)
+tf = FrameTransformsChannel("/tf")
+points = PointCloudChannel("/points")
+
+# A 2 m ring of 3,600 points: x, y, z as float32, 12 bytes each.
+F32 = fm.PackedElementFieldNumericType.Float32
+fields = [fm.PackedElementField(name=n, offset=4 * i, type=F32) for i, n in enumerate("xyz")]
+ring = [(2 * math.cos(a), 2 * math.sin(a), 0.0) for a in (k * math.tau / 3600 for k in range(3600))]
+data = b"".join(struct.pack("<fff", *p) for p in ring)
+
+while True:
+    tf.log(fm.FrameTransforms(transforms=[
+        fm.FrameTransform(
+            parent_frame_id="world",
+            child_frame_id="lidar",
+            translation=fm.Vector3(x=0.0, y=0.0, z=1.2),
+            rotation=fm.Quaternion(x=0.0, y=0.0, z=0.0, w=1.0),
+        )
+    ]))
+    points.log(fm.PointCloud(frame_id="lidar", point_stride=12, fields=fields, data=data))
+    time.sleep(0.1)
+```
+
+Run it with `python ring.py`, and Lantern, on its default URL, draws the ring 1.2 m above
+`world`, with the server's `name` at the top of the side panel:
+
+![Lantern drawing the 3,600-point ring around the lidar frame, 1.2 m above world, with my-app · localhost:8765 at the top of the side panel.](../../assets/first-cloud.png)
+[Using Lantern with kpd](/lantern/guides/kpd/) has a fuller example with poses and joint states.
+
+## No robot: the replay server
+
+[`scripts/serve.py`](https://github.com/matthewyjiang/lantern/blob/main/scripts/serve.py)
+replays a recorded scan over the protocol, with the transform that places the sensor and, for the
+`table` scan, two tracked objects and two markers. Nothing moves; it's for seeing Lantern work,
+taking screenshots and testing changes.
+
+It needs a Python with the Foxglove SDK and numpy:
+
+```sh
+uv venv --python /usr/bin/python3 --system-site-packages /tmp/fxenv
+uv pip install --python /tmp/fxenv/bin/python foxglove-sdk==0.31.0 numpy
+```
+
+<Tabs>
+<TabItem label="Foxglove SDK">
+
+```sh
+/tmp/fxenv/bin/python scripts/serve.py --cloud table
+```
+
+Serves `foxglove.*` protobuf on `ws://127.0.0.1:8765` itself, the way kpd does.
+
+</TabItem>
+<TabItem label="ROS 2 + foxglove_bridge">
+
+```sh
+source /opt/ros/humble/setup.bash
+/tmp/fxenv/bin/python scripts/serve.py --cloud table --via ros
+# in a second shell
+ros2 run foxglove_bridge foxglove_bridge --ros-args -p address:=127.0.0.1
+```
+
+Publishes ROS 2 messages with rclpy; Lantern connects to the bridge.
+
+</TabItem>
+</Tabs>
+
+| Option | Values |
+| --- | --- |
+| `--cloud` | `table` (460,400 points, intensity), `rgbd` (307,200, packed RGB), `terrain` (1,366,408, airborne LiDAR) |
+| `--via` | `sdk` (default) or `ros` |
+| `--robot-pose` | `home` or `reach`: also publish the KUKA Med 7's joint states. See [Robot model](/lantern/guides/robot-model/#try-it-with-the-med-7). |
+| `--hz` | Publish rate, 10 by default |
+| `--topic`, `--port` | `/points` and 8765 by default (`--port` with `--via sdk` only) |
+
+The scans come from the [PCL data repository](https://github.com/PointCloudLibrary/data)
+(BSD-3-Clause). The first run downloads them at a pinned commit, checks their SHA-256, and caches
+them in `fixtures/`.
+
+## When something's missing
+
+The status chip over the viewport says why the view is empty or incomplete:
+
+| Chip | Meaning |
+| --- | --- |
+| `Connecting to ws://…` | Nothing has answered yet. An unreachable host shows this for 3 s. |
+| `Can't reach ws://…: …` | The connection failed or dropped. Lantern retries every second. |
+| `Connected; the server offers no topics yet` | The server is up but hasn't advertised anything. |
+| `/points: no transform from lidar to world` | The data's frame isn't connected to the fixed frame through TF yet. |
+| `Server: …` | A warning the server sent, such as a failed subscription. |
+
+Topics Lantern can't decode still appear in **Settings → Topics**, marked **No decoder**.

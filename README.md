@@ -17,6 +17,8 @@ The protocol works with and without ROS:
 
 Lantern is pure Rust. Building or running it needs no ROS installation.
 
+**Docs:** [matthewyjiang.github.io/lantern](https://matthewyjiang.github.io/lantern/) (source in [docs/](docs/)).
+
 ```sh
 cargo run --release                          # window; connects to ws://localhost:8765
 ```

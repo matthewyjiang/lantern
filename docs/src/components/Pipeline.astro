@@ -1,0 +1,93 @@
+---
+// Lantern's data path, top to bottom, for the architecture page. Each stage names the file that
+// owns it; the arrows say what crosses the boundary.
+const stages = [
+	{ name: 'Server', file: 'foxglove_bridge or a Foxglove SDK app', thread: '' },
+	{ name: 'Source', file: 'src/source.rs', thread: 'WebSocket thread', edge: 'WebSocket frames' },
+	{ name: 'Decoders', file: 'src/decode/', thread: 'WebSocket thread', edge: 'message bytes + (encoding, schema)' },
+	{ name: 'Inbox', file: 'src/main.rs', thread: '', edge: 'Event: Status, Channels, Data, …' },
+	{ name: 'App state', file: 'src/app.rs, src/scene.rs', thread: 'UI thread', edge: 'events, newest cloud per topic' },
+	{ name: 'Viewport and UI', file: 'src/viewport.rs, src/ui.rs', thread: 'UI thread → GPU', edge: 'Display: frame, lines, labels, robot' },
+];
+---
+
+<ol class="pipeline not-content" aria-label="Lantern's data path">
+	{
+		stages.map((s) => (
+			<li>
+				{s.edge && <span class="edge">{s.edge}</span>}
+				<div class="stage">
+					<span class="name">{s.name}</span>
+					<code class="file">{s.file}</code>
+					{s.thread && <span class="thread">{s.thread}</span>}
+				</div>
+			</li>
+		))
+	}
+</ol>
+
+<style>
+	.pipeline {
+		list-style: none;
+		padding: 0;
+		margin: 1.5rem 0;
+		display: flex;
+		flex-direction: column;
+		align-items: stretch;
+		max-width: 34rem;
+	}
+
+	.pipeline li {
+		display: flex;
+		flex-direction: column;
+		align-items: center;
+	}
+
+	.edge {
+		position: relative;
+		padding: 0.6rem 0 0.6rem 1.25rem;
+		font-size: var(--sl-text-xs);
+		color: var(--sl-color-gray-3);
+		align-self: center;
+	}
+
+	.edge::before {
+		content: '↓';
+		position: absolute;
+		left: 0;
+		color: var(--sl-color-accent);
+	}
+
+	.stage {
+		width: 100%;
+		display: grid;
+		grid-template-columns: 1fr auto;
+		grid-template-areas: 'name thread' 'file file';
+		gap: 0.2rem 1rem;
+		padding: 0.75rem 1rem;
+		border-radius: 0.5rem;
+		border: 1px solid var(--sl-color-gray-5);
+		background: var(--sl-color-gray-6);
+	}
+
+	.name {
+		grid-area: name;
+		font-weight: 600;
+		color: var(--sl-color-white);
+	}
+
+	.thread {
+		grid-area: thread;
+		font-size: var(--sl-text-xs);
+		color: var(--sl-color-text-accent);
+		align-self: center;
+	}
+
+	.file {
+		grid-area: file;
+		font-size: var(--sl-text-sm);
+		color: var(--sl-color-gray-2);
+		background: none;
+		padding: 0;
+	}
+</style>
