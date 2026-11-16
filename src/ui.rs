@@ -4,9 +4,8 @@
 
 use std::collections::BTreeSet;
 
-use glam::Vec3;
 use rune::tok::{self, TextStyle, motion, type_};
-use rune::{Color, Cx, Drag, El, Phase, PointerButton, ScrollSpec, Tx, WheelEvent, col, effect, el, oklch, oklcha, row, text, text_input};
+use rune::{Color, Cx, Drag, El, Phase, PointerButton, ScrollSpec, Tx, WheelEvent, col, effect, el, icon, oklch, oklcha, row, text, text_input};
 
 use crate::app::State;
 use crate::decode::{ColorChoice, Kind};
@@ -80,7 +79,7 @@ fn frame_labels(s: &State, [w, h]: [f32; 2]) -> Vec<El> {
     let t = tok::theme(true);
     let vp = s.camera.view_proj(w / h.max(1.0));
     s.display.labels.iter().filter_map(|(name, p)| {
-        let clip = vp * Vec3::from(*p).extend(1.0);
+        let clip = vp * p.extend(1.0);
         if clip.w <= 0.0 {
             return None;
         }
@@ -531,11 +530,13 @@ fn density_field(key: &'static str, st: &Settings) -> El {
 
 // ---- controls ----
 
-/// A small lantern glyph: a warm light in a rounded frame.
+/// The app icon, `assets/icon.svg`, which the README shows too. Rune wraps the body in its own
+/// `<svg>` with the same viewBox; the file names its own colours, so it draws in them.
+static LANTERN_ICON: rune::Icon = rune::Icon { name: "lantern", view: 64.0, body: include_str!("../assets/icon.svg") };
+
+/// The header's mark: the app icon at 34 pt.
 fn lantern_mark() -> El {
-    let glow = oklch(0.84, 0.15, 80.0);
-    el().size(34.0, 34.0).radius(10.0).fill(oklch(0.27, 0.02, 75.0)).border(1.0, oklcha(1.0, 0.9, 80.0, 0.12)).center()
-        .child(el().size(12.0, 12.0).radius(6.0).fill(glow).shadow(0.0, 10.0, oklcha(0.84, 0.15, 80.0, 0.7)))
+    icon(&LANTERN_ICON, 34.0)
 }
 
 fn section(title: &str) -> El {

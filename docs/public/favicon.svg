@@ -1,12 +1,26 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 34 34" width="34" height="34">
-  <!-- Lantern's in-app mark (src/ui.rs, lantern_mark): a warm light in a rounded frame. -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="34" height="34">
+  <!-- A copy of assets/icon.svg, the app icon; change that file and copy it here. -->
   <defs>
-    <radialGradient id="glow" cx="50%" cy="50%" r="50%">
-      <stop offset="0" stop-color="#fdbe45" stop-opacity="0.55"/>
-      <stop offset="1" stop-color="#fdbe45" stop-opacity="0"/>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#312A21"/>
+      <stop offset="1" stop-color="#1C1814"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="0.5" cy="0.5" r="0.5">
+      <stop offset="0" stop-color="#FFC94D" stop-opacity="0.55"/>
+      <stop offset="1" stop-color="#FFC94D" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="orb" cx="0.42" cy="0.38" r="0.6">
+      <stop offset="0" stop-color="#FFF6DD"/>
+      <stop offset="0.5" stop-color="#FFD271"/>
+      <stop offset="1" stop-color="#F29A2E"/>
     </radialGradient>
   </defs>
-  <rect x="0.5" y="0.5" width="33" height="33" rx="10" fill="#2c251c" stroke="#fdbe45" stroke-opacity="0.18"/>
-  <circle cx="17" cy="17" r="13" fill="url(#glow)"/>
-  <circle cx="17" cy="17" r="6" fill="#fdbe45"/>
+  <rect width="64" height="64" rx="15" fill="url(#bg)"/>
+  <rect x="0.5" y="0.5" width="63" height="63" rx="14.5" fill="none" stroke="#FFF0D2" stroke-opacity="0.12"/>
+  <circle cx="22" cy="44" r="18" fill="url(#glow)"/>
+  <g stroke-linecap="round" stroke-width="7">
+    <line x1="22" y1="44" x2="22" y2="13" stroke="#4ED07A"/>
+    <line x1="22" y1="44" x2="48" y2="44" stroke="#F2575A"/>
+  </g>
+  <circle cx="22" cy="44" r="7.5" fill="url(#orb)"/>
 </svg>
