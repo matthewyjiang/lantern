@@ -100,7 +100,7 @@ fn grid_lines(c: vec2f, cell: f32, width_px: f32) -> f32 {
 struct PointOut { @builtin(position) pos: vec4f, @location(0) color: vec3f }
 
 // Six vertices per point, not a 4-vertex instance: tiny instances leave the GPU's vertex
-// front-end mostly idle (see README, "What bounds the point draw").
+// front-end mostly idle (see docs, Performance: "What bounds the point draw").
 const QUAD: array<u32, 6> = array<u32, 6>(0u, 1u, 2u, 2u, 1u, 3u);
 
 @vertex fn points_vs(@builtin(vertex_index) v: u32) -> PointOut {

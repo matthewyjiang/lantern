@@ -1,0 +1,166 @@
+---
+title: Architecture and extending
+description: How data flows through Lantern, which file owns what, and how to add a message type or a new source.
+---
+
+import { Aside, Steps } from '@astrojs/starlight/components';
+import Pipeline from '../../../components/Pipeline.astro';
+
+Lantern is small enough to read in an afternoon. Data moves one way, from the server to the
+screen, and each step has one owner.
+
+<Pipeline />
+
+- **Source.** A client thread connects, subscribes to the topics the app wants, decodes what
+  arrives, and reconnects when the connection drops.
+- **Decoders.** A table maps each (encoding, schema) pair to a function that turns message bytes
+  into a scene type. Nothing past this point knows a message type.
+- **Inbox.** Events wait here for the UI thread. Point clouds coalesce to the newest per topic, so
+  a UI that falls behind a fast publisher drops stale clouds instead of queueing them. Everything
+  else queues in arrival order, because order matters for TF.
+- **App state.** Applies events, keeps the TF tree, loads the robot, and derives what to draw:
+  the fixed frame, lines, labels, bounds and link poses.
+- **Viewport and UI.** A Rune compositor draws the 3D pass offscreen into a slot in the UI, then
+  the side panel and Settings page draw around it.
+
+## Files
+
+| File | Owns |
+| --- | --- |
+| `src/source.rs` | The `Source` trait; `FoxgloveWs`, the WebSocket client thread (tungstenite): subscribes to what the app wants, reconnects |
+| `src/decode/` | The `(encoding, schema)` → decoder table; ROS CDR and Foxglove protobuf decoders; point field extraction |
+| `src/scene.rs` | What gets drawn, independent of message types: clouds, transforms, poses, the TF tree |
+| `src/app.rs` | App state: applies source events, syncs settings with the source, loads the robot, derives the display |
+| `src/robot/` | URDF parsing and forward kinematics (`urdf.rs`), STL and primitive meshes with smoothed normals (`mesh.rs`), loading and mesh path resolution (`mod.rs`) |
+| `src/settings.rs` | Persisted settings |
+| `src/ui.rs` | Side panel, Settings page, viewport overlays |
+| `src/camera.rs` | Orbit camera (REP 103, z up), reversed infinite depth |
+| `src/viewport.rs` | Rune `Compositor`: offscreen 3D pass blitted into an `El::effect` slot, GPU timer |
+| `src/viewport.wgsl` | Sky and grid, points (vertex-pulled quads), robot (lit meshes), lines, blit |
+| `src/main.rs` | Wiring, the source-to-app inbox, headless scenes |
+
+## Add a message type
+
+A message that maps onto something Lantern already draws (a cloud, transforms, poses or joint
+positions) is one function and one table row. For example, `geometry_msgs/msg/PoseWithCovarianceStamped`,
+which AMCL publishes on `/amcl_pose`:
+
+<Steps>
+
+1. Write the decoder next to its siblings: `src/decode/ros.rs` for ROS 2 CDR,
+   `src/decode/foxglove.rs` for Foxglove protobuf. It takes the message bytes and returns a
+   `Decoded`.
+
+   ```rust title="src/decode/ros.rs"
+   /// `geometry_msgs/PoseWithCovarianceStamped`: the pose; the covariance after it is ignored.
+   pub fn pose_with_covariance_stamped(bytes: &[u8], _: &ColorChoice) -> Result<Decoded, DecodeError> {
+       let mut r = Cdr::new(bytes)?;
+       let frame_id = header(&mut r)?;
+       Ok(Decoded::Poses(Poses { frame_id, items: vec![Tracked::at(pose(&mut r)?)] }))
+   }
+   ```
+
+2. Add its row to `DECODERS` in `src/decode/mod.rs`. The `kind` decides how the Settings page
+   offers the topic.
+
+   ```rust title="src/decode/mod.rs" ins={3}
+   const DECODERS: &[Decoder] = &[
+       // ...
+       Decoder { encoding: "cdr", schema: "geometry_msgs/msg/PoseWithCovarianceStamped", kind: Kind::Poses, decode: ros::pose_with_covariance_stamped },
+   ];
+   ```
+
+3. Test it against bytes from the reference serializer. `scripts/capture_test_bytes.py` writes
+   rclpy's CDR and the Foxglove Python SDK's protobuf into `src/decode/testdata/`; add your
+   message there, and assert on the decoded values in the tests in `src/decode/mod.rs`.
+
+</Steps>
+
+The topic now shows in Settings with a **Poses** badge instead of **No decoder**, and the
+source subscribes to it like any other pose topic.
+
+A message that needs a new kind of drawing (an image, a marker array) needs more: a `Decoded`
+variant and `Kind`, a scene type in `src/scene.rs`, state in `src/app.rs`, and drawing in the
+viewport.
+
+## Add a source
+
+Every source today is a Foxglove WebSocket server. Another transport, such as an MCAP file or a
+different protocol, is another implementation of `Source`:
+
+```rust title="src/source.rs"
+pub trait Source: Send {
+    /// Replaces what the source delivers; returns at once.
+    fn want(&self, wanted: Wanted);
+}
+
+/// What the app wants delivered: topics, and the colour choice (clouds are coloured while
+/// decoding, off the UI thread).
+pub struct Wanted {
+    pub topics: HashSet<String>,
+    pub color: ColorChoice,
+}
+
+/// Where a source sends its events, from its own thread.
+pub type Sink = Arc<dyn Fn(Event) + Send + Sync>;
+```
+
+The contract, as `FoxgloveWs` keeps it:
+
+- **Own your thread.** `want` must return at once; do the I/O and decoding on a thread you
+  spawn. Dropping the source stops it.
+- **Report status.** Send `Event::Status` as you go: `Connecting`, `Connected { server }` with a
+  name for the side panel, or `Failed { error }`, which the status chip shows. Retry on your own
+  if that makes sense for the transport.
+- **Advertise channels.** Send `Event::Channels` with every topic you can offer, each with its
+  `kind` from `decode::decoder_for(encoding, schema)`. Each list replaces the last one.
+- **Deliver only what's wanted.** Send `Event::Data` for topics in the latest `Wanted`, decoded
+  through the same `decode::decoder_for` table. A message that doesn't decode is
+  `Event::DecodeFailed`; the topic keeps its last good data.
+
+Then pick it in `open`, which dispatches on the URL the user typed:
+
+```rust title="src/source.rs" ins={2-4}
+pub fn open(url: &str, sink: Sink) -> Box<dyn Source> {
+    if let Some(path) = url.strip_prefix("file://") {
+        return Box::new(McapFile::spawn(path.into(), sink));
+    }
+    Box::new(FoxgloveWs::spawn(url.to_string(), sink))
+}
+```
+
+<Aside>
+	Because sources decode with the same table, a new source gets every message type for free, and a
+	new message type works with every source.
+</Aside>
+
+## Check your change
+
+The repo checks the app the way a user sees it, headless, through Rune's tooling:
+
+```sh
+cargo test
+scripts/snap-live.sh out/live "--cloud table" - settings top      # serve, then headless snapshots
+scripts/snap-live.sh out/live "--cloud table" "-:--script scripts/interact.json"
+scripts/audit-controls.sh      # every control must change the viewport (pixel diff vs baseline)
+scripts/bench.sh 3             # timing table → out/bench.tsv, raw logs in out/bench/
+```
+
+- **`cargo test`** covers the decoders, against bytes from the reference serializers
+  (`src/decode/testdata/`), and the robot's forward kinematics, against pinocchio 4.1.0 on the
+  same URDF (`src/robot/testdata/med7.urdf`) in two poses.
+- **`snap-live.sh OUT_DIR "SERVE ARGS" SCENE...`** starts `scripts/serve.py` with the given
+  arguments, then renders each scene headless once data has arrived. `-` is the default state;
+  Rune flags can follow a colon, as in `-:--script scripts/interact.json`, which drags, zooms and
+  taps a control. Settings go to a throwaway config directory. Set `URL` to read another server,
+  or `SETTINGS` to start from a whole `settings.json`, for example with a robot loaded:
+
+  ```sh
+  SETTINGS='{"robot_urdf": "'$PWD'/fixtures/med7/med7.urdf"}' \
+    scripts/snap-live.sh out/robot "--cloud table --robot-pose reach" - settings
+  ```
+
+- **Scenes** (`--scene`) are `top`, `height`, `intensity` and `settings`, plus the timing scenes
+  `no-points`, `half`, `quarter`, `size-1` and `size-4`. Scenes don't save settings.
+
+Most screenshots on this site come from `snap-live.sh`.

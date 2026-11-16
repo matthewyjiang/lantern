@@ -3,15 +3,15 @@ WebSocket protocol, plus the transforms that place it and a few fixed object pos
 
 Two paths, the two Lantern supports:
 
-  --via sdk  The Foxglove Python SDK serves foxglove.* protobuf on ws://127.0.0.1:8765, as kpd
-             will. Colour as separate red/green/blue bytes (Foxglove's convention).
+  --via sdk  The Foxglove Python SDK serves foxglove.* protobuf on ws://127.0.0.1:8765, as any
+             app without ROS can. Colour as separate red/green/blue bytes (Foxglove's convention).
   --via ros  rclpy publishes ROS 2 messages (PointCloud2, TFMessage on /tf_static, Odometry,
              PoseArray); run foxglove_bridge next to it and Lantern connects to the bridge.
              Colour as PCL's packed float `rgb`.
 
 --robot-pose home|reach adds the KUKA Med 7's joint states on /joint_states, fixed: as JSON under
-the sensor_msgs/msg/JointState schema name through the SDK (the shape kpd publishes; README,
-"Publishing from kpd"), or as the ROS message through the bridge. Load fixtures/med7/med7.urdf
+the sensor_msgs/msg/JointState schema name through the SDK (the shape the docs' "Publish to
+Lantern" guide describes), or as the ROS message through the bridge. Load fixtures/med7/med7.urdf
 (scripts/robot_fixture.py) in Lantern to see it.
 
 The cloud is the same recorded scan every message; nothing moves. Setup:
@@ -41,13 +41,13 @@ MOUNTS = {
     "rgbd": {"frame": "camera_optical", "normal": (0.065, -0.845, -0.531), "height": 0.798},
     "terrain": {"frame": "lidar", "normal": (0.0, 0.0, 1.0), "height": 0.0},
 }
-# Fixed test poses (world frame), named like kpd's tracked objects, on the table top: in the
+# Fixed test poses (world frame), named like tracked objects, on the table top: in the
 # table scan the dominant plane is the floor, and the table top sits 0.70 m above it with 90% of
 # its points in x -0.67..0.39, y 0.95..1.61 (the 5th-95th percentiles of points within 2 cm of
 # z = 0.70). The cup has a velocity so its arrow shows; nothing moves.
 OBJECTS = {"cup": ((0.05, 1.10, 0.75), 0.4, (0.1, 0.0, 0.0)), "box": ((-0.35, 1.35, 0.74), -0.9, None)}
 MARKERS = [((0.20, 1.45, 0.70), 0.0), ((-0.50, 1.00, 0.70), 1.2)]
-# Med 7 joint positions, degrees: kpd's HOME_Q, and a reach that turns every joint (the same two
+# Med 7 joint positions, degrees: a home pose, and a reach that turns every joint (the same two
 # poses src/robot/urdf.rs checks against pinocchio).
 ROBOT_POSES = {"home": [0, 30, 0, -60, 0, 90, 0], "reach": [50, 55, -20, -70, 30, 60, -40]}
 JOINTS = [f"lbr_joint_{k}" for k in range(7)]

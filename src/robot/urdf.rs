@@ -259,7 +259,7 @@ mod tests {
     }
 
     // Reference values from pinocchio 4.1.0 on the same URDF (buildModelFromXML, then
-    // updateFramePlacements; R row-major). Home is kpd's HOME_Q; reach turns every joint.
+    // updateFramePlacements; R row-major). Home is the arm's usual home pose; reach turns every joint.
     #[test]
     fn med7_forward_kinematics_matches_pinocchio() {
         let robot = Robot::parse(MED7).unwrap();

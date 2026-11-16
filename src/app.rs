@@ -224,7 +224,7 @@ impl State {
                             r.poses.insert((topic, label), p);
                             true
                         }
-                        // These arrive at the robot's control rate (kpd: 100 Hz).
+                        // These arrive at the robot's control rate (often 100 Hz or more).
                         Decoded::Joints(js) => {
                             if joint_topic.as_deref() == Some(topic.as_str()) {
                                 match &mut r.joints {

@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 34 34" width="34" height="34">
+  <!-- Lantern's in-app mark (src/ui.rs, lantern_mark): a warm light in a rounded frame. -->
+  <defs>
+    <radialGradient id="glow" cx="50%" cy="50%" r="50%">
+      <stop offset="0" stop-color="#fdbe45" stop-opacity="0.55"/>
+      <stop offset="1" stop-color="#fdbe45" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+  <rect x="0.5" y="0.5" width="33" height="33" rx="10" fill="#2c251c" stroke="#fdbe45" stroke-opacity="0.18"/>
+  <circle cx="17" cy="17" r="13" fill="url(#glow)"/>
+  <circle cx="17" cy="17" r="6" fill="#fdbe45"/>
+</svg>

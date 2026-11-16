@@ -1,0 +1,63 @@
+---
+title: Supported topics
+description: The message types Lantern decodes, over ROS 2 CDR and Foxglove protobuf, how it draws them, and the limits it enforces.
+---
+
+Lantern decodes a channel when it knows its (encoding, schema) pair. Everything else is listed in
+**Settings → Topics** as **No decoder** and never subscribed to.
+
+## Schemas
+
+| Kind | ROS 2 via foxglove_bridge (`cdr`) | Foxglove SDK (`protobuf`) |
+| --- | --- | --- |
+| Point cloud | `sensor_msgs/msg/PointCloud2` | `foxglove.PointCloud` |
+| Transforms | `tf2_msgs/msg/TFMessage`, `geometry_msgs/msg/TransformStamped` | `foxglove.FrameTransform`, `foxglove.FrameTransforms` |
+| Poses | `geometry_msgs/msg/PoseStamped`, `geometry_msgs/msg/PoseArray`, `nav_msgs/msg/Odometry` | `foxglove.PoseInFrame`, `foxglove.PosesInFrame`, `foxglove.Odometry` |
+| Joint states | `sensor_msgs/msg/JointState` | `sensor_msgs/msg/JointState` as `json` (Foxglove has no joint-state schema; see [Publish to Lantern](/lantern/guides/publishing/#joint-states)) |
+
+Lantern decodes by schema name, so it doesn't need the schema text the server sends. Foxglove's
+`json`-encoded versions of its own schemas aren't read; the SDKs' typed channels send protobuf.
+
+## How each kind is drawn
+
+**Point clouds.** One cloud topic is drawn at a time, chosen in Settings (the first advertised
+until you choose). Points with a non-finite coordinate are dropped. Colour comes from packed
+`rgb`/`rgba`, `red`/`green`/`blue` fields, `intensity`, or height; see
+[Display settings](/lantern/guides/settings/#display).
+
+**Transforms.** Every transform topic is read, including `/tf_static`, into one TF tree. Each
+frame is drawn as RGB axes (x red, y green, z blue) with an optional name label.
+
+**Poses.** Each pose is drawn as axes. Odometry adds its name (`child_frame_id` from ROS,
+`body_frame_id` from Foxglove) and its linear velocity as an arrow showing one second of motion.
+Each pose topic can be switched off in Settings. An Odometry topic keeps one pose per name, so a
+publisher can send one message per tracked object on a single topic.
+
+**Joint states.** Not drawn on their own; they pose the
+[robot model](/lantern/guides/robot-model/#joint-states). Lantern reads `name` and `position`.
+A message with no positions at all (a driver that reports only effort) is accepted and ignored;
+one with some but not all is an error.
+
+## What Lantern assumes
+
+- **Newest wins.** Lantern draws the newest message on each topic. Timestamps are ignored, and
+  there's no buffering or time sync.
+- **No expiry yet.** Poses stay until their topic is unadvertised or hidden, or the connection
+  changes. An object a publisher stops sending stays at its last pose.
+- **A slow UI drops clouds, not TF.** If the UI falls behind a fast publisher, it skips straight
+  to the newest cloud per topic. Transforms, poses and joints are applied in arrival order.
+
+## Limits
+
+Each limit is reported where you'd look when it's hit.
+
+| Limit | Value | Why | When hit |
+| --- | --- | --- | --- |
+| Points per cloud | 8,388,608 | The 128 MiB storage binding Rune's GPU device allows, at 16 bytes per point | The cloud isn't drawn; its topic shows the count and the cap |
+| Message size | 256 MiB | 5.6 M points at Ouster's 48-byte point step | The connection fails with tungstenite's `Message too long: N > 268435456` as its status |
+| Robot mesh vertices | 5,592,405 | The same 128 MiB binding, at 24 bytes per vertex | The robot doesn't load; the status names the link, the count and the cap |
+
+## Adding a message type
+
+One row in a table and one function; see
+[Architecture → Add a message type](/lantern/reference/architecture/#add-a-message-type).
