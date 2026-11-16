@@ -121,7 +121,7 @@ states on `/joint_states`: `home` is kpd's `HOME_Q`, and `reach` turns every joi
 - **Size:** up to 5,592,405 mesh vertices (1,864,135 triangles): a 128 MiB GPU buffer at 24
   bytes per vertex. A bigger model fails to load, naming the link, the count and the cap. It's
   checked before each mesh is processed. The Med 7 has 501,186.
-- **Load time:** the Med 7 (8 STL files, 167 k triangles) loads in 40–48 ms. Loading runs on the
+- **Load time:** the Med 7 (8 STL files, 167 k triangles) loads in about 40 ms. Loading runs on the
   UI thread when the path changes, so that one frame is late.
 
 Not supported yet: posing links from TF alone, the URDF sent over a topic

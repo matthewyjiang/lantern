@@ -48,7 +48,7 @@ tunnel), pass `--ros-args -p address:=127.0.0.1`; to move it, `-p port:=9090`.
 Lantern offers both the subprotocol of the newer SDK-based bridge (`foxglove.sdk.v1`) and the
 older one (`foxglove.websocket.v1`), so recent and older bridge releases both work.
 
-![The Settings page listing ROS 2 topics from foxglove_bridge: PointCloud2, TFMessage, PoseArray and Odometry, each with its schema and cdr encoding.](../../../screenshots/ros-bridge-settings.png)
+![The Settings page listing topics from foxglove_bridge: PointCloud2, TFMessage, PoseArray and Odometry in cdr, and the bridge's own topics marked No decoder.](../../../screenshots/ros-bridge-settings.png)
 
 See [Supported topics](/lantern/reference/topics/) for the message types Lantern reads.
 
@@ -122,7 +122,7 @@ uv pip install --python /tmp/fxenv/bin/python foxglove-sdk==0.31.0 numpy
 /tmp/fxenv/bin/python scripts/serve.py --cloud table
 ```
 
-Serves `foxglove.*` protobuf on `ws://127.0.0.1:8765` itself, the way kpd does.
+Serves `foxglove.*` protobuf on `ws://127.0.0.1:8765` itself, the way kpd will.
 
 </TabItem>
 <TabItem label="ROS 2 + foxglove_bridge">
@@ -141,10 +141,10 @@ Publishes ROS 2 messages with rclpy; Lantern connects to the bridge.
 
 | Option | Values |
 | --- | --- |
-| `--cloud` | `table` (460,400 points, intensity), `rgbd` (307,200, packed RGB), `terrain` (1,366,408, airborne LiDAR) |
+| `--cloud` | `table` (460,400 points, intensity), `rgbd` (307,200, RGB: separate `red`/`green`/`blue` fields through the SDK, packed `rgb` through ROS), `terrain` (1,366,408, airborne LiDAR) |
 | `--via` | `sdk` (default) or `ros` |
 | `--robot-pose` | `home` or `reach`: also publish the KUKA Med 7's joint states. See [Robot model](/lantern/guides/robot-model/#try-it-with-the-med-7). |
-| `--hz` | Publish rate, 10 by default |
+| `--hz` | Publish rate, 10 by default. With `--via sdk`, `0` publishes only when a client subscribes. |
 | `--topic`, `--port` | `/points` and 8765 by default (`--port` with `--via sdk` only) |
 
 The scans come from the [PCL data repository](https://github.com/PointCloudLibrary/data)

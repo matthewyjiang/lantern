@@ -57,8 +57,6 @@ Each limit is reported where you'd look when it's hit.
 | Message size | 256 MiB | 5.6 M points at Ouster's 48-byte point step | The connection fails with tungstenite's `Message too long: N > 268435456` as its status |
 | Robot mesh vertices | 5,592,405 | The same 128 MiB binding, at 24 bytes per vertex | The robot doesn't load; the status names the link, the count and the cap |
 
-![A status chip reading that the cloud has more points than the GPU can draw, over an empty viewport.](../../../../screenshots/over-gpu-cap.png)
-
 ## Adding a message type
 
 One row in a table and one function; see

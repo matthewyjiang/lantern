@@ -35,17 +35,15 @@ jobs:
       - run: npm ci
       # Also fails on a broken internal link (starlight-links-validator).
       - run: npm run build
-      - name: Setup Pages
-        if: github.event_name != 'pull_request'
-        uses: actions/configure-pages@v6
       - name: Upload artifact
-        if: github.event_name != 'pull_request'
+        if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
         uses: actions/upload-pages-artifact@v5
         with:
           path: docs/dist
 
   deploy:
-    if: github.event_name != 'pull_request'
+    # Only main deploys; a manual run on another branch just builds.
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
     needs: build
     runs-on: ubuntu-latest
     # Only deploys share the pages group, so a PR build never cancels a pending deploy.

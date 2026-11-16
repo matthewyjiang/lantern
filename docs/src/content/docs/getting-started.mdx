@@ -31,14 +31,14 @@ Then the Vulkan driver for your GPU, if you don't have one yet:
 Vulkan backend only, so a machine without a Vulkan driver opens no window.
 
 <Aside title="Why so few packages">
-	The binary links only against libc. It loads Vulkan, fontconfig, xkbcommon and the windowing
+	The binary links only against the base C runtime (libc, libm, libgcc_s). It loads Vulkan, fontconfig, xkbcommon and the windowing
 	libraries (`wayland`, or `libx11`, `libxcursor`, `libxi` and `libxkbcommon-x11` on X11) when it
 	starts, so they're needed at run time, not to build. Any Arch desktop already has the windowing
 	ones.
 </Aside>
 
-Lantern uses Rust edition 2024, so it needs Rust 1.85 or newer; `rustup default stable` gets
-that.
+Lantern needs Rust 1.88 or newer (it uses let chains, and wgpu needs 1.87); `rustup default
+stable` gets that.
 
 ## Build and run
 
@@ -47,7 +47,7 @@ that.
 1. Clone the repository.
 
    ```sh
-   git clone git@github.com:matthewyjiang/lantern.git
+   git clone https://github.com/matthewyjiang/lantern.git
    cd lantern
    ```
 
@@ -64,7 +64,7 @@ that.
 3. Optionally, put `lantern` on your `PATH` (`~/.cargo/bin`).
 
    ```sh
-   cargo install --path .
+   cargo install --locked --path .
    ```
 
 </Steps>
@@ -94,7 +94,7 @@ The side panel holds what you change while looking:
 - **Robot:** show/hide and opacity, once a robot model is loaded.
 - **Camera:** Reset view, and Top down.
 
-The gear button opens the [Settings page](/lantern/guides/settings/), for everything else:
+The settings button (the slider icon) opens the [Settings page](/lantern/guides/settings/), for everything else:
 the server URL, topics, the fixed frame and the robot's URDF.
 
 ## Next
