@@ -1,6 +1,6 @@
 ---
-// The landing page below Starlight's hero: the app itself, the two ways to feed it, what it
-// draws, and where to go next. Screenshots are the repo's headless snapshots (docs/screenshots).
+// The landing page below Starlight's hero: the app, the two ways to feed it, what it draws,
+// and where to go next. Screenshots are the repo's headless snapshots (docs/screenshots).
 import { Image } from 'astro:assets';
 import { Code } from '@astrojs/starlight/components';
 
@@ -68,53 +68,42 @@ const gallery = [
 			/>
 		</div>
 		<figcaption>
-			A KUKA LBR Med 7 at its home pose beside a SICK LMS400 table scan, both served by the
-			Foxglove Python SDK.
+			A KUKA LBR Med 7 beside a table scan, both published with the Foxglove Python SDK.
 		</figcaption>
 	</figure>
 
 	<section class="paths" aria-labelledby="paths-title">
 		<div class="section-head">
-			<h2 id="paths-title">Two ways in, one protocol</h2>
+			<h2 id="paths-title">Data sources</h2>
 			<p>
-				Lantern speaks the <a
+				Lantern reads the <a
 					href="https://github.com/foxglove/foxglove-sdk/blob/main/docs/spec/websocket/README.md"
 					>Foxglove WebSocket protocol</a
-				>. foxglove_bridge and the Foxglove SDKs both serve it on port 8765 by default, and
-				<code>ws://localhost:8765</code> is where Lantern connects first.
+				> and connects to <code>ws://localhost:8765</code> by default.
 			</p>
 		</div>
 		<div class="path-grid">
 			<div class="path">
 				<h3>ROS 2</h3>
-				<p>
-					Run <code>foxglove_bridge</code> next to your nodes. Lantern reads the ROS messages (CDR)
-					it forwards: <code>PointCloud2</code>, <code>/tf</code>, poses, odometry and joint states.
-				</p>
+				<p>Run <code>foxglove_bridge</code> next to your nodes.</p>
 				<Code code={rosSteps} lang="sh" />
 			</div>
 			<div class="path">
-				<h3>No ROS</h3>
-				<p>
-					Publish <code>foxglove.*</code> messages from Python, C++ or Rust with a Foxglove SDK.
-					The path for robot code that doesn't run ROS.
-				</p>
+				<h3>Your own code</h3>
+				<p>Publish <code>foxglove.*</code> messages with a Foxglove SDK for Python, C++ or Rust.</p>
 				<Code code={sdkSteps} lang="python" />
 			</div>
 		</div>
 		<p class="path-more">
-			<a href={href('connect/')}>Connect a source</a> walks through both, plus the replay server
-			for testing without a robot.
+			<a href={href('connect/')}>Connect a source</a> covers both, and a replay server for testing
+			without a robot.
 		</p>
 	</section>
 
 	<section class="gallery" aria-labelledby="gallery-title">
 		<div class="section-head">
 			<h2 id="gallery-title">What it draws</h2>
-			<p>
-				The newest message on each topic, in one fixed frame, at 60 fps. These are headless
-				snapshots of the real app.
-			</p>
+			<p>The newest message on each topic, in one fixed frame.</p>
 		</div>
 		<ul class="shots">
 			{
@@ -133,26 +122,11 @@ const gallery = [
 		</ul>
 	</section>
 
-	<section class="small" aria-labelledby="small-title">
-		<h2 id="small-title">Small on purpose</h2>
-		<div class="small-grid">
-			<p>
-				One Rust binary on <a href="https://github.com/anomalyco/rune">Rune</a> and wgpu. No ROS
-				packages, no Qt, no plugin system. A new message type is one row in a table and one function.
-			</p>
-			<p>
-				A 1.37 M-point cloud draws in 0.5 ms of GPU time and arrives at 10 Hz without dropping a
-				60 fps frame, measured headless on an RTX PRO 5000. <a href={href('reference/performance/')}
-					>How it was measured</a
-				>.
-			</p>
-		</div>
-		<nav class="next" aria-label="Start reading">
-			<a href={href('getting-started/')}><span>Build and run it</span> on Arch with cargo</a>
-			<a href={href('guides/publishing/')}><span>Publish to Lantern</span> from your own code</a>
-			<a href={href('reference/architecture/')}><span>Add a source</span> or a message type</a>
-		</nav>
-	</section>
+	<nav class="next" aria-label="Start reading">
+		<a href={href('getting-started/')}><span>Install and run</span> from a release or with cargo</a>
+		<a href={href('guides/publishing/')}><span>Publish from your code</span> with a Foxglove SDK</a>
+		<a href={href('reference/architecture/')}><span>Extend Lantern</span> with a message type, panel or source</a>
+	</nav>
 </div>
 
 <style>
@@ -333,23 +307,12 @@ const gallery = [
 		color: var(--sl-color-text-accent);
 	}
 
-	.small {
-		padding-top: var(--gap);
-		border-top: 1px solid var(--sl-color-hairline);
-	}
-
-	.small-grid {
-		display: grid;
-		grid-template-columns: repeat(auto-fit, minmax(min(100%, 22rem), 1fr));
-		gap: 1rem 2.5rem;
-		margin-top: 1.25rem;
-	}
-
 	.next {
 		display: flex;
 		flex-wrap: wrap;
 		gap: 0.75rem;
-		margin-top: 2.5rem;
+		padding-top: 2.5rem;
+		border-top: 1px solid var(--sl-color-hairline);
 	}
 
 	.next a {

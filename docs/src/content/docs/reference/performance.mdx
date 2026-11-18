@@ -1,10 +1,10 @@
 ---
 title: Performance
-description: What a frame costs, measured headless on an RTX PRO 5000 with a 1.37 M-point LiDAR scan, and what bounds the point draw.
+description: Frame costs measured headless on an RTX PRO 5000 with a 1.37 M-point LiDAR scan, and what limits the point draw.
 ---
 
 Lantern holds 60 fps with a 1.37 M-point cloud arriving 10 times a second. The 3D pass for that
-cloud takes about half a millisecond of GPU time.
+cloud takes about 0.5 ms of GPU time.
 
 ![1,366,408 points of airborne LiDAR coloured by height, with the side panel.](../../../../screenshots/terrain-1.37M.png)
 
@@ -12,10 +12,10 @@ cloud takes about half a millisecond of GPU time.
 
 - **GPU:** RTX PRO 5000 Blackwell, driver 595.99, headless.
 - **Viewport:** 1948×1560 px (`--scale 2`).
-- **Data:** the 1,366,408-point terrain scan, served live by `scripts/serve.py`. The cloud is sent
-  once, when Lantern subscribes, except in the ingest row.
+- **Data:** the 1,366,408-point terrain scan from the replay server, sent once when Lantern
+  subscribes (except in the 10 Hz rows).
 - **Method:** `scripts/bench.sh 3`: three trials per row, each 600 frames paced at 60 Hz
-  (`--realtime`). Spread across trials is ≤ 0.002 ms on GPU p50.
+  (`--realtime`). GPU p50 varies by at most 0.002 ms between trials.
 
 ## Results
 
@@ -33,51 +33,33 @@ cloud takes about half a millisecond of GPU time.
 | All points + robot (Med 7, 501,186 vertices) | 1,366,408 | 0.18 ms | 0.511–0.515 (0.535–0.538) ms |
 | Robot only, points off | 0 | 0.18 ms | 0.062 (0.065–0.066) ms |
 
-## Reading the numbers
+## Notes
 
-- **CPU** is Rune's own `frame cpu` line: update, view, layout, Lantern's encode, and submit. On
-  frames without a new cloud, the compositor's share is about 0.04 ms. A frame doesn't re-upload
-  the cloud; it records one draw call.
-- **GPU** comes from timestamp queries around the 3D pass only, on frames that drew the final
-  point count. The UI pass and any readback are outside them, which the readback row confirms:
-  GPU time is unchanged (0.492 vs 0.494 ms) while wall time per frame rises to a 59–75 ms p95
-  for PNG encoding.
-- **It's linear in points.** 0.033 ms with none, plus 0.338 ms per million points. That line
-  predicts the ½ and ¼ rows within 0.002 ms.
-- **60 fps held.** Every paced run delivered 600 frames in 9.98 s. The largest gap between frame
-  starts was 22.9 ms, and none passed 25 ms, which would mean a missed slot. That includes the
-  ingest row: 97 uploads of a 1.37 M-point cloud in a 10 s run. Unpaced, the loop reaches
-  1,200–1,560 frames/s; the spread is from run to run, with GPU time the same 0.48 ms. This is
-  headless; on-screen presentation isn't measured.
-- **Ingesting a cloud** costs its frame 5.5–6.0 ms to copy 21.9 MB into the GPU buffer, plus about
-  1 ms (0.9–1.0 ms mean) to rebuild the display, whose bounds come from a 16 Ki-point sample.
-  Decoding, including the colour range, happens on the WebSocket thread. Before the points buffer
-  was reused across clouds, each cloud created a new buffer, the upload averaged 10.6–11.0 ms, and
-  cloud frames reached a p95 of 17.2 ms, over the 16.7 ms budget.
-- **A camera image** (640×400 PNG plus annotations, at 10 Hz) adds 0.07–0.32 ms to the mean
-  frame: 1.63–1.70 ms against 1.38–1.56 ms for the cloud alone, run to run. The PNG is decoded on
-  the WebSocket thread; drawing the annotations into a copy and uploading it happen on the UI
-  thread, inside Rune's frame time. The 3D pass doesn't change, and no gap passed 25 ms.
-- **The robot** adds 0.029 ms on its own (0.062 vs 0.033 ms with points off) and 0.017–0.020 ms
-  on top of the full cloud. Each frame draws its 501,186 vertices twice (depth prepass, then
-  colour) and writes the parts' matrices (8 × 80 bytes). CPU per frame is unchanged. Loading the
-  URDF is a one-time cost: it runs synchronously (41 ms in these runs), so that first frame takes
-  66–67 ms instead of the usual 23 ms.
-- **Clocks:** unpaced, nvidia-smi read 1.61–1.62 GHz (P1, 81–88% busy); the maximum is
-  3.09 GHz. Paced, samples alternate between idle clocks (P8, ~340 MHz) and 1.63 GHz, and the paced
-  GPU time is within 2.5% of the unpaced one (0.494 vs 0.482 ms), so the draws run at about
-  1.6 GHz. These are not peak-clock numbers.
+- **CPU** is Rune's `frame cpu` line: update, view, layout, Lantern's encode and submit. A frame
+  without a new cloud doesn't re-upload it; it records one draw call.
+- **GPU** is measured with timestamp queries around the 3D pass only. The UI pass and readback are
+  outside them, which is why the readback row's GPU time doesn't change.
+- **GPU time is linear in points:** 0.033 ms plus 0.338 ms per million points. That predicts the ½
+  and ¼ rows to within 0.002 ms.
+- **No dropped frames.** Every paced run delivered 600 frames in 9.98 s, and no gap between frame
+  starts passed 25 ms (a missed slot), including the 10 Hz rows. On-screen presentation isn't
+  measured.
+- **A new cloud** costs its frame 5.5–6.0 ms to copy 21.9 MB to the GPU, plus about 1 ms to
+  rebuild the display. Decoding runs on the WebSocket thread.
+- **A camera image** (640×400 PNG with annotations at 10 Hz) adds 0.07–0.32 ms to the mean frame.
+  The PNG is decoded on the WebSocket thread; the annotations are drawn and uploaded on the UI
+  thread.
+- **The robot** adds 0.02–0.03 ms of GPU time per frame; CPU time is unchanged. Loading the URDF takes
+  about 40 ms on the UI thread, once.
+- **Clocks:** the GPU ran at about 1.6 GHz, not its 3.09 GHz maximum, so these aren't peak-clock
+  numbers.
 
-## What bounds the point draw
+## What limits the point draw
 
-Each point is six vertices (two triangles) pulled from a storage buffer in one draw call. At small
-point sizes the vertex front end dominates: going from 1 pt to 2 pt quadruples the pixels per
-point but adds only 0.10 ms, and 1 pt is still 0.36 ms over the empty scene. At 2 pt, 8.2 M vertex
-invocations take 0.46 ms, about 18 G/s or roughly 11 per clock at 1.6 GHz. At 4 pt, fill takes over: four times the pixels again
-costs 0.59 ms more.
-
-An earlier version drew each point as a 4-vertex instance, which took twice as long for the same
-image: the per-instance cost of the vertex front end was the limit then.
+Each point is two triangles (six vertices) pulled from a storage buffer in one draw call. At small
+point sizes the vertex front end is the limit: going from 1 pt to 2 pt quadruples the pixels per
+point but adds only 0.10 ms. At 2 pt, 8.2 M vertex invocations take 0.46 ms, about 18 G/s. At 4 pt,
+fill rate takes over: four times the pixels again adds 0.59 ms.
 
 ## Run it yourself
 
@@ -85,5 +67,5 @@ image: the per-instance cost of the vertex front end was the limit then.
 scripts/bench.sh 3      # timing table → out/bench.tsv, raw logs in out/bench/
 ```
 
-Headless runs take Rune's tooling flags, for example `--frames 240` to time 240 frames with no
+Headless runs accept Rune's tooling flags, for example `--frames 240` to time 240 frames with no
 readback. Each run ends with Rune's CPU timing and Lantern's GPU timestamps.

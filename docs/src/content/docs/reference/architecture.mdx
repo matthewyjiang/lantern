@@ -3,26 +3,19 @@ title: Architecture and extending
 description: How data flows through Lantern, which file owns what, and how to add a message type, a panel type or a new source.
 ---
 
-import { Aside, Steps } from '@astrojs/starlight/components';
+import { Steps } from '@astrojs/starlight/components';
 import Pipeline from '../../../components/Pipeline.astro';
 
-Lantern is small enough to read in an afternoon. Data moves one way, from the server to the
-screen, and each step has one owner.
+Data flows one way, from a server to the screen:
 
 <Pipeline />
 
-- **Source.** One client thread per server connects, subscribes to the topics the app wants,
-  decodes what arrives, and reconnects when the connection drops.
-- **Decoders.** A table maps each (encoding, schema) pair to a function that turns message bytes
-  into a scene type. Nothing past this point knows a message type.
-- **Inbox.** Events wait here for the UI thread. Point clouds coalesce to the newest per topic, so
-  a UI that falls behind a fast publisher drops stale clouds instead of queueing them. Everything
-  else queues in arrival order, because order matters for TF.
-- **App state.** Applies each connection's events, merges their TF trees, loads the robot, and
-  derives what to draw: the fixed frame, lines, labels, bounds, link poses and the image card.
-- **Viewport and UI.** The UI tiles the panels of the layout. A Rune compositor draws the 3D pass
-  offscreen into the 3D panel's slot, then the other panels, the side panel and the Settings page
-  draw around it.
+Each server gets its own thread, which connects, subscribes to the topics the app wants, decodes
+messages, and reconnects when the connection drops. Decoders turn message bytes into scene types,
+so nothing after them knows about message types. Decoded events wait in an inbox for the UI thread;
+point clouds and images keep only the newest per topic, and everything else stays in order, because
+order matters for TF. The UI thread applies the events, works out what to draw, and lays out the
+panels. The 3D view is rendered offscreen and composited into its panel.
 
 ## Files
 
@@ -47,14 +40,13 @@ screen, and each step has one owner.
 ## Add a message type
 
 A message that maps onto something Lantern already draws (a cloud, transforms, poses or joint
-positions) is one function and one table row. For example, `geometry_msgs/msg/PoseWithCovarianceStamped`,
+positions) needs one function and one table row. For example, `geometry_msgs/msg/PoseWithCovarianceStamped`,
 which AMCL publishes on `/amcl_pose`:
 
 <Steps>
 
-1. Write the decoder next to its siblings: `src/decode/ros.rs` for ROS 2 CDR,
-   `src/decode/foxglove.rs` for Foxglove protobuf. It takes the message bytes and returns a
-   `Decoded`.
+1. Write the decoder in `src/decode/ros.rs` (ROS 2 CDR) or `src/decode/foxglove.rs` (Foxglove
+   protobuf). It takes the message bytes and returns a `Decoded`.
 
    ```rust title="src/decode/ros.rs"
    /// `geometry_msgs/PoseWithCovarianceStamped`: the pose; the covariance after it is ignored.
@@ -65,8 +57,9 @@ which AMCL publishes on `/amcl_pose`:
    }
    ```
 
-2. Add its row to `DECODERS` in `src/decode/mod.rs`. The `kind` decides how the Settings page
-   offers the topic.
+2. Add a row to `DECODERS` in `src/decode/mod.rs`. The `Kind` decides how Settings offers the
+   topic. The third field restricts the row to topics with that name (alone or after a `/`, like
+   the `robot_description` rows); `None` matches any topic.
 
    ```rust title="src/decode/mod.rs" ins={3}
    const DECODERS: &[Decoder] = &[
@@ -75,32 +68,29 @@ which AMCL publishes on `/amcl_pose`:
    ];
    ```
 
-   The third field limits a row to topics of that name, alone or after a `/` (as the
-   `robot_description` rows do); `None` matches any topic.
-
 3. Test it against bytes from the reference serializer. `scripts/capture_test_bytes.py` writes
-   rclpy's CDR and the Foxglove Python SDK's protobuf into `src/decode/testdata/`; add your
-   message there, and assert on the decoded values in the tests in `src/decode/mod.rs`.
+   rclpy's CDR and the Foxglove Python SDK's protobuf into `src/decode/testdata/`. Add your message
+   there and assert on the decoded values in the tests in `src/decode/mod.rs`.
 
 </Steps>
 
-The topic now shows in Settings with a **Poses** badge instead of **No decoder**, and the
-source subscribes to it like any other pose topic.
+The topic now shows in Settings with a **Poses** badge, and sources subscribe to it like any other
+pose topic.
 
-A message that needs a new kind of drawing (a marker array, say) needs more: a `Decoded`
-variant and `Kind`, a scene type in `src/scene.rs`, state in `src/connection.rs` and
-`src/app.rs`, and drawing in the viewport or the UI.
+A message that needs a new kind of drawing, such as a marker array, needs more: a `Decoded` variant
+and `Kind`, a scene type in `src/scene.rs`, state in `src/connection.rs` and `src/app.rs`, and
+drawing code in the viewport or the UI.
 
 ## Add a panel type
 
-A panel is a variant of `PanelKind` and a function that draws it from app state. For example, a
-panel that lists the joint positions:
+A panel is a `PanelKind` variant and a function that draws it from app state. For example, a panel
+that lists joint positions:
 
 <Steps>
 
-1. Add the variant in `src/layout.rs`, with its name in a layout file (`id`), its label, and
-   its entry in `ALL`. The compiler asks for the first two; `ALL` is the one to remember, and
-   it's what puts the panel in the layout controls and the file format.
+1. Add the variant in `src/layout.rs`, with its file name (`id`), its `label`, and an entry in
+   `ALL`. The compiler catches a missing `id` or `label`, but not a missing `ALL` entry, which is
+   what puts the panel in the layout controls and the file format.
 
    ```rust title="src/layout.rs" ins={4}
    pub enum PanelKind {
@@ -110,8 +100,8 @@ panel that lists the joint positions:
    }
    ```
 
-2. Draw it in `src/panels.rs`, and add its arm to `body`. A body fills its card; `key` is the
-   panel's own, to prefix the keys of what's inside, because a layout can hold the panel twice.
+2. Draw it in `src/panels.rs` and add its arm to `body`. `key` is unique to the panel; prefix the
+   keys of its children with it, because a layout can hold the same panel type twice.
 
    ```rust title="src/panels.rs"
    fn joints(s: &State, key: &str) -> El {
@@ -123,18 +113,17 @@ panel that lists the joint positions:
    }
    ```
 
-3. If the panel needs data that nothing else asks for, add its topics in `State::wanted`
-   (`src/app.rs`): sources only deliver what's wanted.
+3. If the panel needs topics nothing else subscribes to, add them in `State::wanted`
+   (`src/app.rs`). Sources only deliver what's wanted.
 
 </Steps>
 
-The panel now shows in every panel's layout controls, and `{"panel": "joints"}` works in a layout
-file.
+The panel now appears in the layout controls, and `{"panel": "joints"}` works in a layout file.
 
 ## Add a source
 
-Every source today is a Foxglove WebSocket server. Another transport, such as an MCAP file or a
-different protocol, is another implementation of `Source`:
+Every source today is a Foxglove WebSocket server. Another transport, such as an MCAP file, would
+be another implementation of `Source`:
 
 ```rust title="src/source.rs"
 pub trait Source: Send {
@@ -153,20 +142,19 @@ pub struct Wanted {
 pub type Sink = Arc<dyn Fn(Event) + Send + Sync>;
 ```
 
-The contract, as `FoxgloveWs` keeps it:
+A source must:
 
-- **Own your thread.** `want` must return at once; do the I/O and decoding on a thread you
-  spawn. Dropping the source stops it.
-- **Report status.** Send `Event::Status` as you go: `Connecting`, `Connected { server }` with a
-  name for the side panel, or `Failed { error }`, which the status chip shows. Retry on your own
-  if that makes sense for the transport.
-- **Advertise channels.** Send `Event::Channels` with every topic you can offer, each with its
-  `kind` from `decode::decoder_for(encoding, schema, topic)`. Each list replaces the last one.
-- **Deliver only what's wanted.** Send `Event::Data` for topics in the latest `Wanted`, decoded
-  through the same `decode::decoder_for` table. A message that doesn't decode is
-  `Event::DecodeFailed`; the topic keeps its last good data.
+- **Run on its own thread.** `want` returns immediately; I/O and decoding happen on a thread the
+  source spawns. Dropping the source stops it.
+- **Report status.** Send `Event::Status` with `Connecting`, `Connected { server }` (the name shown
+  in the side panel), or `Failed { error }` (shown in the status chip). Retry if that makes sense
+  for the transport.
+- **Advertise channels.** Send `Event::Channels` with every topic it offers, each with its `kind`
+  from `decode::decoder_for(encoding, schema, topic)`. Each list replaces the previous one.
+- **Deliver only what's wanted.** Send `Event::Data` for topics in the latest `Wanted`, decoded with
+  the same `decode::decoder_for` table. A message that fails to decode is `Event::DecodeFailed`.
 
-Then pick it in `open`, which dispatches on the URL the user typed:
+Then pick it in `open`, which dispatches on the URL. `McapFile` here is hypothetical:
 
 ```rust title="src/source.rs" ins={2-4}
 pub fn open(url: &str, sink: Sink) -> Box<dyn Source> {
@@ -177,31 +165,29 @@ pub fn open(url: &str, sink: Sink) -> Box<dyn Source> {
 }
 ```
 
-<Aside>
-	Because sources decode with the same table, a new source gets every message type for free, and a
-	new message type works with every source.
-</Aside>
+## Test a change
 
-## Check your change
+`cargo test` checks the decoders against bytes from the reference serializers
+(`src/decode/testdata/`), and the robot's forward kinematics against pinocchio 4.1.0 on the same
+URDF (`src/robot/testdata/med7.urdf`) in two poses.
 
-The repo checks the app the way a user sees it, headless, through Rune's tooling:
+The scripts render the app headless with Rune's tooling. They run `target/release/lantern`, so build
+it first:
 
 ```sh
-cargo test
+cargo build --release
 scripts/snap-live.sh out/live "--cloud table" - settings top      # serve, then headless snapshots
 scripts/snap-live.sh out/live "--cloud table" "-:--script scripts/interact.json"
 scripts/audit-controls.sh      # every control must change the viewport (pixel diff vs baseline)
 scripts/bench.sh 3             # timing table → out/bench.tsv, raw logs in out/bench/
 ```
 
-- **`cargo test`** covers the decoders, against bytes from the reference serializers
-  (`src/decode/testdata/`), and the robot's forward kinematics, against pinocchio 4.1.0 on the
-  same URDF (`src/robot/testdata/med7.urdf`) in two poses.
-- **`snap-live.sh OUT_DIR "SERVE ARGS" SCENE...`** starts `scripts/serve.py` with the given
-  arguments, then renders each scene headless once data has arrived. `-` is the default state;
-  Rune flags can follow a colon, as in `-:--script scripts/interact.json`, which drags, zooms and
-  taps a control. Settings go to a throwaway config directory. Set `URL` to read another server,
-  or `SETTINGS` to start from a whole `settings.json`, for example with a robot loaded:
+- **`snap-live.sh OUT_DIR "SERVE ARGS" SCENE...`** starts the
+  [replay server](/lantern/reference/replay-server/) with those arguments and renders
+  each scene once data has arrived. `-` is the default state. Rune flags can follow a colon, as in
+  `-:--script scripts/interact.json`, which drags, zooms and taps a control. Settings go to a
+  throwaway config directory. Set `URL` to read another server, or `SETTINGS` to start from a
+  whole `settings.json`:
 
   ```sh
   SETTINGS='{"robot_urdf": "'$PWD'/fixtures/med7/med7.urdf"}' \
@@ -211,5 +197,3 @@ scripts/bench.sh 3             # timing table → out/bench.tsv, raw logs in out
 - **Scenes** (`--scene`) are `top`, `height`, `intensity`, `settings` and `edit-layout`, plus the
   timing scenes `no-points`, `half`, `quarter`, `size-1` and `size-4`. Scenes don't save settings.
   Lantern's own flags work headless too: `"-:--layout dashboard"` snaps the dashboard preset.
-
-Most screenshots on this site come from `snap-live.sh`.
