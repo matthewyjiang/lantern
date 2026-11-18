@@ -1,6 +1,6 @@
 ---
 title: Getting started
-description: Build Lantern on Arch Linux with cargo, run it, and find your way around the window.
+description: Install a Lantern release or build it with cargo on Arch Linux, run it, and find your way around the window.
 ---
 
 import { Aside, Steps } from '@astrojs/starlight/components';
@@ -9,9 +9,34 @@ Lantern is one Rust binary. Building it needs Rust and a C compiler; running it 
 Vulkan driver and a Linux desktop (Wayland or X11). It needs no ROS installation, even when the
 data comes from ROS.
 
+## Install a release
+
+On Linux, x86_64 or aarch64, the install script downloads the latest release's binary, checks its
+SHA-256 and puts `lantern` in `~/.local/bin`:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/matthewyjiang/lantern/main/scripts/install.sh | sh
+```
+
+Set `LANTERN_VERSION` to install a given release, and `LANTERN_INSTALL_DIR` to install somewhere
+else:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/matthewyjiang/lantern/main/scripts/install.sh \
+    | LANTERN_VERSION=v0.1.0 LANTERN_INSTALL_DIR="$HOME/bin" sh
+```
+
+The binary needs glibc 2.35 or newer (Ubuntu 22.04, Debian 12) and the run-time libraries in the
+note below: Vulkan, fontconfig, xkbcommon and your desktop's windowing libraries. `lantern
+--version` prints the version. The archives are also on the
+[releases page](https://github.com/matthewyjiang/lantern/releases).
+
+With `lantern` installed, skip to [the window](#the-window). Where these docs write
+`cargo run --release --`, run `lantern` instead.
+
 ## Install the packages
 
-On a plain Arch install:
+To build from source instead, on a plain Arch install:
 
 ```sh
 sudo pacman -S --needed base-devel git rustup \

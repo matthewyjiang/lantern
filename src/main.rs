@@ -89,6 +89,10 @@ fn parse_args() -> (Overrides, Vec<String>) {
             std::process::exit(2);
         });
         match a.as_str() {
+            "--version" => {
+                println!("lantern {}", env!("CARGO_PKG_VERSION"));
+                std::process::exit(0);
+            }
             "--connect" => {
                 let (url, list) = (value(), overrides.connections.get_or_insert_with(Vec::new));
                 if !list.contains(&url) {

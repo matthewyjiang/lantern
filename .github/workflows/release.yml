@@ -1,0 +1,89 @@
+# Builds release binaries and publishes a GitHub release when a version tag (v1.2.3) is pushed.
+# Tags are pushed by hand; nothing here bumps a version or creates a tag. The release gets one
+# archive per target with its SHA-256, which scripts/install.sh downloads, and notes generated
+# from the commits since the previous tag (scripts/release-notes.sh).
+#
+# Run it by hand (Actions → Release → Run workflow) for a dry run: it builds the archives and
+# keeps them as workflow artifacts, and publishes nothing, whatever ref it's run from.
+name: Release
+
+on:
+  push:
+    tags: ["v[0-9]+.[0-9]+.[0-9]+"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: Build ${{ matrix.target }}
+    strategy:
+      matrix:
+        include:
+          # Ubuntu 22.04, the oldest runner: the binary then needs glibc 2.35, not 24.04's 2.39,
+          # so it also runs on 22.04 and Debian 12.
+          - target: x86_64-unknown-linux-gnu
+            runner: ubuntu-22.04
+          - target: aarch64-unknown-linux-gnu
+            runner: ubuntu-22.04-arm
+    runs-on: ${{ matrix.runner }}
+    # A cold build took 6m20s on x86_64 and 5m15s on aarch64; five times that means it's stuck.
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      # The only push this workflow hears is a version tag's.
+      - name: Check the tag is the version in Cargo.toml
+        if: github.event_name == 'push'
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n 1)
+          if [[ "v$version" != "$GITHUB_REF_NAME" ]]; then
+            echo "::error::tag $GITHUB_REF_NAME, but Cargo.toml says version $version (expected tag v$version)"
+            exit 1
+          fi
+      # The xkbcommon crate links libxkbcommon at build time (everything else is loaded at run time).
+      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libxkbcommon-dev
+      # The toolchain CI tests with.
+      - uses: dtolnay/rust-toolchain@1.96.0
+      - run: cargo build --release --locked
+      - name: Package
+        run: |
+          mkdir dist
+          strip target/release/lantern
+          # The binary runs on this runner, and reports the version it was built from.
+          target/release/lantern --version
+          # Owned by root in the archive: tar run as root (a sudo install) restores the owner,
+          # and the runner's uid may be some other account's on that machine.
+          tar -czf "dist/lantern-${{ matrix.target }}.tar.gz" --owner=0 --group=0 --numeric-owner -C target/release lantern
+          cd dist && sha256sum "lantern-${{ matrix.target }}.tar.gz" > "lantern-${{ matrix.target }}.tar.gz.sha256"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: lantern-${{ matrix.target }}
+          path: dist
+          if-no-files-found: error
+
+  release:
+    name: Publish the release
+    if: github.event_name == 'push'
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      # The whole history and every tag, for the notes.
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - run: scripts/release-notes.sh "$GITHUB_REF_NAME" > notes.md
+      # Fails if the tag already has a release: a published release's binaries are never replaced.
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" dist/* --title "Lantern $GITHUB_REF_NAME" --notes-file notes.md --verify-tag
