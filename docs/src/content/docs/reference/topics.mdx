@@ -29,8 +29,9 @@ protobuf.
 
 ![The table scan with a camera image card and its annotations at the bottom right, a text card and a stats card at the top right, and a tracked pose's trail on the table.](../../../../screenshots/camera-text-stats-trail.png)
 
-**Point clouds.** One cloud topic at a time, picked in Settings. Points with a non-finite
-coordinate are dropped. See [Display](/lantern/guides/settings/#display) for colouring.
+**Point clouds.** One cloud topic at a time, picked in the
+[3D view's settings](/lantern/guides/settings/#3d-view), which also set the colouring. Points with a
+non-finite coordinate are dropped.
 
 **Transforms.** Every transform topic, including `/tf_static`, goes into one TF tree. Each frame is
 drawn as axes (x red, y green, z blue) with an optional label.
@@ -38,7 +39,7 @@ drawn as axes (x red, y green, z blue) with an optional label.
 **Poses.** Drawn as axes. Odometry also gets a label (`child_frame_id` from ROS, `body_frame_id`
 from Foxglove) and an arrow showing one second of its linear velocity. An Odometry topic keeps one
 pose per label, so one topic can carry many tracked objects. Poses expire and leave trails as set
-in [Settings → Poses](/lantern/guides/settings/#poses).
+in the [3D view's settings](/lantern/guides/settings/#3d-view).
 
 **Joint states.** They pose the [robot model](/lantern/guides/robot-model/#joint-states) and aren't
 drawn on their own. A message with no positions at all (a driver that reports only effort) is
@@ -49,24 +50,28 @@ without a position are skipped.
 [robot model](/lantern/guides/robot-model/#from-the-server). Any other `std_msgs/msg/String` topic
 is text.
 
-**Camera images.** One image topic at a time, in a card at the bottom right of the 3D view (at most
-480 px wide) or in an [Image panel](/lantern/guides/layout/). Compressed images can be JPEG, PNG or
-WebP. Raw images can be `rgb8`, `bgr8`, `rgba8`, `bgra8`, `mono8` or `mono16`.
+**Camera images.** One image topic per view: each [Image panel](/lantern/guides/layout/) shows its
+own, or without one, a card at the bottom right of the 3D view (at most 480 px wide) shows one.
+Compressed images can be JPEG, PNG or WebP. Raw images can be `rgb8`, `bgr8`, `rgba8`, `bgra8`, `mono8` or `mono16`.
 
-**Image annotations.** Circles, points, line strips, line loops, line lists and text, drawn over the
-shown image. Circles and loops with a fill colour are filled. A points annotation of an unknown type
+**Image annotations.** Circles, points, line strips, line loops, line lists and text, drawn over
+each shown image, except topics switched off in that view's
+[settings](/lantern/guides/settings/#image). Circles and loops with a fill colour are filled. A points annotation of an unknown type
 is skipped.
 
-**Text.** Each text topic gets a card at the top right of the 3D view with the message's first 10
-lines, or goes in a [Data panel](/lantern/guides/layout/).
+**Text.** Each text topic that's switched on gets a card at the top right of the 3D view with the
+message's first 10 lines, or goes in a [Data panel](/lantern/guides/layout/).
 
-**Stats.** Every status of every `DiagnosticArray` topic, coloured by level, with its key-value
-pairs, in one card or a Data panel.
+**Stats.** Every status of each `DiagnosticArray` topic that's switched on, coloured by level, with
+its key-value pairs, in one card or a Data panel.
 
 ## Assumptions
 
 - **Newest wins.** Lantern draws the newest message on each topic. It ignores timestamps and does
   no buffering or time sync.
+- **Only what's shown is subscribed.** Lantern subscribes to the topics some panel or card shows:
+  hidden points aren't fetched. Transforms are always read, and `robot_description` whenever the
+  layout has a 3D view.
 - **Servers merge by topic.** Topics with the same name on different servers feed one display, and
   transforms from every server join one TF tree.
 - **A slow UI drops clouds and images, not TF.** If the UI falls behind, it skips to the newest
@@ -81,7 +86,7 @@ pairs, in one card or a Data panel.
 | Robot mesh vertices | 5,592,405 (128 MiB at 24 bytes per vertex) | The robot doesn't load; the status names the link, the count and the limit |
 | Image side | 8,192 px | The image isn't shown; the status chip and its topic say why |
 | Text cards and statuses in the 3D view | 3 cards, 6 statuses | An `and N more` line counts the rest |
-| Pose trail | 60 s | A longer `trail` in settings.json is clamped, with a note on stderr |
+| Pose trail | 60 s | A longer `poses.trail` in a layout is clamped, with a note on stderr |
 
 128 MiB is the largest storage buffer Rune's GPU device allows. The image size is checked before
 decoding, so a bad header can't allocate gigabytes.

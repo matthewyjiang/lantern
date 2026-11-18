@@ -62,8 +62,8 @@ pub struct Received {
     pub poses: BTreeMap<(String, String), (f64, Poses)>,
     /// Where each single-pose (topic, label) has been, newest last.
     pub trails: BTreeMap<(String, String), Trail>,
-    /// The shown image topic's newest image.
-    pub image: Option<(String, Arc<Image>)>,
+    /// The newest image of each image topic some view shows.
+    pub images: BTreeMap<String, Arc<Image>>,
     pub annotations: BTreeMap<String, Vec<Annotation>>,
     pub texts: BTreeMap<String, String>,
     pub stats: BTreeMap<String, Vec<Diagnostic>>,
@@ -82,11 +82,13 @@ pub struct Trail {
     pub points: VecDeque<(f64, DVec3)>,
 }
 
-/// The topics the user picked (or Auto chose) for the kinds where only one is kept.
+/// The topics the user picked (or Auto chose) for the kinds where only the shown ones are kept:
+/// the one cloud and joint-state topic the 3D view draws, every image topic a view shows.
+#[derive(Default)]
 pub struct Picked {
     pub cloud: Option<String>,
     pub joints: Option<String>,
-    pub image: Option<String>,
+    pub images: HashSet<String>,
 }
 
 /// What an event changed, beyond `Received` itself.
@@ -96,7 +98,7 @@ pub struct Changed {
     pub display: bool,
     /// Joint positions changed: only the robot re-poses.
     pub robot: bool,
-    /// The shown image or its annotations changed.
+    /// A shown image or annotations changed.
     pub image: bool,
 }
 
@@ -121,9 +123,7 @@ impl Received {
                 self.texts.retain(|topic, _| !gone(topic));
                 self.stats.retain(|topic, _| !gone(topic));
                 self.descriptions.retain(|topic, _| !gone(topic));
-                if self.image.as_ref().is_some_and(|(t, _)| gone(t)) {
-                    self.image = None;
-                }
+                self.images.retain(|topic, _| !gone(topic));
                 changed.image = true;
                 true
             }
@@ -186,8 +186,8 @@ impl Received {
                         cleared || new_name
                     }
                     Decoded::Image(i) => {
-                        if picked.image.as_deref() == Some(topic.as_str()) {
-                            self.image = Some((topic, Arc::new(i)));
+                        if picked.images.contains(&topic) {
+                            self.images.insert(topic, Arc::new(i));
                             changed.image = true;
                         }
                         cleared
@@ -268,7 +268,7 @@ mod tests {
     // the two poses don't stay drawn next to the one.
     #[test]
     fn an_unlabelled_array_replaces_itself_whatever_its_length() {
-        let picked = Picked { cloud: None, joints: None, image: None };
+        let picked = Picked::default();
         let mut r = Received::default();
         let drawn = |r: &Received| r.poses.values().map(|(_, p)| p.items.len()).collect::<Vec<_>>();
         r.apply(poses_at(&[0.0, 1.0]), 0.0, &picked, false);
@@ -283,7 +283,7 @@ mod tests {
     // topic goes quiet, the pose and its trail go at 2 + 2.
     #[test]
     fn poses_expire_and_trails_keep_only_their_window() {
-        let picked = Picked { cloud: None, joints: None, image: None };
+        let picked = Picked::default();
         let mut r = Received::default();
         for t in [0.0, 1.0, 2.0] {
             r.apply(pose_at(t), t, &picked, true);

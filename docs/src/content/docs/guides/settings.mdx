@@ -1,15 +1,16 @@
 ---
 title: Settings
-description: The Settings page, the settings.json file it saves, and the command-line flags.
+description: The Settings page, each panel's own settings, the settings.json file they're saved in, and the command-line flags.
 ---
 
-The slider button at the top of the side panel opens the Settings page. Changes apply as you make
-them and are saved right away. **Done** closes the page.
+Settings are in two places. The slider button at the top of the side panel opens the **Settings**
+page, which has what's app-wide: **Connections**, **Topics** and **Layout**. What a panel shows is
+set on the panel itself, in its [panel settings](#panel-settings). Changes apply as you make them
+and are saved right away. **Done** closes the page.
 
-![The Settings page next to the viewport: the connection, four topics with their kinds and schemas, and the fixed frame set to Auto (world).](../../../../screenshots/sdk-table-settings.png)
+![The Settings page next to the viewport: the connection, the read-only topic list with each topic's kind, schema and encoding, and the Layout section.](../../../../screenshots/sdk-table-settings.png)
 
-The **Robot** section is covered in [Robot model](/lantern/guides/robot-model/) and the **Layout**
-section in [Panels and layouts](/lantern/guides/layout/).
+The **Layout** section is covered in [Panels and layouts](/lantern/guides/layout/).
 
 ## Connections
 
@@ -20,46 +21,59 @@ and press **Add** to add one.
 ## Topics
 
 Every topic the servers advertise, with its schema, encoding, and a badge for what Lantern draws
-from it. With several servers, topics are grouped by server.
+from it. With several servers, topics are grouped by server. The list is read-only: which topics
+are drawn is set in each panel's settings. The [Topics panel](/lantern/guides/layout/#panels)
+shows the same list.
 
-| Badge | Control | Behaviour |
-| --- | --- | --- |
-| **Point cloud**, **Image**, **Joints**, **Robot** | Radio | One topic of each kind is used. Until you pick one, it's the first advertised. |
-| **Poses**, **Annotations**, **Text**, **Stats** | Switch | Each topic on or off. New topics start on. |
-| **Transforms** | Always on | Every transform topic is read so the TF tree is complete. |
-| **No decoder** | | Lantern doesn't read this schema. See [Supported topics](/lantern/reference/topics/). |
+| Badge | Used by |
+| --- | --- |
+| **Point cloud** | The 3D view, one topic |
+| **Transforms** | Always read, every topic, so the TF tree is complete |
+| **Poses** | The 3D view, each topic on or off |
+| **Joints**, **Robot** | The 3D view's robot, one topic each |
+| **Image** | Each Image panel, and the 3D view's image card, one topic each |
+| **Annotations** | Drawn over an image, each topic on or off per image |
+| **Text**, **Stats** | Each Data panel, and the 3D view's cards, each topic on or off |
+| **No decoder** | Nothing. See [Supported topics](/lantern/reference/topics/). |
+
+Where a panel shows one topic, **Auto** (the default) uses the first one advertised. New topics
+start switched on. Lantern subscribes only to topics some panel shows.
 
 If a message fails to decode, the error shows in red under its topic and the topic keeps its last
 good message.
 
-## Frames
+## Panel settings
+
+Each 3D, Image and Data panel has a slider button at its top right; on the 3D view it's next to
+the Drag, Shift-drag and Scroll hints. It opens that panel's settings over the window. A press
+outside, Escape or **Done** closes them. The Topics panel has no settings.
+
+### 3D view
+
+The side panel has the 3D view's quick controls. Its settings have everything:
+
+| Section | Settings |
+| --- | --- |
+| **Scene** | Fixed frame, grid, TF frames, frame and pose labels, axis length |
+| **Point cloud** | Show, topic, colour, point size, density |
+| **Poses** | Show, a switch per pose topic, expire after, trail |
+| **Robot** | URDF file, robot description topic, joint states topic, show, opacity. See [Robot model](/lantern/guides/robot-model/). |
+| **Cards** | The camera image card with its topic and annotations, and the text and stats cards with a switch per topic |
 
 **Fixed frame** is the frame everything is drawn in. **Auto** shows what it picked, for example
 `Auto (world)`: the root of the TF tree that holds the point cloud's frame, or a pose topic's frame
 when there's no cloud. With only a robot, see [Placement](/lantern/guides/robot-model/#placement).
-
-A frame you pick stays selected even when the current data doesn't have it; it's listed as
-`not seen yet`.
-
-**Frame labels** draws each TF frame's name next to its axes. **Axis length** sets the size of TF
-and pose axes, from 5 cm to 1 m (default 10 cm).
-
-## Poses
-
-**Expire after** removes a pose its topic hasn't sent again within that time: **Never**, 0.5 s,
-2 s (default) or 10 s. **Trail** draws where each pose has been over the last 5, 15 or 60 s, or
-**Off** (default).
-
-![The table from above, 4 s after connecting, twice: with Expire after on Never (left), a pose sent only once (/once) is still drawn; on 2 s (right) it has expired, while the poses still being sent remain.](../../../../screenshots/pose-expiry.png)
-
-## Display
+A frame or topic you pick stays selected even when the data doesn't have it; it's listed as
+`not seen yet` or `not advertised`.
 
 | Setting | Values |
 | --- | --- |
-| **Point color** | **Auto**, **Height**, or any numeric field of the cloud (`intensity`, `ring`, ...) |
-| **Point size (pt)** | 1, 2, 3 or 4 |
+| **Axis length** | Size of TF and pose axes: 5 cm, 10 cm (default), 25 cm, 50 cm or 1 m |
+| **Color** | **Auto**, **Height**, or any numeric field of the cloud (`intensity`, `ring`, ...) |
+| **Point size (pt)** | 1, 2 (default), 3 or 4 |
 | **Density** | All, ½, ¼ or ⅛ of the points |
-| **Grid**, **Camera image**, **Text**, **Stats** | On or off |
+| **Expire after** | **Never**, 0.5 s, 2 s (default) or 10 s |
+| **Trail** | **Off** (default), 5 s, 15 s or 60 s |
 
 **Auto** colour uses the first of these that the cloud has: packed `rgb`/`rgba`, separate
 `red`/`green`/`blue` fields, `intensity`, then height. Numeric fields are mapped through the Turbo
@@ -68,66 +82,128 @@ at the bottom left of the viewport shows the field and its range.
 
 Hiding the point cloud also unsubscribes from it, which saves bandwidth with large clouds.
 
+**Expire after** removes a pose its topic hasn't sent again within that time. **Trail** draws where
+each pose has been over that time.
+
+![The table from above, 4 s after connecting, twice: with Expire after on Never (left), a pose sent only once (/once) is still drawn; on 2 s (right) it has expired, while the poses still being sent remain.](../../../../screenshots/pose-expiry.png)
+
+**Cards.** Without an Image panel in the layout, the 3D view draws the camera image as a card in its
+lower right corner, set like an Image panel. Without a Data panel, it draws text and stats cards at
+its top right, set like a Data panel. When the layout has the panel, **Cards** says so instead.
+
+### Image
+
+**Image topic** is **Auto** or a topic. **Annotations** has a switch per annotation topic drawn over
+the image. Each Image panel has its own, so two panels can show two cameras, or the same camera
+with different annotations.
+
+### Data
+
+**Text** and **Stats** turn each on or off. While one is on, it has a switch per topic.
+
 ## settings.json
 
 Settings are stored in `$XDG_CONFIG_HOME/lantern/settings.json` (by default
-`~/.config/lantern/settings.json`). You can edit it while Lantern is closed. This is the default
-file:
+`~/.config/lantern/settings.json`). You can edit it while Lantern is closed. It holds the servers
+and the layout. This is the default file:
 
 ```json title="~/.config/lantern/settings.json"
 {
   "connections": ["ws://localhost:8765"],
-  "cloud_topic": null,
-  "hidden_topics": [],
-  "fixed_frame": null,
-  "color": "Auto",
-  "point_size": 2.0,
-  "decimate": 1,
-  "axis_length": 0.1,
-  "pose_timeout": 2.0,
-  "trail": 0.0,
-  "show_grid": true,
-  "show_points": true,
-  "show_frames": true,
-  "show_labels": true,
-  "show_poses": true,
-  "robot_urdf": "",
-  "joint_topic": null,
-  "show_robot": true,
-  "robot_opacity": 1.0,
-  "description_topic": null,
-  "image_topic": null,
-  "show_image": true,
-  "show_text": true,
-  "show_stats": true,
   "layout": { "panel": "3d" }
 }
 ```
 
-- `null` means Auto for `cloud_topic`, `fixed_frame`, `joint_topic`, `description_topic` and
-  `image_topic`.
-- `pose_timeout` and `trail` are in seconds. `0` means never expire, and no trail. `trail` is
-  capped at 60.
-- `color` is `"Auto"`, `"Height"`, or `{"Field": "intensity"}`. If the cloud lacks the field, it's
-  coloured by height.
-- `decimate` draws every n-th point.
-- `layout` uses the [layout file format](/lantern/guides/layout/#layout-files).
+Each panel's settings sit beside its `"panel"` key, in the
+[layout format](/lantern/guides/layout/#layout-files). Here, the 3D view has a robot and two Image
+panels show the two cameras, the right one without its detections:
 
-A missing key takes its default. If the file doesn't parse, Lantern reports it on stderr and
-starts with the defaults, and the next setting you change overwrites the file, so fix it first. An
-invalid `layout` is replaced with the default layout, and the rest of the file still loads.
+```json title="~/.config/lantern/settings.json"
+{
+  "connections": ["ws://localhost:8765"],
+  "layout": {
+    "row": [
+      { "panel": "3d", "weight": 2, "robot": { "urdf": "/path/arm.urdf" } },
+      {
+        "column": [
+          { "panel": "image", "topic": "/cam/left" },
+          { "panel": "image", "topic": "/cam/right", "hidden": ["/cam/right/detections"] }
+        ]
+      }
+    ]
+  }
+}
+```
+
+Only values that differ from the defaults are written, and a missing key takes its default.
+
+Every key is checked. If the file doesn't parse (an unknown key, a wrong type, a mistake in the
+layout), Lantern prints why on stderr, copies the file to `settings.json.bak` next to it, and starts
+with the defaults. Fix the copy and put it back while Lantern is closed.
+
+### Panel keys
+
+A dot is a nested key: `points.size` is written `"points": { "size": 3 }`.
+
+| `3d` key | Default | Meaning |
+| --- | --- | --- |
+| `fixed_frame` | `null` | The fixed frame; `null` is Auto |
+| `grid`, `frames`, `labels` | `true` | Grid, TF frames, frame and pose labels |
+| `axis_length` | `0.1` | TF and pose axis length, in metres |
+| `points.show` | `true` | |
+| `points.topic` | `null` | `null` is Auto |
+| `points.color` | `"Auto"` | `"Auto"`, `"Height"`, or a field like `{"Field": "intensity"}`. A cloud without the field is coloured by height. |
+| `points.size` | `2` | In points |
+| `points.decimate` | `1` | Draw every n-th point |
+| `poses.show` | `true` | |
+| `poses.hidden` | `[]` | Pose topics switched off |
+| `poses.timeout` | `2` | Seconds; `0` never expires |
+| `poses.trail` | `0` | Seconds; `0` draws no trail. Capped at 60. |
+| `robot.show` | `true` | |
+| `robot.urdf` | `""` | The URDF file; empty for none |
+| `robot.description_topic`, `robot.joint_topic` | `null` | `null` is Auto |
+| `robot.opacity` | `1` | 0 to 1 |
+| `image_card` | `true` | The camera image card |
+| `image` | | What the card shows, with an `image` panel's keys |
+| `data` | | The text and stats cards, with a `data` panel's keys |
+
+| `image` key | Default | Meaning |
+| --- | --- | --- |
+| `topic` | `null` | `null` is Auto |
+| `hidden` | `[]` | Annotation topics not drawn over the image |
+
+| `data` key | Default | Meaning |
+| --- | --- | --- |
+| `text`, `stats` | `true` | Text and stats on or off |
+| `hidden` | `[]` | Text and stats topics not shown |
+
+A `topics` panel takes no keys.
+
+### Files from earlier versions
+
+Lantern doesn't convert old files. A `settings.json` with the view settings at the top level
+(`robot_urdf`, `cloud_topic`, `hidden_topics`, `show_image`, ...) doesn't parse, so it's backed up
+and Lantern starts with the defaults. Redo your settings in the app, or edit the file into the
+shape above: for example, `"robot_urdf": "/path/arm.urdf"` becomes
+`"robot": { "urdf": "/path/arm.urdf" }` on the `3d` panel.
 
 ## Command line
 
 | Flag | Effect |
 | --- | --- |
 | `--connect URL` | Read this server instead of the saved list. Repeat for more servers. |
-| `--urdf PATH` | Load this URDF. |
-| `--layout NAME\|PATH` | Use this [preset or layout file](/lantern/guides/layout/#layout-files). |
+| `--urdf PATH` | Draw this URDF in the 3D view. Lantern warns if the layout has no 3D view. |
+| `--layout NAME\|PATH` | Use this [preset or layout file](/lantern/guides/layout/#layout-files). A preset keeps the saved layout's panel settings; a file is used as it is. |
 | `--version` | Print the version and exit. |
 
 Other flags go to Rune, the UI library, for headless runs; see
 [Test a change](/lantern/reference/architecture/#test-a-change).
 
-`--connect`, `--urdf` and `--layout` apply to one run and aren't saved. If you change the same
-setting during that run, your change is saved as usual.
+`--connect`, `--urdf` and `--layout` apply to one run and aren't saved, unless you change the same
+thing during the run:
+
+- If you change the servers, the list is saved as you left it.
+- If you change the layout or any panel's settings during a `--layout` run, the layout the command
+  line gave is saved, with your change.
+- A `--urdf` file is never saved. The saved 3D view keeps its own URDF, unless you load a different
+  one.

@@ -16,23 +16,26 @@ Lantern doesn't run xacro, so expand it first:
 xacro robot.urdf.xacro > robot.urdf
 ```
 
-Enter the path in **Settings → Robot** and press **Load**, or pass
+Open the 3D view's [settings](/lantern/guides/settings/#3d-view) with the slider button at its top
+right, enter the path under **Robot** and press **Load**, or pass
 [`--urdf`](/lantern/guides/settings/#command-line) for one run.
 The status line reports the result, for example
-`med7: 10 links, 7 joints, 8 meshes · loaded in 39 ms`. A path entered in Settings is saved, so
-the robot loads again next time. Press **Load** again after editing the URDF or a mesh.
+`med7: 10 links, 7 joints, 8 meshes · loaded in 39 ms`. The path is saved with the 3D view in the
+layout, so the robot loads again next time, and a [layout file](/lantern/guides/layout/#layout-files)
+carries it too. Press **Load** again after editing the URDF or a mesh.
 
 Until joint states arrive, the robot sits at the URDF's zero pose. Once it's loaded, the side panel
 gets a **Robot** section with visibility and opacity.
 
-![The Robot section of the Settings page: the URDF path, the load status, Auto (/joint_states) chosen as the joint-state topic, 7 of 7 joints received, and the show and opacity controls.](../../../../screenshots/robot-settings-section.png)
+![The Robot section of the 3D view's settings: the URDF path, the load status, Auto (/joint_states) chosen as the joint-state topic, 7 of 7 joints received, and the show and opacity controls.](../../../../screenshots/robot-settings-section.png)
 
 ## From the server
 
 If a server publishes the URDF on a `robot_description` topic, Lantern loads it and you don't need
 a file. With foxglove_bridge, that's `robot_state_publisher`'s topic; from an SDK app, see
 [Publish from your code](/lantern/guides/publishing/#text-stats-and-the-robot-description).
-**Settings → Robot → Robot description** picks the topic if there's more than one.
+**Robot description**, in the Robot section of the 3D view's settings, picks the topic if there's
+more than one. Lantern reads it whenever the layout has a 3D view, even with the robot hidden.
 
 The meshes must be on Lantern's machine. Mesh paths in a received URDF should be
 absolute, `file://` or `package://`. A relative path resolves against Lantern's working directory,
@@ -41,7 +44,7 @@ which is rarely what the sender meant.
 If you load a file and a server also describes a robot, Lantern compares the two mechanisms: the
 root link, which links each joint connects, how it moves, and where it sits (to within a
 micrometre). Names, visuals and colours are ignored. If they differ, Lantern draws the server's
-robot and says why in Settings and the status chip:
+robot and says why in the Robot section and the status chip:
 
 ```text
 Robot: med7.urdf (med7) isn't the robot /robot_description describes (med14): joint lbr_joint_0
@@ -76,7 +79,7 @@ Lantern reads `name` and `position` from `sensor_msgs/msg/JointState` (through f
 `foxglove.JointStates`, or the ROS message as JSON. It supports revolute, continuous, prismatic and
 fixed joints, and `mimic`. Names must match the URDF's joint names.
 
-**Settings → Robot → Joint states** picks the topic; **Auto** uses the first one advertised.
+**Joint states**, in the Robot section, picks the topic; **Auto** uses the first one advertised.
 Messages with only some of the joints are merged, so separate arm and gripper publishers work. The
 line under the picker says `n of m joints received`. A joint with no position yet sits at zero.
 Positions outside the URDF's limits are drawn as sent.
@@ -85,7 +88,8 @@ Positions outside the URDF's limits are drawn as sent.
 
 If TF connects the URDF's root link to the fixed frame, the robot stands where TF puts it. That
 happens with a static transform from `map` to the root link, or when the root is itself a TF frame
-such as `world`. Otherwise the root sits at the fixed frame's origin, and Settings says so:
+such as `world`. Otherwise the root sits at the fixed frame's origin, and the Robot section says
+so:
 `No transform from base_link to map: drawn at map's origin`.
 
 With **Fixed frame** on Auto and no point cloud or poses, the fixed frame is the robot's root if TF

@@ -1,16 +1,19 @@
 //! The panels, tiled as `Settings::layout` says: each branch of the layout is a row or column
 //! of its children with a draggable divider between neighbours, each leaf a card showing its
-//! panel's body. With `State::layout_edit` on, every panel also shows its layout controls: what
-//! it shows, split right, split down, close. All of them edit `settings.layout`.
+//! panel's body, drawn as that panel's settings say. A panel with settings has a button that
+//! opens them over it (`ui::panel_settings`). With `State::layout_edit` on, every panel also
+//! shows its layout controls: what it shows, split right, split down, close. All of them edit
+//! `settings.layout`.
 //!
-//! A new panel type is a `PanelKind` variant (`layout.rs`) and its body here, in `body`.
+//! A new panel type is a `PanelKind` and `Panel` variant (`layout.rs`) and its body here, in
+//! `body`.
 
 use rune::tok::{self, type_};
 use rune::{Cursor, Cx, Drag, El, Phase, ScrollSpec, Tx, col, el, oklcha, row, text};
 
 use crate::app::State;
-use crate::decode::Kind;
-use crate::layout::{Dir, Layout, PanelKind};
+use crate::layout::{Dir, Layout, Panel, PanelKind};
+use crate::settings::{DataSettings, ImageSettings};
 use crate::ui::{self, MONO_SMALL};
 
 /// The gap between two panels, which is also the divider to drag.
@@ -30,14 +33,14 @@ pub fn layout(s: &State, cx: &mut Cx<State>) -> El {
 }
 
 /// `panel` for the root, then `-i` for each step of the path: `panel-1-0`.
-fn key_of(path: &[usize]) -> String {
+pub(crate) fn key_of(path: &[usize]) -> String {
     path.iter().fold("panel".to_string(), |key, i| format!("{key}-{i}"))
 }
 
 /// The layout node at `path`, unsized: the caller gives it its share of the parent.
 fn node(s: &State, cx: &mut Cx<State>, layout: &Layout, path: &mut Vec<usize>) -> El {
     let (dir, children) = match layout {
-        Layout::Panel(kind) => return panel(s, cx, *kind, path),
+        Layout::Panel(p) => return panel(s, cx, p, path),
         Layout::Split { dir, children } => (*dir, children),
     };
     let key = key_of(path);
@@ -88,24 +91,25 @@ fn divider(dir: Dir, key: String, path: Vec<usize>, i: usize, weight: f32, per_w
 }
 
 /// One panel: a card with its body, under the layout controls while editing.
-fn panel(s: &State, cx: &mut Cx<State>, kind: PanelKind, path: &[usize]) -> El {
+fn panel(s: &State, cx: &mut Cx<State>, p: &Panel, path: &[usize]) -> El {
     let key = key_of(path);
-    let card = el().key(key.clone()).clip_rounded(tok::radius::LG).border(1.0, oklcha(1.0, 0.0, 0.0, 0.07)).child(body(s, cx, kind, &key));
+    let card = el().key(key.clone()).clip_rounded(tok::radius::LG).border(1.0, oklcha(1.0, 0.0, 0.0, 0.07)).child(body(s, cx, p, &key, path));
     if !s.layout_edit {
         return card;
     }
     let width = cx.layout_size(&key).map_or(f32::INFINITY, |[w, _]| w);
-    card.child(controls(kind, path, &key, width))
+    card.child(controls(p.kind(), path, &key, width))
 }
 
-/// What a panel of `kind` shows, filling its card. `key` is the panel's, to prefix the keys of
+/// What panel `p` at `path` shows, filling its card. `key` is the panel's, to prefix the keys of
 /// what's inside (a kind can be in several panels).
-fn body(s: &State, cx: &mut Cx<State>, kind: PanelKind, key: &str) -> El {
-    match kind {
-        PanelKind::View3d => ui::view3d(s, cx),
-        PanelKind::Image => image(s, cx, key),
-        PanelKind::Data => data(s, key),
-        PanelKind::Topics => scrolling(format!("{key}-scroll")).child(el().w_full().padding(12.0).child(ui::topics(s, &format!("{key}-topic")))),
+fn body(s: &State, cx: &mut Cx<State>, p: &Panel, key: &str, path: &[usize]) -> El {
+    let gear = || ui::panel_settings_button(key, path);
+    match p {
+        Panel::View3d(_) => ui::view3d(s, cx, gear()),
+        Panel::Image(view) => image(s, cx, view, key, gear()),
+        Panel::Data(view) => data(s, view, key, gear()),
+        Panel::Topics => scrolling(format!("{key}-scroll")).child(el().w_full().padding(12.0).child(ui::topics(s, &format!("{key}-topic")))),
     }
 }
 
@@ -143,39 +147,42 @@ fn empty(message: String) -> El {
     el().w_full().h_full().center().padding(16.0).fill(t.card).child(text(message).font(type_::LABEL).color(t.text_secondary).max_lines(4))
 }
 
-/// The camera image with its annotations, as large as fits the panel, under its topic and size.
-fn image(s: &State, cx: &mut Cx<State>, key: &str) -> El {
-    if !s.settings.show_image {
-        return empty("Camera image is off. Turn it on in the side panel.".into());
-    }
-    let Some((topic, image)) = s.shown_image() else {
-        return empty(match s.topic(Kind::Image) {
+/// A panel body with its settings button over its top right corner.
+fn cornered(body: El, gear: El) -> El {
+    el().w_full().h_full().child(body).child(gear.pin(None, Some(8.0), Some(8.0), None))
+}
+
+/// The panel's image with its annotations, as large as fits the panel, under its topic and size.
+fn image(s: &State, cx: &mut Cx<State>, view: &ImageSettings, key: &str, gear: El) -> El {
+    let Some((topic, image)) = s.image(view) else {
+        let message = match s.image_topic(view) {
             Some(topic) => match s.error(&topic) {
                 Some(e) => format!("{topic}: {e}"),
                 None => format!("Waiting for {topic}"),
             },
             None => "No image topic yet".into(),
-        });
+        };
+        return cornered(empty(message), gear);
     };
     // The picture is sized from the space under the caption, once that's laid out.
     let area = format!("{key}-image");
     let ratio = image.width as f32 / image.height as f32;
     let width = cx.layout_size(&area).map(|[w, h]| w.min(h * ratio)).filter(|w| *w >= 1.0);
+    let caption = row().items_center().gap(6.0).child(ui::image_caption(topic, image).grow(1.0).min_w(0.0)).child(gear);
     col().w_full().h_full().padding(8.0).gap(5.0).fill(tok::theme(true).card)
-        .child(ui::image_caption(topic, image))
-        .child(el().key(area).grow(1.0).min_h(0.0).w_full().center().children(width.map(|w| ui::picture(s, format!("{key}-picture"), image, w))))
+        .child(caption)
+        .child(el().key(area).grow(1.0).min_h(0.0).w_full().center().children(width.map(|w| ui::picture(s, view, format!("{key}-picture"), image, w))))
 }
 
-/// Every visible stats topic's statuses with their readings, then every visible text topic's
-/// newest message, whole.
-fn data(s: &State, key: &str) -> El {
+/// The panel's stats topics' statuses with their readings, then its text topics' newest
+/// messages, whole.
+fn data(s: &State, view: &DataSettings, key: &str, gear: El) -> El {
     let t = tok::theme(true);
-    let st = &s.settings;
-    if !st.show_text && !st.show_stats {
-        return empty("Text and stats are off. Turn them on in the side panel.".into());
+    if !view.text && !view.stats {
+        return cornered(empty("Text and stats are both off in this panel's settings.".into()), gear);
     }
-    let statuses = s.stats().filter(|_| st.show_stats).flat_map(|(_, d)| d);
-    let texts = s.texts().filter(|_| st.show_text);
+    let statuses = s.stats(view).flat_map(|(_, d)| d);
+    let texts = s.texts(view);
     let mut body = col().w_full().padding(12.0).gap(14.0);
     let mut any = false;
     for d in statuses {
@@ -189,7 +196,8 @@ fn data(s: &State, key: &str) -> El {
         any = true;
     }
     if !any {
-        return empty("No text or stats topics yet".into());
+        return cornered(empty("No text or stats topics yet".into()), gear);
     }
-    scrolling(format!("{key}-scroll")).child(body)
+    // The button sits in the scroll area's corner; the body leaves it room on the first line.
+    cornered(scrolling(format!("{key}-scroll")).child(body.pr(44.0)), gear)
 }

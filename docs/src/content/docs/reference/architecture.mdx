@@ -25,13 +25,13 @@ panels. The 3D view is rendered offscreen and composited into its panel.
 | `src/decode/` | The `(encoding, schema)` → decoder table; ROS CDR, Foxglove protobuf and JSON decoders; point field extraction; image decoding (`image.rs`) |
 | `src/scene.rs` | What gets drawn, independent of message types: clouds, transforms, poses, images, the TF tree |
 | `src/connection.rs` | One server: its source and what it has received (clouds, TF, poses, joints, images, text, stats), with pose expiry and trails |
-| `src/app.rs` | App state: opens and closes connections to match settings, picks topics, loads the robot (file or description), derives the display |
+| `src/app.rs` | App state: opens and closes connections to match settings, resolves each panel's topics and subscribes to the union of what the panels show (`wanted`), loads the robot (file or description), derives the display. `State::v3()` gives the 3D panel's settings. Images are kept per topic shown and annotated per view. |
 | `src/annotate.rs` | Draws image annotations into the image on the CPU |
 | `src/robot/` | URDF parsing and forward kinematics (`urdf.rs`), STL and primitive meshes with smoothed normals (`mesh.rs`), loading and mesh path resolution (`mod.rs`) |
-| `src/settings.rs` | Persisted settings |
-| `src/layout.rs` | The panel layout: the tree of panels, rows and columns, its file format and checks, the edits (split, close, show, move a divider), presets |
-| `src/panels.rs` | Draws the layout: the tiled panels, the dividers, each panel's layout controls, and the Image, Data and Topics panels |
-| `src/ui.rs` | The 3D panel with its overlays (status chip, image, text and stats cards), side panel, Settings page |
+| `src/settings.rs` | `Settings`, saved to settings.json: the connections and the layout. Each panel type's settings: `View3dSettings`, `ImageSettings`, `DataSettings` |
+| `src/layout.rs` | The panel layout: the tree of panels (each with its settings), rows and columns, its file format and checks, the edits (split, close, show, move a divider), presets and how they keep panel settings (`adopt`) |
+| `src/panels.rs` | Draws the layout: the tiled panels, the dividers, each panel's settings button and layout controls, and the Image, Data and Topics panels |
+| `src/ui.rs` | The 3D panel with its overlays (status chip, image, text and stats cards), the side panel (the 3D view's quick controls), the Settings page, and each panel's settings (`panel_settings`) |
 | `src/camera.rs` | Orbit camera (REP 103, z up), reversed infinite depth |
 | `src/viewport.rs` | Rune `Compositor`: offscreen 3D pass blitted into an `El::effect` slot, GPU timer |
 | `src/viewport.wgsl` | Sky and grid, points (vertex-pulled quads), robot (lit meshes), lines, blit |
@@ -57,8 +57,8 @@ which AMCL publishes on `/amcl_pose`:
    }
    ```
 
-2. Add a row to `DECODERS` in `src/decode/mod.rs`. The `Kind` decides how Settings offers the
-   topic. The third field restricts the row to topics with that name (alone or after a `/`, like
+2. Add a row to `DECODERS` in `src/decode/mod.rs`. The `Kind` decides its badge and which panels
+   draw it. The third field restricts the row to topics with that name (alone or after a `/`, like
    the `robot_description` rows); `None` matches any topic.
 
    ```rust title="src/decode/mod.rs" ins={3}
@@ -74,8 +74,8 @@ which AMCL publishes on `/amcl_pose`:
 
 </Steps>
 
-The topic now shows in Settings with a **Poses** badge, and sources subscribe to it like any other
-pose topic.
+The topic now shows in Settings with a **Poses** badge and gets a switch in the 3D view's Poses
+settings, and sources subscribe to it like any other pose topic.
 
 A message that needs a new kind of drawing, such as a marker array, needs more: a `Decoded` variant
 and `Kind`, a scene type in `src/scene.rs`, state in `src/connection.rs` and `src/app.rs`, and
@@ -83,8 +83,9 @@ drawing code in the viewport or the UI.
 
 ## Add a panel type
 
-A panel is a `PanelKind` variant and a function that draws it from app state. For example, a panel
-that lists joint positions:
+A panel is a `PanelKind` variant, a `Panel` variant that carries its settings, and functions that
+draw it and its settings from app state. For example, a panel that lists joint positions, with
+settings for the joints it leaves out:
 
 <Steps>
 
@@ -100,25 +101,65 @@ that lists joint positions:
    }
    ```
 
-2. Draw it in `src/panels.rs` and add its arm to `body`. `key` is unique to the panel; prefix the
-   keys of its children with it, because a layout can hold the same panel type twice.
+2. Give it a settings type in `src/settings.rs` and a `Panel` variant that carries it. With
+   `default`, a file can leave keys out; with `deny_unknown_fields`, a misspelt key is an error.
+   A panel with no settings is a unit variant, like `Topics`.
 
-   ```rust title="src/panels.rs"
-   fn joints(s: &State, key: &str) -> El {
-       let Some((_, positions)) = s.joints() else { return empty("No joint states yet".into()) };
-       let mut names: Vec<_> = positions.iter().collect();
-       names.sort_by_key(|(name, _)| *name);
-       let rows = names.into_iter().map(|(name, at)| text(format!("{name}  {at:.3}")).font(MONO_SMALL));
-       scrolling(format!("{key}-scroll")).child(col().padding(12.0).gap(4.0).children(rows))
+   ```rust title="src/settings.rs"
+   /// A Joints panel's settings.
+   #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+   #[serde(default, deny_unknown_fields)]
+   pub struct JointsSettings {
+       /// Joints not listed (new joints are listed).
+       pub hidden: BTreeSet<String>,
    }
    ```
 
-3. If the panel needs topics nothing else subscribes to, add them in `State::wanted`
+   ```rust title="src/layout.rs" ins={5}
+   pub enum Panel {
+       View3d(Box<View3dSettings>),
+       // ...
+       Topics,
+       Joints(JointsSettings),
+   }
+   ```
+
+   The compiler then points at each match that needs an arm: `Panel::new` and `Panel::kind`, and
+   reading and writing the file (`panel` and `RawNode::of`).
+
+3. Draw it in `src/panels.rs` and add its arm to `body`. `key` is unique to the panel; prefix the
+   keys of its children with it, because a layout can hold the same panel type twice. `cornered`
+   puts its settings button, `gear`, at its top right.
+
+   ```rust title="src/panels.rs"
+   fn joints(s: &State, view: &JointsSettings, key: &str, gear: El) -> El {
+       let Some((_, positions)) = s.joints() else { return cornered(empty("No joint states yet".into()), gear) };
+       let mut names: Vec<_> = positions.iter().filter(|(name, _)| !view.hidden.contains(*name)).collect();
+       names.sort_by_key(|(name, _)| *name);
+       let rows = names.into_iter().map(|(name, at)| text(format!("{name}  {at:.3}")).font(MONO_SMALL));
+       cornered(scrolling(format!("{key}-scroll")).child(col().padding(12.0).gap(4.0).children(rows)), gear)
+   }
+   ```
+
+4. Add its settings to `ui::panel_settings`. A `panel_lens` reaches this panel's settings by its
+   path in the layout. Your `joints_settings` builds its controls from the ones in `src/ui.rs`
+   (`toggle_row`, `auto_picker`, `topic_switches`) and edits through the lens with `with`. Edits
+   are saved like any other.
+
+   ```rust title="src/ui.rs"
+   Panel::Joints(view) => joints_settings(s, view, &panel_lens(path, |p| match p {
+       Panel::Joints(j) => Some(j),
+       _ => None,
+   })),
+   ```
+
+5. If the panel needs topics nothing else subscribes to, add them in `State::wanted`
    (`src/app.rs`). Sources only deliver what's wanted.
 
 </Steps>
 
-The panel now appears in the layout controls, and `{"panel": "joints"}` works in a layout file.
+The panel now appears in the layout controls, `{"panel": "joints", "hidden": ["gripper"]}` works
+in a layout file, and its slider button opens its settings.
 
 ## Add a source
 
@@ -190,10 +231,11 @@ scripts/bench.sh 3             # timing table → out/bench.tsv, raw logs in out
   whole `settings.json`:
 
   ```sh
-  SETTINGS='{"robot_urdf": "'$PWD'/fixtures/med7/med7.urdf"}' \
-    scripts/snap-live.sh out/robot "--cloud table --robot-pose reach" - settings
+  SETTINGS='{"layout": {"panel": "3d", "robot": {"urdf": "'$PWD'/fixtures/med7/med7.urdf"}}}' \
+    scripts/snap-live.sh out/robot "--cloud table --robot-pose reach" - panel-settings
   ```
 
-- **Scenes** (`--scene`) are `top`, `height`, `intensity`, `settings` and `edit-layout`, plus the
-  timing scenes `no-points`, `half`, `quarter`, `size-1` and `size-4`. Scenes don't save settings.
-  Lantern's own flags work headless too: `"-:--layout dashboard"` snaps the dashboard preset.
+- **Scenes** (`--scene`) are `top`, `height`, `intensity`, `settings`, `edit-layout` and
+  `panel-settings` (the 3D view's settings, open), plus the timing scenes `no-points`, `half`,
+  `quarter`, `size-1` and `size-4`. Scenes don't save settings. Lantern's own flags work headless
+  too: `"-:--layout dashboard"` snaps the dashboard preset.

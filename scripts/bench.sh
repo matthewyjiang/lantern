@@ -61,7 +61,7 @@ run full+readback --realtime --frames 120 --out out/bench/frames
 rm -rf out/bench/frames
 run unpaced --frames 6000
 serve --cloud terrain --hz 0 --robot-pose home
-robot="{\"robot_urdf\": \"$PWD/fixtures/med7/med7.urdf\"}"
+robot="{\"layout\": {\"panel\": \"3d\", \"robot\": {\"urdf\": \"$PWD/fixtures/med7/med7.urdf\"}}}"
 SETTINGS=$robot run full+robot "${paced[@]}"
 SETTINGS=$robot run robot-only "${paced[@]}" --scene no-points
 serve --cloud terrain --hz 10

@@ -1,32 +1,40 @@
 //! The panel layout: a tree whose leaves are panels and whose branches tile their children in a
-//! row or a column, each child with a weight (its share of the branch's length). The layout is a
-//! setting, saved in `settings.json`, and reads and writes the same JSON on its own in a layout
-//! file (`--layout`, Settings → Layout):
+//! row or a column, each child with a weight (its share of the branch's length). Each panel
+//! carries its own settings (`settings.rs`). The layout is saved in `settings.json`, and reads
+//! and writes the same JSON on its own in a layout file (`--layout`, Settings → Layout):
 //!
 //! ```json
-//! {"row": [{"panel": "3d", "weight": 2}, {"column": [{"panel": "image"}, {"panel": "data"}]}]}
+//! {"row": [{"panel": "3d", "weight": 2, "robot": {"urdf": "arm.urdf"}},
+//!          {"column": [{"panel": "image", "topic": "/cam/left"}, {"panel": "data"}]}]}
 //! ```
 //!
-//! The file is checked when it's read (`RawNode` → `Layout`), so every `Layout` in the app is
-//! valid: its weights are positive, its branches have children, and it has at most one 3D panel.
-//! The edits (`split`, `close`, `show`, `move_divider`) keep it that way. They address a node
-//! by its path: the child index to take at each branch, from the root.
+//! A panel's settings sit beside `panel`, and only those that differ from the defaults are
+//! written; a setting left out takes its default. The file is checked when it's read (`RawNode` → `Layout`), so every `Layout` in the
+//! app is valid: its weights are positive, its branches have children, its panels' settings
+//! parse, and it has at most one 3D panel. The edits (`split`, `close`, `show`, `move_divider`)
+//! keep it that way. They address a node by its path: the child index to take at each branch,
+//! from the root.
 
 use std::path::Path;
 
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
+use serde_json::{Map, Value};
+
+use crate::settings::{DataSettings, ImageSettings, View3dSettings};
 
 /// What a panel shows. Adding a panel type starts here: a variant, its row in `ALL`, `id` and
-/// `label`, then its body in `panels::body`.
+/// `label`, its `Panel` variant with its settings, then its body in `panels::body` and its
+/// settings in `ui::panel_settings`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PanelKind {
     /// The 3D viewport. One per layout: there is one camera and one offscreen 3D pass.
     View3d,
-    /// The camera image with its annotations.
+    /// A camera image with its annotations.
     Image,
     /// Text topics' newest messages and stats topics' statuses and readings.
     Data,
-    /// Every advertised topic, with the controls of Settings → Topics.
+    /// Every advertised topic, as Settings → Topics lists them.
     Topics,
 }
 
@@ -53,6 +61,36 @@ impl PanelKind {
     }
 }
 
+/// A panel: what it shows, with that kind's settings.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Panel {
+    View3d(Box<View3dSettings>),
+    Image(ImageSettings),
+    Data(DataSettings),
+    Topics,
+}
+
+impl Panel {
+    /// A panel of `kind` with the default settings.
+    pub fn new(kind: PanelKind) -> Panel {
+        match kind {
+            PanelKind::View3d => Panel::View3d(Box::default()),
+            PanelKind::Image => Panel::Image(ImageSettings::default()),
+            PanelKind::Data => Panel::Data(DataSettings::default()),
+            PanelKind::Topics => Panel::Topics,
+        }
+    }
+
+    pub fn kind(&self) -> PanelKind {
+        match self {
+            Panel::View3d(_) => PanelKind::View3d,
+            Panel::Image(_) => PanelKind::Image,
+            Panel::Data(_) => PanelKind::Data,
+            Panel::Topics => PanelKind::Topics,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Dir {
     /// Children side by side.
@@ -64,14 +102,14 @@ pub enum Dir {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(try_from = "RawNode", into = "RawNode")]
 pub enum Layout {
-    Panel(PanelKind),
+    Panel(Panel),
     /// Two or more children, each with its weight.
     Split { dir: Dir, children: Vec<(f32, Layout)> },
 }
 
 impl Default for Layout {
     fn default() -> Self {
-        Layout::Panel(PanelKind::View3d)
+        Layout::Panel(Panel::new(PanelKind::View3d))
     }
 }
 
@@ -87,15 +125,19 @@ pub const PRESETS: [Preset; 3] = [
     Preset { name: "dashboard", layout: dashboard },
 ];
 
+fn leaf(kind: PanelKind) -> Layout {
+    Layout::Panel(Panel::new(kind))
+}
+
 /// The 3D view, with the image to its right.
 fn camera() -> Layout {
-    Layout::Split { dir: Dir::Row, children: vec![(2.0, Layout::Panel(PanelKind::View3d)), (1.0, Layout::Panel(PanelKind::Image))] }
+    Layout::Split { dir: Dir::Row, children: vec![(2.0, leaf(PanelKind::View3d)), (1.0, leaf(PanelKind::Image))] }
 }
 
 /// The 3D view, with the image above a Data panel to its right.
 fn dashboard() -> Layout {
-    let side = vec![(1.0, Layout::Panel(PanelKind::Image)), (1.0, Layout::Panel(PanelKind::Data))];
-    Layout::Split { dir: Dir::Row, children: vec![(2.0, Layout::Panel(PanelKind::View3d)), (1.0, Layout::Split { dir: Dir::Column, children: side })] }
+    let side = vec![(1.0, leaf(PanelKind::Image)), (1.0, leaf(PanelKind::Data))];
+    Layout::Split { dir: Dir::Row, children: vec![(2.0, leaf(PanelKind::View3d)), (1.0, Layout::Split { dir: Dir::Column, children: side })] }
 }
 
 impl Layout {
@@ -103,9 +145,16 @@ impl Layout {
         PRESETS.iter().find(|p| p.name == name).map(|p| (p.layout)())
     }
 
-    /// A preset by name, else the layout file at that path.
-    pub fn named_or_file(value: &str) -> Result<Layout, String> {
-        Layout::preset(value).map_or_else(|| Layout::load(Path::new(value)), Ok)
+    /// A preset by name, its panels taking the settings of `current`'s (`adopt`), else the
+    /// layout file at that path as it is.
+    pub fn named_or_file(value: &str, current: &Layout) -> Result<Layout, String> {
+        match Layout::preset(value) {
+            Some(mut preset) => {
+                preset.adopt(current);
+                Ok(preset)
+            }
+            None => Layout::load(Path::new(value)),
+        }
     }
 
     pub fn load(path: &Path) -> Result<Layout, String> {
@@ -122,10 +171,56 @@ impl Layout {
         self.find(kind).is_some()
     }
 
-    /// The path of the first panel showing `kind`.
-    fn find(&self, kind: PanelKind) -> Option<Vec<usize>> {
+    /// Every panel, depth first (left to right, top to bottom).
+    pub fn panels(&self) -> Vec<&Panel> {
         match self {
-            Layout::Panel(k) => (*k == kind).then(Vec::new),
+            Layout::Panel(p) => vec![p],
+            Layout::Split { children, .. } => children.iter().flat_map(|(_, c)| c.panels()).collect(),
+        }
+    }
+
+    pub fn panels_mut(&mut self) -> Vec<&mut Panel> {
+        match self {
+            Layout::Panel(p) => vec![p],
+            Layout::Split { children, .. } => children.iter_mut().flat_map(|(_, c)| c.panels_mut()).collect(),
+        }
+    }
+
+    /// The 3D panel's settings, if the layout has one.
+    pub fn view3d(&self) -> Option<&View3dSettings> {
+        self.panels().into_iter().find_map(|p| match p {
+            Panel::View3d(v) => Some(&**v),
+            _ => None,
+        })
+    }
+
+    pub fn view3d_mut(&mut self) -> Option<&mut View3dSettings> {
+        self.panels_mut().into_iter().find_map(|p| match p {
+            Panel::View3d(v) => Some(&mut **v),
+            _ => None,
+        })
+    }
+
+    /// The panel at `path`, if there's one there.
+    pub fn panel(&self, path: &[usize]) -> Option<&Panel> {
+        match (path, self) {
+            ([], Layout::Panel(p)) => Some(p),
+            ([i, rest @ ..], Layout::Split { children, .. }) => children.get(*i)?.1.panel(rest),
+            _ => None,
+        }
+    }
+
+    pub fn panel_mut(&mut self, path: &[usize]) -> Option<&mut Panel> {
+        match self.at_mut(path)? {
+            Layout::Panel(p) => Some(p),
+            Layout::Split { .. } => None,
+        }
+    }
+
+    /// The path of the first panel showing `kind`.
+    pub fn find(&self, kind: PanelKind) -> Option<Vec<usize>> {
+        match self {
+            Layout::Panel(p) => (p.kind() == kind).then(Vec::new),
             Layout::Split { children, .. } => children.iter().enumerate().find_map(|(i, (_, c))| {
                 let mut path = c.find(kind)?;
                 path.insert(0, i);
@@ -142,24 +237,28 @@ impl Layout {
         }
     }
 
-    /// Shows `kind` in the panel at `path`. The 3D view is in one panel at most, so asking for
-    /// it where another panel has it swaps the two.
+    /// Shows `kind` in the panel at `path`, with that kind's default settings. The 3D view is in
+    /// one panel at most, so asking for it where another panel has it swaps the two, each with
+    /// its settings.
     pub fn show(&mut self, path: &[usize], kind: PanelKind) {
-        let Some(&mut Layout::Panel(old)) = self.at_mut(path) else { return };
-        if kind == PanelKind::View3d
-            && let Some(Layout::Panel(other)) = self.find(kind).and_then(|p| self.at_mut(&p))
-        {
-            *other = old;
+        let Some(here) = self.panel(path).map(Panel::kind) else { return };
+        if here == kind {
+            return;
         }
-        if let Some(Layout::Panel(k)) = self.at_mut(path) {
-            *k = kind;
+        match self.find(kind).filter(|_| kind == PanelKind::View3d) {
+            Some(there) => {
+                let a = std::mem::take(self.at_mut(path).expect("found above"));
+                let b = std::mem::replace(self.at_mut(&there).expect("found above"), a);
+                *self.at_mut(path).expect("found above") = b;
+            }
+            None => *self.panel_mut(path).expect("found above") = Panel::new(kind),
         }
     }
 
     /// Splits the panel at `path` in two along `dir`, the new panel after it with half its
     /// space. The new panel shows the first kind the layout doesn't have yet, or Data.
     pub fn split(&mut self, path: &[usize], dir: Dir) {
-        let new = Layout::Panel(PanelKind::ALL.into_iter().find(|k| !self.has(*k)).unwrap_or(PanelKind::Data));
+        let new = leaf(PanelKind::ALL.into_iter().find(|k| !self.has(*k)).unwrap_or(PanelKind::Data));
         // In a branch of the same direction, the new panel is a sibling.
         if let Some((&i, parent)) = path.split_last()
             && let Some(Layout::Split { dir: d, children }) = self.at_mut(parent)
@@ -208,12 +307,48 @@ impl Layout {
             (children[i].0, children[i + 1].0) = (first, second);
         }
     }
+
+    /// Gives this layout's panels the settings of `from`'s panels of the same kind, in order:
+    /// a preset picked over a layout keeps its robot, its image topics, ... Panels `from` has no
+    /// match for keep their own.
+    pub fn adopt(&mut self, from: &Layout) {
+        for kind in PanelKind::ALL {
+            let old = from.panels().into_iter().filter(|p| p.kind() == kind);
+            for (new, old) in self.panels_mut().into_iter().filter(|p| p.kind() == kind).zip(old) {
+                *new = old.clone();
+            }
+        }
+    }
+
+    /// The same tiling as `other`: the same rows, columns, weights and kinds of panel, whatever
+    /// their settings.
+    pub fn same_tiling(&self, other: &Layout) -> bool {
+        match (self, other) {
+            (Layout::Panel(a), Layout::Panel(b)) => a.kind() == b.kind(),
+            (Layout::Split { dir: d1, children: c1 }, Layout::Split { dir: d2, children: c2 }) => {
+                d1 == d2 && c1.len() == c2.len() && c1.iter().zip(c2).all(|((w1, a), (w2, b))| w1 == w2 && a.same_tiling(b))
+            }
+            _ => false,
+        }
+    }
+
+    fn count(&self, kind: PanelKind) -> usize {
+        self.panels().into_iter().filter(|p| p.kind() == kind).count()
+    }
+
+    /// The layout, if it has at most one 3D panel.
+    fn one_3d(self) -> Result<Layout, String> {
+        let views = self.count(PanelKind::View3d);
+        if views > 1 {
+            return Err(format!("layout: {views} \"3d\" panels, and a layout can have one"));
+        }
+        Ok(self)
+    }
 }
 
-/// A layout node as the file has it: exactly one of `panel`, `row` and `column`, and its weight
-/// in the branch that holds it (1 when left out).
+/// A layout node as the file has it: exactly one of `panel`, `row` and `column`, its weight in
+/// the branch that holds it (1 when left out), and a panel's settings beside them.
 #[derive(Default, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 struct RawNode {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     panel: Option<String>,
@@ -223,13 +358,24 @@ struct RawNode {
     column: Option<Vec<RawNode>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     weight: Option<f32>,
+    /// Every other key: the panel's settings.
+    #[serde(flatten)]
+    settings: Map<String, Value>,
 }
 
 impl RawNode {
     fn of(layout: Layout, weight: f32) -> RawNode {
         let weight = (weight != 1.0).then_some(weight);
         match layout {
-            Layout::Panel(k) => RawNode { panel: Some(k.id().into()), weight, ..RawNode::default() },
+            Layout::Panel(p) => {
+                let settings = match &p {
+                    Panel::View3d(v) => non_default(&**v),
+                    Panel::Image(i) => non_default(i),
+                    Panel::Data(d) => non_default(d),
+                    Panel::Topics => Map::new(),
+                };
+                RawNode { panel: Some(p.kind().id().into()), weight, settings, ..RawNode::default() }
+            }
             Layout::Split { dir, children } => {
                 let children = Some(children.into_iter().map(|(w, c)| RawNode::of(c, w)).collect());
                 match dir {
@@ -252,10 +398,16 @@ impl RawNode {
                     let known = PanelKind::ALL.map(PanelKind::id).join(", ");
                     format!("{at}: no panel called \"{id}\" (the panels are {known})")
                 })?;
-                Layout::Panel(kind)
+                Layout::Panel(panel(kind, self.settings, at)?)
             }
-            (None, Some(children), None) => branch(Dir::Row, children, &format!("{at}.row"))?,
-            (None, None, Some(children)) => branch(Dir::Column, children, &format!("{at}.column"))?,
+            (None, Some(children), None) => {
+                no_settings(&self.settings, at)?;
+                branch(Dir::Row, children, &format!("{at}.row"))?
+            }
+            (None, None, Some(children)) => {
+                no_settings(&self.settings, at)?;
+                branch(Dir::Column, children, &format!("{at}.column"))?
+            }
             _ => return Err(format!("{at}: needs exactly one of \"panel\", \"row\" and \"column\"")),
         };
         Ok((weight, layout))
@@ -274,32 +426,63 @@ fn branch(dir: Dir, children: Vec<RawNode>, at: &str) -> Result<Layout, String> 
     }
 }
 
+/// A panel of `kind` with the settings a file gives it.
+fn panel(kind: PanelKind, settings: Map<String, Value>, at: &str) -> Result<Panel, String> {
+    Ok(match kind {
+        PanelKind::View3d => Panel::View3d(Box::new(parse::<View3dSettings>(settings, at)?.checked())),
+        PanelKind::Image => Panel::Image(parse(settings, at)?),
+        PanelKind::Data => Panel::Data(parse(settings, at)?),
+        PanelKind::Topics => {
+            no_settings(&settings, at)?;
+            Panel::Topics
+        }
+    })
+}
+
+/// A node that takes no settings (a branch, a Topics panel) mustn't be given any.
+fn no_settings(settings: &Map<String, Value>, at: &str) -> Result<(), String> {
+    match settings.keys().next() {
+        Some(key) => Err(format!("{at}: unknown field `{key}`")),
+        None => Ok(()),
+    }
+}
+
+fn parse<T: DeserializeOwned>(settings: Map<String, Value>, at: &str) -> Result<T, String> {
+    serde_json::from_value(Value::Object(settings)).map_err(|e| format!("{at}: {e}"))
+}
+
+/// `settings` as a file has them: only the keys (nested ones too) that differ from the defaults.
+fn non_default<T: Serialize + Default>(settings: &T) -> Map<String, Value> {
+    let value = serde_json::to_value(settings).expect("settings serialize");
+    let default = serde_json::to_value(T::default()).expect("settings serialize");
+    diff(value, &default)
+}
+
+fn diff(value: Value, default: &Value) -> Map<String, Value> {
+    let Value::Object(map) = value else { return Map::new() };
+    map.into_iter().filter_map(|(k, v)| match (v, default.get(&k)) {
+        (Value::Object(o), Some(d @ Value::Object(_))) => {
+            let sub = diff(Value::Object(o), d);
+            (!sub.is_empty()).then_some((k, Value::Object(sub)))
+        }
+        (v, Some(d)) if v == *d => None,
+        (v, _) => Some((k, v)),
+    }).collect()
+}
+
 impl TryFrom<RawNode> for Layout {
     type Error = String;
 
     fn try_from(raw: RawNode) -> Result<Layout, String> {
         // The root's own weight has nothing to be a share of.
         let (_, layout) = raw.checked("layout")?;
-        let views = layout.count(PanelKind::View3d);
-        if views > 1 {
-            return Err(format!("layout: {views} \"3d\" panels, and a layout can have one"));
-        }
-        Ok(layout)
+        layout.one_3d()
     }
 }
 
 impl From<Layout> for RawNode {
     fn from(layout: Layout) -> RawNode {
         RawNode::of(layout, 1.0)
-    }
-}
-
-impl Layout {
-    fn count(&self, kind: PanelKind) -> usize {
-        match self {
-            Layout::Panel(k) => (*k == kind) as usize,
-            Layout::Split { children, .. } => children.iter().map(|(_, c)| c.count(kind)).sum(),
-        }
     }
 }
 
@@ -326,7 +509,7 @@ mod tests {
     fn a_layout_file_round_trips() {
         let json = r#"{"row": [{"panel": "3d", "weight": 2}, {"column": [{"panel": "image"}, {"panel": "data", "weight": 0.5}]}]}"#;
         let layout = parse(json).unwrap();
-        let expected = row(vec![(2.0, Layout::Panel(View3d)), (1.0, column(vec![(1.0, Layout::Panel(Image)), (0.5, Layout::Panel(Data))]))]);
+        let expected = row(vec![(2.0, leaf(View3d)), (1.0, column(vec![(1.0, leaf(Image)), (0.5, leaf(Data))]))]);
         assert_eq!(layout, expected);
         assert_eq!(parse(&serde_json::to_string(&layout).unwrap()).unwrap(), expected);
     }
@@ -347,35 +530,60 @@ mod tests {
     fn splitting_adds_a_sibling_or_a_branch() {
         let mut l = Layout::default();
         l.split(&[], Dir::Row);
-        assert_eq!(l, row(vec![(1.0, Layout::Panel(View3d)), (1.0, Layout::Panel(Image))]));
+        assert_eq!(l, row(vec![(1.0, leaf(View3d)), (1.0, leaf(Image))]));
         // Along the branch: a sibling, sharing the split panel's space.
         l.split(&[1], Dir::Row);
-        assert_eq!(l, row(vec![(1.0, Layout::Panel(View3d)), (0.5, Layout::Panel(Image)), (0.5, Layout::Panel(Data))]));
+        assert_eq!(l, row(vec![(1.0, leaf(View3d)), (0.5, leaf(Image)), (0.5, leaf(Data))]));
         // Across it: a branch in the panel's place.
         l.split(&[0], Dir::Column);
         let Layout::Split { children, .. } = &l else { panic!() };
-        assert_eq!(children[0], (1.0, column(vec![(1.0, Layout::Panel(View3d)), (1.0, Layout::Panel(Topics))])));
+        assert_eq!(children[0], (1.0, column(vec![(1.0, leaf(View3d)), (1.0, leaf(Topics))])));
     }
 
     #[test]
     fn closing_collapses_a_branch_of_one_and_keeps_the_last_panel() {
         let mut l = parse(r#"{"row": [{"panel": "3d", "weight": 2}, {"column": [{"panel": "image"}, {"panel": "data"}]}]}"#).unwrap();
         l.close(&[1, 0]);
-        assert_eq!(l, row(vec![(2.0, Layout::Panel(View3d)), (1.0, Layout::Panel(Data))]));
+        assert_eq!(l, row(vec![(2.0, leaf(View3d)), (1.0, leaf(Data))]));
         l.close(&[0]);
-        assert_eq!(l, Layout::Panel(Data));
+        assert_eq!(l, leaf(Data));
         l.close(&[]);
-        assert_eq!(l, Layout::Panel(Data));
+        assert_eq!(l, leaf(Data));
     }
 
-    // One 3D view: showing it in another panel moves it there, and that panel's kind goes back.
+    // One 3D view: showing it in another panel moves it there with its settings, and that
+    // panel's kind and settings go back. Any other kind starts from its defaults.
     #[test]
     fn showing_the_3d_view_elsewhere_swaps() {
-        let mut l = row(vec![(1.0, Layout::Panel(View3d)), (1.0, Layout::Panel(Image)), (1.0, Layout::Panel(Data))]);
+        let mut l = parse(r#"{"row": [{"panel": "3d", "grid": false}, {"panel": "image"}, {"panel": "data", "text": false}]}"#).unwrap();
         l.show(&[2], View3d);
-        assert_eq!(l, row(vec![(1.0, Layout::Panel(Data)), (1.0, Layout::Panel(Image)), (1.0, Layout::Panel(View3d))]));
+        assert_eq!(l, parse(r#"{"row": [{"panel": "data", "text": false}, {"panel": "image"}, {"panel": "3d", "grid": false}]}"#).unwrap());
         l.show(&[0], Image);
-        assert_eq!(l, row(vec![(1.0, Layout::Panel(Image)), (1.0, Layout::Panel(Image)), (1.0, Layout::Panel(View3d))]));
+        assert_eq!(l, row(vec![(1.0, leaf(Image)), (1.0, leaf(Image)), (1.0, l.panel(&[2]).cloned().map(Layout::Panel).unwrap())]));
+    }
+
+    // A panel's settings sit beside it in the file, only those off their defaults are written,
+    // and a mistake in them says where it is.
+    #[test]
+    fn panel_settings_round_trip_and_write_only_what_differs() {
+        let json = r#"{"row":[{"panel":"3d","weight":2.0,"robot":{"urdf":"arm.urdf"}},{"panel":"image","topic":"/cam/left"},{"panel":"image","topic":"/cam/right"}]}"#;
+        let l = parse(json).unwrap();
+        assert_eq!(l.view3d().unwrap().robot.urdf, "arm.urdf");
+        assert_eq!(serde_json::to_string(&l).unwrap(), json);
+        assert_eq!(serde_json::to_string(&Layout::default()).unwrap(), r#"{"panel":"3d"}"#);
+        let err = parse(r#"{"row": [{"panel": "3d"}, {"panel": "image", "topic": 3}]}"#).unwrap_err();
+        assert!(err.contains("layout.row[1]: invalid type: integer `3`"), "{err}");
+        assert!(parse(r#"{"panel": "topics", "topic": "/x"}"#).unwrap_err().contains("layout: unknown field `topic`"));
+    }
+
+    // Picking a preset over a layout keeps each kind of panel's settings, in order.
+    #[test]
+    fn a_preset_adopts_the_current_panels_settings() {
+        let current = parse(r#"{"column": [{"panel": "image", "topic": "/a"}, {"panel": "3d", "robot": {"urdf": "arm.urdf"}}]}"#).unwrap();
+        let l = Layout::named_or_file("dashboard", &current).unwrap();
+        assert!(l.same_tiling(&Layout::preset("dashboard").unwrap()));
+        assert_eq!(l.view3d().unwrap().robot.urdf, "arm.urdf");
+        assert_eq!(l.panel(&[1, 0]), current.panel(&[0]));
     }
 
     fn weights(l: &Layout) -> Vec<f32> {
@@ -385,7 +593,7 @@ mod tests {
 
     #[test]
     fn a_divider_moves_between_its_two_panels_and_stops_at_the_minimum() {
-        let mut l = row(vec![(2.0, Layout::Panel(View3d)), (1.0, Layout::Panel(Image)), (1.0, Layout::Panel(Data))]);
+        let mut l = row(vec![(2.0, leaf(View3d)), (1.0, leaf(Image)), (1.0, leaf(Data))]);
         l.move_divider(&[], 0, 1.25, 0.2);
         assert_eq!(weights(&l), [1.25, 1.75, 1.0]);
         l.move_divider(&[], 0, 9.0, 0.2);
@@ -396,7 +604,7 @@ mod tests {
     // it is until it's dragged, and then the panel only grows.
     #[test]
     fn a_divider_beside_a_panel_under_the_minimum_doesnt_jump() {
-        let mut l = row(vec![(1.3333, Layout::Panel(View3d)), (0.1, Layout::Panel(Image))]);
+        let mut l = row(vec![(1.3333, leaf(View3d)), (0.1, leaf(Image))]);
         l.move_divider(&[], 0, 1.3333, 0.5);
         assert_eq!(weights(&l), [1.3333, 0.1], "no travel: untouched, not even rounded");
         l.move_divider(&[], 0, 1.4, 0.5);

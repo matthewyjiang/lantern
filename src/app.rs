@@ -5,9 +5,9 @@
 //! or the server's description changes, expires old poses, tells each source what to deliver,
 //! saves settings, rebuilds the display.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 
 use glam::{DVec3, Mat4, Vec3};
 use rune::{Pixels, TextEdit, Tx};
@@ -16,10 +16,10 @@ use crate::annotate;
 use crate::camera::OrbitCamera;
 use crate::connection::{Connection, Picked, Post, Received};
 use crate::decode::Kind;
-use crate::layout::Layout;
+use crate::layout::{Layout, Panel, PanelKind};
 use crate::robot::{self, Model};
 use crate::scene::{percentiles, Annotation, Diagnostic, Image, PointCloud, PointColor, Pose, TfTree};
-use crate::settings::Settings;
+use crate::settings::{DataSettings, ImageSettings, Settings, View3dSettings};
 use crate::source::{Event, Wanted};
 use crate::viewport::{self, Lines, RobotView, Shade, View};
 
@@ -47,9 +47,9 @@ pub struct State {
     robot_mismatch: Option<Mismatch>,
     /// Joint positions changed: `sync` re-poses the robot without rebuilding the display.
     robot_dirty: bool,
-    /// The shown image with its annotations drawn in, and whether a new image or annotation
-    /// arrived since it was drawn.
-    pub image: Pixels,
+    /// Each shown image with its annotations drawn in, and whether a new image or annotation
+    /// arrived since they were drawn.
+    images: Vec<Annotated>,
     image_dirty: bool,
 
     pub camera: OrbitCamera,
@@ -57,6 +57,8 @@ pub struct State {
     /// How the first data frames the camera (headless scenes choose a view before data lands).
     pub frame_with: fn(&State) -> OrbitCamera,
     pub settings_open: bool,
+    /// The panel whose settings are open over it, by its path in the layout.
+    pub panel_settings: Option<Vec<usize>>,
     /// The Settings field for a server to add.
     pub url_edit: TextEdit,
     pub urdf_edit: TextEdit,
@@ -70,6 +72,17 @@ pub struct State {
     pub layout_file_note: Option<Result<String, String>>,
 }
 
+/// An image topic with the annotations a panel draws over it (all but its hidden ones).
+struct Annotated {
+    topic: String,
+    hidden: BTreeSet<String>,
+    pixels: Pixels,
+}
+
+/// The 3D view's settings when the layout has no 3D panel: nothing on, so nothing 3D is
+/// subscribed to or loaded.
+static NO_3D: LazyLock<View3dSettings> = LazyLock::new(View3dSettings::off);
+
 /// The URDF file and the described robot differ: how, and which is drawn.
 struct Mismatch {
     message: String,
@@ -78,29 +91,35 @@ struct Mismatch {
     draw_described: bool,
 }
 
-/// What the command line set. Saving writes the file's value back for any field still at the
-/// command line's, so `--urdf` for one run doesn't replace the URDF the UI remembers; a field
-/// changed in the UI saves as changed.
+/// What the command line set. Saving writes the file's value back for any value still at the
+/// command line's, so `--urdf` for one run doesn't replace the URDF the 3D panel remembers; a
+/// value changed in the UI saves as changed.
 #[derive(Default)]
 pub struct Overrides {
     pub connections: Option<Vec<String>>,
+    /// The 3D panel's URDF.
     pub robot_urdf: Option<String>,
+    /// The layout, as the command line made it (`State::new` puts `robot_urdf` in it).
     pub layout: Option<Layout>,
 }
 
 impl Overrides {
     /// What to write to the settings file: `settings`, with command-line values the user hasn't
-    /// changed since swapped back for `file`'s.
+    /// changed since swapped back for `file`'s. The layout carries its panels' settings, so a
+    /// change to any of them saves the command line's layout with that change (still without
+    /// its `--urdf`).
     fn to_save(&self, settings: &Settings, file: &Settings) -> Settings {
         let mut s = settings.clone();
         if self.connections.as_ref() == Some(&s.connections) {
             s.connections = file.connections.clone();
         }
-        if self.robot_urdf.as_ref() == Some(&s.robot_urdf) {
-            s.robot_urdf = file.robot_urdf.clone();
-        }
         if self.layout.as_ref() == Some(&s.layout) {
             s.layout = file.layout.clone();
+        } else if let Some(urdf) = &self.robot_urdf
+            && let Some(v) = s.layout.view3d_mut()
+            && v.robot.urdf == *urdf
+        {
+            v.robot.urdf = file.layout.view3d().map(|f| f.robot.urdf.clone()).unwrap_or_default();
         }
         s
     }
@@ -175,18 +194,23 @@ impl State {
         if let Some(c) = &overrides.connections {
             settings.connections = c.clone();
         }
-        if let Some(u) = &overrides.robot_urdf {
-            settings.robot_urdf = u.clone();
-        }
         if let Some(l) = &overrides.layout {
             settings.layout = l.clone();
         }
+        if let Some(u) = &overrides.robot_urdf {
+            match settings.layout.view3d_mut() {
+                Some(v) => v.robot.urdf = u.clone(),
+                None => eprintln!("lantern: --urdf: the layout has no 3D panel to draw the robot in"),
+            }
+        }
+        let overrides = Overrides { layout: overrides.layout.as_ref().map(|_| settings.layout.clone()), ..overrides };
+        let urdf = settings.layout.view3d().map(|v| v.robot.urdf.clone()).unwrap_or_default();
         State {
             conns: Vec::new(),
             next_conn: 0,
             post,
             url_edit: TextEdit::new(String::new()),
-            urdf_edit: TextEdit::new(settings.robot_urdf.clone()),
+            urdf_edit: TextEdit::new(urdf),
             applied: settings.clone(),
             settings,
             overrides,
@@ -197,12 +221,13 @@ impl State {
             robot_description: None,
             robot_mismatch: None,
             robot_dirty: false,
-            image: Pixels::new(),
+            images: Vec::new(),
             image_dirty: false,
             camera: OrbitCamera::default(),
             framed: Framed::Nothing,
             frame_with: State::home_view,
             settings_open: false,
+            panel_settings: None,
             drag_seen: (0.0, 0.0),
             layout_edit: false,
             layout_file_edit: TextEdit::new(String::new()),
@@ -210,11 +235,65 @@ impl State {
         }
     }
 
-    /// Changes settings for this run without saving them: headless scenes (`--scene`) use it, so a
-    /// test run doesn't rewrite the user's config (a later change in the UI saves them along).
-    pub fn set_unsaved(&mut self, change: fn(&mut Settings)) {
-        change(&mut self.settings);
+    /// Changes the 3D view's settings for this run without saving them: headless scenes
+    /// (`--scene`) use it, so a test run doesn't rewrite the user's config (a later change in
+    /// the UI saves them along).
+    pub fn set_unsaved(&mut self, change: fn(&mut View3dSettings)) {
+        self.edit3d(change);
         self.applied = self.settings.clone();
+    }
+
+    /// The 3D panel's settings, or with no 3D panel, settings that draw nothing.
+    pub fn v3(&self) -> &View3dSettings {
+        self.settings.layout.view3d().unwrap_or(&NO_3D)
+    }
+
+    /// Edits the 3D panel's settings, if the layout has one.
+    pub fn edit3d(&mut self, edit: impl FnOnce(&mut View3dSettings)) {
+        if let Some(v) = self.settings.layout.view3d_mut() {
+            edit(v);
+        }
+    }
+
+    /// Opens the settings of the panel at `path` over it, its URDF field (for a 3D panel)
+    /// showing what it has.
+    pub fn open_panel_settings(&mut self, path: Vec<usize>) {
+        if let Some(Panel::View3d(v)) = self.settings.layout.panel(&path) {
+            self.urdf_edit = TextEdit::new(v.robot.urdf.clone());
+        }
+        self.panel_settings = Some(path);
+    }
+
+    /// The 3D view's image card's settings, when it's drawn: the layout has a 3D panel and no
+    /// Image panel, and the card is on.
+    pub fn image_card(&self) -> Option<&ImageSettings> {
+        let l = &self.settings.layout;
+        l.view3d().filter(|v| v.image_card && !l.has(PanelKind::Image)).map(|v| &v.image)
+    }
+
+    /// The 3D view's text and stats cards' settings, when the layout has a 3D panel and no Data
+    /// panel.
+    pub fn data_cards(&self) -> Option<&DataSettings> {
+        let l = &self.settings.layout;
+        l.view3d().filter(|_| !l.has(PanelKind::Data)).map(|v| &v.data)
+    }
+
+    /// Every image shown: each Image panel's, and the 3D view's card.
+    fn image_views(&self) -> Vec<&ImageSettings> {
+        let panels = self.settings.layout.panels().into_iter().filter_map(|p| match p {
+            Panel::Image(i) => Some(i),
+            _ => None,
+        });
+        panels.chain(self.image_card()).collect()
+    }
+
+    /// Every text and stats view: each Data panel's, and the 3D view's cards.
+    fn data_views(&self) -> Vec<&DataSettings> {
+        let panels = self.settings.layout.panels().into_iter().filter_map(|p| match p {
+            Panel::Data(d) => Some(d),
+            _ => None,
+        });
+        panels.chain(self.data_cards()).collect()
     }
 
     pub fn connections(&self) -> &[Connection] {
@@ -239,11 +318,11 @@ impl State {
         for (id, e) in events {
             // Per event: a connection's new channel list can change what Auto picks.
             let picked = Picked {
-                cloud: self.topic(Kind::PointCloud),
-                joints: self.topic(Kind::JointStates),
-                image: self.topic(Kind::Image),
+                cloud: self.cloud_topic(),
+                joints: self.joint_topic(),
+                images: self.image_topics(),
             };
-            let trail = self.settings.trail > 0.0;
+            let trail = self.v3().poses.trail > 0.0;
             let Some(conn) = self.conns.iter_mut().find(|c| c.id == id) else { continue };
             let changed = conn.received.apply(e, clock, &picked, trail);
             self.dirty |= changed.display;
@@ -267,11 +346,34 @@ impl State {
         self.received().flat_map(|r| &r.channels).find(|c| c.kind == Some(kind)).map(|c| c.topic.clone())
     }
 
-    /// The one topic of `kind` drawn (the cloud, the joint states posing the robot, the image,
-    /// the robot description): the chosen one, else the first advertised. `None` for kinds where
-    /// every topic is drawn.
-    pub fn topic(&self, kind: Kind) -> Option<String> {
-        self.settings.picked(kind)?.clone().or_else(|| self.first_of(kind))
+    /// The topic of `kind` a setting picks: the chosen one, else (Auto) the first advertised.
+    pub fn resolve(&self, kind: Kind, chosen: &Option<String>) -> Option<String> {
+        chosen.clone().or_else(|| self.first_of(kind))
+    }
+
+    /// The point cloud topic the 3D view draws.
+    pub fn cloud_topic(&self) -> Option<String> {
+        self.resolve(Kind::PointCloud, &self.v3().points.topic)
+    }
+
+    /// The joint-state topic that poses the robot.
+    pub fn joint_topic(&self) -> Option<String> {
+        self.resolve(Kind::JointStates, &self.v3().robot.joint_topic)
+    }
+
+    /// The `robot_description` topic the 3D view's robot comes from, with a 3D panel.
+    pub fn description_topic(&self) -> Option<String> {
+        self.settings.layout.view3d().and_then(|v| self.resolve(Kind::RobotDescription, &v.robot.description_topic))
+    }
+
+    /// The image topic a view shows.
+    pub fn image_topic(&self, view: &ImageSettings) -> Option<String> {
+        self.resolve(Kind::Image, &view.topic)
+    }
+
+    /// Every image topic some view shows.
+    fn image_topics(&self) -> HashSet<String> {
+        self.image_views().into_iter().filter_map(|v| self.image_topic(v)).collect()
     }
 
     /// The drawn cloud and its topic, from whichever connection has it.
@@ -283,9 +385,16 @@ impl State {
         self.received().find_map(|r| r.joints.as_ref())
     }
 
-    /// The shown image, before annotations.
-    pub fn shown_image(&self) -> Option<&(String, Arc<Image>)> {
-        self.received().find_map(|r| r.image.as_ref())
+    /// The image a view shows, before annotations, with its topic.
+    pub fn image(&self, view: &ImageSettings) -> Option<(&String, &Arc<Image>)> {
+        let topic = self.image_topic(view)?;
+        self.received().find_map(|r| r.images.get_key_value(&topic))
+    }
+
+    /// The image a view shows with its annotations drawn in, once drawn.
+    pub fn pixels(&self, view: &ImageSettings) -> Option<&Pixels> {
+        let topic = self.image_topic(view)?;
+        self.images.iter().find(|a| a.topic == topic && a.hidden == view.hidden).map(|a| &a.pixels)
     }
 
     /// The error a topic last reported, on any connection.
@@ -293,22 +402,19 @@ impl State {
         self.received().find_map(|r| r.errors.get(topic))
     }
 
-    fn visible(&self, topic: &str) -> bool {
-        !self.settings.hidden_topics.contains(topic)
+    /// The annotations drawn on an image: every annotation topic's newest, but those `hidden`.
+    pub fn annotations<'a>(&'a self, hidden: &'a BTreeSet<String>) -> impl Iterator<Item = &'a Annotation> {
+        self.received().flat_map(|r| &r.annotations).filter(move |(t, _)| !hidden.contains(*t)).flat_map(|(_, a)| a)
     }
 
-    /// The annotations drawn on the shown image: every visible annotation topic's newest.
-    pub fn annotations(&self) -> impl Iterator<Item = &Annotation> {
-        self.received().flat_map(|r| &r.annotations).filter(|(t, _)| self.visible(t)).flat_map(|(_, a)| a)
+    /// A view's text topics with their newest message.
+    pub fn texts<'a>(&'a self, view: &'a DataSettings) -> impl Iterator<Item = (&'a String, &'a String)> {
+        self.received().flat_map(|r| &r.texts).filter(move |(t, _)| view.text && !view.hidden.contains(*t))
     }
 
-    /// Visible text topics with their newest message.
-    pub fn texts(&self) -> impl Iterator<Item = (&String, &String)> {
-        self.received().flat_map(|r| &r.texts).filter(|(t, _)| self.visible(t))
-    }
-
-    pub fn stats(&self) -> impl Iterator<Item = (&String, &Vec<Diagnostic>)> {
-        self.received().flat_map(|r| &r.stats).filter(|(t, _)| self.visible(t))
+    /// A view's stats topics with their statuses.
+    pub fn stats<'a>(&'a self, view: &'a DataSettings) -> impl Iterator<Item = (&'a String, &'a Vec<Diagnostic>)> {
+        self.received().flat_map(|r| &r.stats).filter(move |(t, _)| view.stats && !view.hidden.contains(*t))
     }
 
     /// The URDF file's load: the model, or why it didn't load; `None` with no file set.
@@ -339,23 +445,25 @@ impl State {
 
     /// The robot drawn, when it's also switched on.
     pub fn shown_robot(&self) -> Option<&Model> {
-        self.robot_model().filter(|_| self.settings.show_robot)
+        self.robot_model().filter(|_| self.v3().robot.show)
     }
 
     /// Takes the URDF path from its text field and loads it, again if it's the same path (after
     /// editing the file).
     pub fn load_robot(&mut self) {
-        self.settings.robot_urdf = self.urdf_edit.text.trim().to_string();
+        let urdf = self.urdf_edit.text.trim().to_string();
+        self.edit3d(|v| v.robot.urdf = urdf);
         self.robot_file = None;
     }
 
-    /// Replaces the layout with the preset or layout file named in the Settings field.
+    /// Replaces the layout with the preset or layout file named in the Settings field (a preset
+    /// keeps the current panels' settings; see `Layout::adopt`).
     pub fn load_layout(&mut self) {
         let value = self.layout_file_edit.text.trim().to_string();
         if value.is_empty() {
             return;
         }
-        self.layout_file_note = Some(Layout::named_or_file(&value).map(|layout| {
+        self.layout_file_note = Some(Layout::named_or_file(&value, &self.settings.layout).map(|layout| {
             self.settings.layout = layout;
             format!("Loaded {value}")
         }));
@@ -370,34 +478,38 @@ impl State {
         self.layout_file_note = Some(self.settings.layout.save(Path::new(&path)).map(|()| format!("Saved {path}")));
     }
 
+    /// The topics to subscribe to: the union of what every panel shows.
     fn wanted(&self) -> Wanted {
-        let s = &self.settings;
+        let v = self.v3();
         let mut topics: HashSet<String> = self.topics_of(Kind::Transforms).into_iter().collect();
+        let all_but = |kind, hidden: &BTreeSet<String>| self.topics_of(kind).into_iter().filter(|t| !hidden.contains(t)).collect::<Vec<_>>();
         // Hidden points aren't fetched (a 1.4 M-point cloud at 10 Hz is ~160 MB/s); the last one
         // stays, so turning them back on shows it until the next arrives.
-        if s.show_points {
-            topics.extend(self.topic(Kind::PointCloud));
+        if v.points.show {
+            topics.extend(self.cloud_topic());
         }
-        let visible = |kind| self.topics_of(kind).into_iter().filter(|t| self.visible(t));
-        if s.show_poses {
-            topics.extend(visible(Kind::Poses));
+        if v.poses.show {
+            topics.extend(all_but(Kind::Poses, &v.poses.hidden));
         }
         if self.shown_robot().is_some() {
-            topics.extend(self.topic(Kind::JointStates));
+            topics.extend(self.joint_topic());
         }
-        // Always: the description says which robot the server drives, shown or not.
-        topics.extend(self.topic(Kind::RobotDescription));
-        if s.show_image {
-            topics.extend(self.topic(Kind::Image));
-            topics.extend(visible(Kind::Annotations));
+        // With a 3D panel, always: the description says which robot the server drives, shown
+        // or not.
+        topics.extend(self.description_topic());
+        for view in self.image_views() {
+            topics.extend(self.image_topic(view));
+            topics.extend(all_but(Kind::Annotations, &view.hidden));
         }
-        if s.show_text {
-            topics.extend(visible(Kind::Text));
+        for view in self.data_views() {
+            if view.text {
+                topics.extend(all_but(Kind::Text, &view.hidden));
+            }
+            if view.stats {
+                topics.extend(all_but(Kind::Stats, &view.hidden));
+            }
         }
-        if s.show_stats {
-            topics.extend(visible(Kind::Stats));
-        }
-        Wanted { topics, color: s.color.clone() }
+        Wanted { topics, color: v.points.color.clone() }
     }
 
     /// Runs at the start of every frame (`AppSpec::poll`) with the UI clock; true when it changed
@@ -406,7 +518,8 @@ impl State {
         let mut changed = false;
         self.sync_connections();
         self.sync_robot();
-        let (joint_topic, cloud_topic, image_topic) = (self.topic(Kind::JointStates), self.topic(Kind::PointCloud), self.topic(Kind::Image));
+        let (joint_topic, cloud_topic, image_topics) = (self.joint_topic(), self.cloud_topic(), self.image_topics());
+        let hidden = self.v3().poses.hidden.clone();
         for r in self.conns.iter_mut().map(|c| &mut c.received) {
             // A switched joint topic: the old topic's positions don't apply.
             if r.joints.as_ref().is_some_and(|(t, _)| Some(t) != joint_topic.as_ref()) {
@@ -418,11 +531,10 @@ impl State {
                 r.cloud = None;
                 self.dirty = true;
             }
-            if r.image.as_ref().is_some_and(|(t, _)| Some(t) != image_topic.as_ref()) {
-                r.image = None;
-                self.image_dirty = true;
-            }
-            let hidden = &self.settings.hidden_topics;
+            // An image no view shows any more.
+            let before = r.images.len();
+            r.images.retain(|t, _| image_topics.contains(t));
+            self.image_dirty |= r.images.len() != before;
             r.poses.retain(|(topic, _), _| !hidden.contains(topic));
             r.trails.retain(|(topic, _), _| !hidden.contains(topic));
         }
@@ -433,19 +545,19 @@ impl State {
         self.conns.iter_mut().for_each(|c| c.want(&wanted));
         if self.settings != self.applied {
             self.overrides.to_save(&self.settings, &self.from_file).save();
-            // The layout only moves panels: a divider mid-drag changes it every frame, and
-            // nothing the display or the image is derived from.
-            self.applied.layout = self.settings.layout.clone();
-            let layout_only = self.settings == self.applied;
+            // Weights alone (a divider mid-drag changes them every frame) change nothing the
+            // display or the images are derived from.
+            let moved_only = self.settings.connections == self.applied.connections
+                && self.settings.layout.panels() == self.applied.layout.panels();
             self.applied = self.settings.clone();
-            if !layout_only {
+            if !moved_only {
                 self.dirty = true;
                 self.image_dirty = true;
             }
         }
         if self.image_dirty {
             self.image_dirty = false;
-            self.draw_image();
+            self.draw_images();
             changed = true;
         }
         if self.dirty {
@@ -492,7 +604,7 @@ impl State {
     /// different URDF; then compares the two.
     fn sync_robot(&mut self) {
         let mut loaded = false;
-        let urdf = self.settings.robot_urdf.trim();
+        let urdf = self.v3().robot.urdf.trim();
         let want = (!urdf.is_empty()).then(|| urdf.to_string());
         if self.robot_file.as_ref().map(|(p, _)| p) != want.as_ref() {
             self.robot_file = want.map(|path| {
@@ -502,7 +614,7 @@ impl State {
             });
             loaded = true;
         }
-        let topic = self.topic(Kind::RobotDescription);
+        let topic = self.description_topic();
         let text = topic.as_ref().and_then(|t| self.received().find_map(|r| r.descriptions.get(t)));
         let current = self.robot_description.as_ref().map(|(t, x, _)| (t, x));
         if current != topic.as_ref().zip(text) {
@@ -535,7 +647,7 @@ impl State {
     /// Expires every connection's poses and trails (`Received::expire`); returns when the next
     /// is due, for the frame clock to wake then.
     fn expire(&mut self, now: f64) -> Option<f64> {
-        let (timeout, trail) = (self.settings.pose_timeout as f64, self.settings.trail as f64);
+        let (timeout, trail) = (self.v3().poses.timeout as f64, self.v3().poses.trail as f64);
         let mut dropped = false;
         let due = self.conns.iter_mut().filter_map(|c| {
             let (gone, next) = c.received.expire(now, timeout, trail);
@@ -546,13 +658,31 @@ impl State {
         due
     }
 
-    /// Draws the annotations into a copy of the shown image, for the image card.
-    fn draw_image(&mut self) {
-        let Some((_, image)) = self.shown_image().filter(|_| self.settings.show_image) else { return };
-        let annotations: Vec<&Annotation> = self.annotations().collect();
-        let mut rgba = image.rgba.clone();
-        annotate::draw(&mut rgba, image.width, image.height, annotations);
-        self.image.set(image.width, image.height, rgba);
+    /// Draws each view's annotations into a copy of its image. Views of the same topic that
+    /// hide the same annotations share one copy; a copy no view shows any more is dropped.
+    fn draw_images(&mut self) {
+        let mut wanted: Vec<(String, BTreeSet<String>)> = Vec::new();
+        for view in self.image_views() {
+            if let Some(key) = self.image_topic(view).map(|t| (t, view.hidden.clone()))
+                && !wanted.contains(&key)
+            {
+                wanted.push(key);
+            }
+        }
+        self.images.retain(|a| wanted.iter().any(|(t, h)| *t == a.topic && *h == a.hidden));
+        for (topic, hidden) in wanted {
+            let Some(image) = self.received().find_map(|r| r.images.get(&topic)).cloned() else { continue };
+            let mut rgba = image.rgba.clone();
+            annotate::draw(&mut rgba, image.width, image.height, self.annotations(&hidden).collect::<Vec<_>>());
+            let i = match self.images.iter().position(|a| a.topic == topic && a.hidden == hidden) {
+                Some(i) => i,
+                None => {
+                    self.images.push(Annotated { topic, hidden, pixels: Pixels::new() });
+                    self.images.len() - 1
+                }
+            };
+            self.images[i].pixels.set(image.width, image.height, rgba);
+        }
     }
 
     /// Frames the camera on the data the first time there is some (see `Framed`).
@@ -587,7 +717,7 @@ impl State {
     }
 
     fn fixed_frame(&self, tf: &TfTree) -> Option<String> {
-        if let Some(f) = &self.settings.fixed_frame {
+        if let Some(f) = &self.v3().fixed_frame {
             return Some(f.clone());
         }
         let data_frame = self.cloud().map(|(_, c)| c.frame_id.clone())
@@ -597,7 +727,7 @@ impl State {
     }
 
     fn derive(&self) -> Display {
-        let s = &self.settings;
+        let s = self.v3();
         let mut tf = TfTree::default();
         self.received().for_each(|r| tf.extend(&r.tf));
         let mut d = Display { fixed: self.fixed_frame(&tf), ..Display::default() };
@@ -605,12 +735,12 @@ impl State {
             d.tf = tf;
             return d;
         };
-        // The shown cloud's and image's errors first: a cloud or image refused or undecodable is
-        // why it isn't drawn. (Joint names the robot lacks go before even those, below.)
-        let shown = [(Kind::PointCloud, s.show_points), (Kind::Image, s.show_image)];
+        // The shown cloud's and image card's errors first: a cloud or image refused or
+        // undecodable is why it isn't drawn. (Joint names the robot lacks go before even those,
+        // below.)
+        let shown = [self.cloud_topic().filter(|_| s.points.show), self.image_card().and_then(|c| self.image_topic(c))];
         let mut problems: Vec<String> = shown.into_iter()
-            .filter(|(_, on)| *on)
-            .filter_map(|(kind, _)| self.topic(kind))
+            .flatten()
             .filter_map(|t| self.error(&t).map(|e| format!("{t}: {e}")))
             .collect();
 
@@ -633,7 +763,7 @@ impl State {
         let axis = s.axis_length;
         // Frame and pose origins, which the bounds always include.
         let mut marks: Vec<Vec3> = Vec::new();
-        if s.show_frames {
+        if s.frames {
             let mut origins = BTreeMap::new();
             for f in tf.frames() {
                 if let Some(p) = tf.lookup(&fixed, &f) {
@@ -641,7 +771,7 @@ impl State {
                     lines.axes(m, axis, 2.5);
                     let o = m.transform_point3(Vec3::ZERO);
                     marks.push(o);
-                    if s.show_labels {
+                    if s.labels {
                         d.labels.push((f.clone(), o));
                     }
                     origins.insert(f, o);
@@ -653,7 +783,7 @@ impl State {
                 }
             }
         }
-        if s.show_poses {
+        if s.poses.show {
             for r in self.received() {
                 for ((topic, _), (_, poses)) in &r.poses {
                     let Some(frame) = tf.lookup(&fixed, &poses.frame_id) else {
@@ -665,7 +795,7 @@ impl State {
                         lines.axes(m, axis * 0.6, 3.0);
                         let o = m.transform_point3(Vec3::ZERO);
                         marks.push(o);
-                        if let (true, Some(l)) = (s.show_labels, &item.label) {
+                        if let (true, Some(l)) = (s.labels, &item.label) {
                             d.labels.push((l.clone(), o));
                         }
                         if let Some(v) = item.velocity {
@@ -743,30 +873,30 @@ impl State {
     }
 
     pub fn view(&self) -> View<'_> {
-        let s = &self.settings;
+        let s = self.v3();
         View {
             camera: self.camera,
             cloud: match (self.cloud(), self.display.cloud_model) {
-                (Some((_, c)), Some(m)) if s.show_points => Some((c, m)),
+                (Some((_, c)), Some(m)) if s.points.show => Some((c, m)),
                 _ => None,
             },
             shade: self.display.shade,
-            point_size: s.point_size,
-            decimate: s.decimate,
-            grid: s.show_grid.then_some(self.display.grid_cell),
+            point_size: s.points.size,
+            decimate: s.points.decimate,
+            grid: s.grid.then_some(self.display.grid_cell),
             radius: self.display.bounds.map_or(2.0, |(_, r)| r),
             lines: &self.display.lines,
             // A robot with nothing drawable (every mesh failed) has no parts to draw.
             robot: self.display.robot.as_ref().zip(self.shown_robot())
                 .filter(|(_, m)| !m.mesh.parts.is_empty())
-                .map(|(p, m)| RobotView { mesh: &m.mesh, links: &p.links, opacity: s.robot_opacity }),
+                .map(|(p, m)| RobotView { mesh: &m.mesh, links: &p.links, opacity: s.robot.opacity }),
         }
     }
 
     /// Points drawn per frame, for the badge.
     pub fn drawn_points(&self) -> usize {
         match self.view().cloud {
-            Some((c, _)) => c.points.len().div_ceil(self.settings.decimate as usize),
+            Some((c, _)) => c.points.len().div_ceil(self.v3().points.decimate as usize),
             None => 0,
         }
     }
@@ -816,25 +946,66 @@ fn bounds(sample: &[Vec3], marks: &[Vec3], axis: f32) -> Option<(Vec3, f32)> {
 mod tests {
     use super::*;
 
-    // `--connect B --urdf cli.urdf --layout camera` for one run: saving keeps the file's servers,
-    // URDF and layout, until the user changes the servers or the layout in the UI, which then
-    // save as changed.
+    fn layout(json: &str) -> Layout {
+        serde_json::from_str(json).unwrap()
+    }
+
+    fn urdf(s: &Settings) -> &str {
+        &s.layout.view3d().unwrap().robot.urdf
+    }
+
+    // `--connect B --urdf cli.urdf --layout camera` for one run: saving keeps the file's servers
+    // and layout, the 3D panel's URDF among its settings, until the user changes the servers or
+    // the layout (any panel's settings included) in the UI, which then save as changed, but
+    // still with the file's URDF.
     #[test]
     fn command_line_values_last_for_the_run_unless_changed() {
-        let mut file = Settings::default();
-        (file.connections, file.robot_urdf) = (vec!["ws://a".into()], "file.urdf".into());
-        let camera = Layout::preset("camera").unwrap();
-        let o = Overrides { connections: Some(vec!["ws://b".into()]), robot_urdf: Some("cli.urdf".into()), layout: Some(camera.clone()) };
-        let mut running = file.clone();
-        (running.connections, running.robot_urdf, running.axis_length, running.layout) = (vec!["ws://b".into()], "cli.urdf".into(), 0.5, camera);
-        let saved = o.to_save(&running, &file);
-        assert_eq!((saved.connections, saved.robot_urdf, saved.axis_length), (file.connections.clone(), file.robot_urdf.clone(), 0.5));
-        assert_eq!(saved.layout, file.layout);
-        running.connections.push("ws://c".into());
-        running.layout.split(&[1], crate::layout::Dir::Column);
-        let saved = o.to_save(&running, &file);
-        assert_eq!((saved.connections, saved.robot_urdf), (running.connections.clone(), file.robot_urdf.clone()));
-        assert_eq!(saved.layout, running.layout);
+        let file = Settings { connections: vec!["ws://a".into()], layout: layout(r#"{"panel": "3d", "robot": {"urdf": "file.urdf"}}"#) };
+        let camera = Layout::named_or_file("camera", &file.layout).unwrap();
+        let o = Overrides { connections: Some(vec!["ws://b".into()]), robot_urdf: Some("cli.urdf".into()), layout: Some(camera) };
+        let post: Post = Arc::new(|_, _| {});
+        let mut s = State::new(file.clone(), o, post);
+        assert_eq!((s.settings.connections.as_slice(), urdf(&s.settings)), (["ws://b".to_string()].as_slice(), "cli.urdf"));
+        assert_eq!(s.overrides.to_save(&s.settings, &file), file, "nothing changed in the UI: the file stays");
+        s.settings.connections.push("ws://c".into());
+        s.edit3d(|v| v.points.size = 4.0);
+        let saved = s.overrides.to_save(&s.settings, &file);
+        assert_eq!(saved.connections, s.settings.connections);
+        assert!(saved.layout.same_tiling(&s.settings.layout), "the command line's layout, as changed");
+        assert_eq!((saved.layout.view3d().unwrap().points.size, urdf(&saved)), (4.0, "file.urdf"));
+        // Without --layout, a URDF override is the only value swapped back.
+        let o = Overrides { robot_urdf: Some("cli.urdf".into()), ..Overrides::default() };
+        let saved = o.to_save(&s.settings, &file);
+        assert_eq!((saved.layout.view3d().unwrap().points.size, urdf(&saved)), (4.0, "file.urdf"));
+    }
+
+    // Each server's topics are subscribed to as some panel shows them: two Image panels' two
+    // topics and the annotations either draws, the Data panel's stats but not its text (off),
+    // the cloud, and not the pose topic the 3D view hides. The 3D view's own image and data
+    // cards add nothing, as the layout has panels for them.
+    #[test]
+    fn subscriptions_are_the_union_of_the_panels_topics() {
+        let settings = Settings {
+            connections: vec!["ws://127.0.0.1:9".into()],
+            layout: layout(r#"{"row": [
+                {"panel": "3d", "poses": {"hidden": ["/pose"]}, "image": {"topic": "/card"}},
+                {"panel": "image", "topic": "/left", "hidden": ["/marks"]},
+                {"panel": "image", "topic": "/right"},
+                {"panel": "data", "text": false}]}"#),
+        };
+        let post: Post = Arc::new(|_, _| {});
+        let mut s = State::new(settings, Overrides::default(), post);
+        s.sync_connections();
+        let channel = |topic: &str, kind| crate::source::Channel { topic: topic.into(), schema: String::new(), encoding: String::new(), kind: Some(kind) };
+        let channels = vec![
+            channel("/cloud", Kind::PointCloud), channel("/pose", Kind::Poses), channel("/card", Kind::Image),
+            channel("/left", Kind::Image), channel("/right", Kind::Image), channel("/marks", Kind::Annotations),
+            channel("/status", Kind::Text), channel("/diag", Kind::Stats),
+        ];
+        s.apply(vec![(s.conns[0].id, Event::Channels(channels))], 0.0);
+        let mut wanted: Vec<String> = s.wanted().topics.into_iter().collect();
+        wanted.sort();
+        assert_eq!(wanted, ["/cloud", "/diag", "/left", "/marks", "/right"]);
     }
 
     // The Med 7's root is `world`; a stack that publishes TF under `map` must keep its TF tree

@@ -20,6 +20,13 @@ Squash-merge PRs. The PR's title becomes its one commit on `main`, so the title 
 format. Release notes are generated from the subjects on `main` (`scripts/release-notes.sh`):
 `feat`, `fix`, `perf`, `docs` and breaking changes are listed, and the other types are left out.
 
+## Compatibility
+
+Until 1.0, don't keep backward compatibility: no migrations for old `settings.json` or layout
+files, no aliases for renamed CLI flags, no shims for old APIs. Change the format and move on.
+Mark a breaking change in its commit subject (`feat!:`) or with a `BREAKING CHANGE:` footer, so
+the release notes list it.
+
 ## Checks
 
 Run what CI runs before pushing:
