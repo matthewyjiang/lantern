@@ -23,7 +23,7 @@ else:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/matthewyjiang/lantern/main/scripts/install.sh \
-    | LANTERN_VERSION=v0.1.0 LANTERN_INSTALL_DIR=/usr/local/bin sh
+    | LANTERN_VERSION=v0.1.0 LANTERN_INSTALL_DIR="$HOME/bin" sh
 ```
 
 The binary needs glibc 2.35 or newer (Ubuntu 22.04, Debian 12) and the run-time libraries in the

@@ -44,13 +44,18 @@ main() {
   done
   (cd "$tmp" && sha256sum -c "$archive.sha256" > /dev/null 2>&1) || fail "$archive doesn't match its SHA-256; nothing was installed"
   tar -xzf "$tmp/$archive" -C "$tmp"
-  mkdir -p "$dir"
-  # Moved into place, so a running lantern keeps its old file.
   chmod 755 "$tmp/lantern"
-  mv "$tmp/lantern" "$dir/lantern"
-
+  mkdir -p "$dir" || fail "can't create $dir"
+  # Next to where it goes, so it's checked where it will run and the last step is one rename:
+  # a lantern already there stays until the new one works, and one that's running keeps its file.
+  new=$dir/.lantern.new
+  mv "$tmp/lantern" "$new" || fail "can't write to $dir. Set LANTERN_INSTALL_DIR to a directory you can write to"
   # The release is built on Ubuntu 22.04, so it needs that glibc (2.35) or a newer one.
-  version=$("$dir/lantern" --version) || fail "installed $dir/lantern, but it doesn't run here. It needs glibc 2.35 or newer (Ubuntu 22.04, Debian 12). Build from source: $docs"
+  version=$("$new" --version) || {
+    rm -f "$new"
+    fail "the release binary doesn't run here; nothing was installed. It needs glibc 2.35 or newer (Ubuntu 22.04, Debian 12). Build from source: $docs"
+  }
+  mv "$new" "$dir/lantern"
   echo "Installed $version to $dir/lantern"
   case ":$PATH:" in
     *":$dir:"*) ;;

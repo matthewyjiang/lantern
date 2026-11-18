@@ -16,9 +16,9 @@ Write commit subjects and PR titles as [Conventional Commits](https://www.conven
 | `refactor`, `test`, `style` | Code changes with no change in behaviour |
 | `ci`, `build`, `chore` | Workflows, dependencies, housekeeping |
 
-A squash-merged PR's title becomes its commit on `main`, so the title follows the same format.
-Release notes are generated from these subjects (`scripts/release-notes.sh`): `feat`, `fix`,
-`perf`, `docs` and breaking changes are listed, and the other types are left out.
+Squash-merge PRs. The PR's title becomes its one commit on `main`, so the title follows the same
+format. Release notes are generated from the subjects on `main` (`scripts/release-notes.sh`):
+`feat`, `fix`, `perf`, `docs` and breaking changes are listed, and the other types are left out.
 
 ## Checks
 
