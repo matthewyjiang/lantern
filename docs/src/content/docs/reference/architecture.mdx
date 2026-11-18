@@ -1,6 +1,6 @@
 ---
 title: Architecture and extending
-description: How data flows through Lantern, which file owns what, and how to add a message type or a new source.
+description: How data flows through Lantern, which file owns what, and how to add a message type, a panel type or a new source.
 ---
 
 import { Aside, Steps } from '@astrojs/starlight/components';
@@ -20,8 +20,9 @@ screen, and each step has one owner.
   else queues in arrival order, because order matters for TF.
 - **App state.** Applies each connection's events, merges their TF trees, loads the robot, and
   derives what to draw: the fixed frame, lines, labels, bounds, link poses and the image card.
-- **Viewport and UI.** A Rune compositor draws the 3D pass offscreen into a slot in the UI, then
-  the side panel and Settings page draw around it.
+- **Viewport and UI.** The UI tiles the panels of the layout. A Rune compositor draws the 3D pass
+  offscreen into the 3D panel's slot, then the other panels, the side panel and the Settings page
+  draw around it.
 
 ## Files
 
@@ -35,7 +36,9 @@ screen, and each step has one owner.
 | `src/annotate.rs` | Draws image annotations into the image on the CPU |
 | `src/robot/` | URDF parsing and forward kinematics (`urdf.rs`), STL and primitive meshes with smoothed normals (`mesh.rs`), loading and mesh path resolution (`mod.rs`) |
 | `src/settings.rs` | Persisted settings |
-| `src/ui.rs` | Side panel, Settings page, viewport overlays (status chip, image, text and stats cards) |
+| `src/layout.rs` | The panel layout: the tree of panels, rows and columns, its file format and checks, the edits (split, close, show, move a divider), presets |
+| `src/panels.rs` | Draws the layout: the tiled panels, the dividers, each panel's layout controls, and the Image, Data and Topics panels |
+| `src/ui.rs` | The 3D panel with its overlays (status chip, image, text and stats cards), side panel, Settings page |
 | `src/camera.rs` | Orbit camera (REP 103, z up), reversed infinite depth |
 | `src/viewport.rs` | Rune `Compositor`: offscreen 3D pass blitted into an `El::effect` slot, GPU timer |
 | `src/viewport.wgsl` | Sky and grid, points (vertex-pulled quads), robot (lit meshes), lines, blit |
@@ -87,6 +90,46 @@ source subscribes to it like any other pose topic.
 A message that needs a new kind of drawing (a marker array, say) needs more: a `Decoded`
 variant and `Kind`, a scene type in `src/scene.rs`, state in `src/connection.rs` and
 `src/app.rs`, and drawing in the viewport or the UI.
+
+## Add a panel type
+
+A panel is a variant of `PanelKind` and a function that draws it from app state. For example, a
+panel that lists the joint positions:
+
+<Steps>
+
+1. Add the variant in `src/layout.rs`, with its name in a layout file (`id`), its label, and
+   its entry in `ALL`. The compiler asks for the first two; `ALL` is the one to remember, and
+   it's what puts the panel in the layout controls and the file format.
+
+   ```rust title="src/layout.rs" ins={4}
+   pub enum PanelKind {
+       View3d,
+       // ...
+       Joints,
+   }
+   ```
+
+2. Draw it in `src/panels.rs`, and add its arm to `body`. A body fills its card; `key` is the
+   panel's own, to prefix the keys of what's inside, because a layout can hold the panel twice.
+
+   ```rust title="src/panels.rs"
+   fn joints(s: &State, key: &str) -> El {
+       let Some((_, positions)) = s.joints() else { return empty("No joint states yet".into()) };
+       let mut names: Vec<_> = positions.iter().collect();
+       names.sort_by_key(|(name, _)| *name);
+       let rows = names.into_iter().map(|(name, at)| text(format!("{name}  {at:.3}")).font(MONO_SMALL));
+       scrolling(format!("{key}-scroll")).child(col().padding(12.0).gap(4.0).children(rows))
+   }
+   ```
+
+3. If the panel needs data that nothing else asks for, add its topics in `State::wanted`
+   (`src/app.rs`): sources only deliver what's wanted.
+
+</Steps>
+
+The panel now shows in every panel's layout controls, and `{"panel": "joints"}` works in a layout
+file.
 
 ## Add a source
 
@@ -165,7 +208,8 @@ scripts/bench.sh 3             # timing table → out/bench.tsv, raw logs in out
     scripts/snap-live.sh out/robot "--cloud table --robot-pose reach" - settings
   ```
 
-- **Scenes** (`--scene`) are `top`, `height`, `intensity` and `settings`, plus the timing scenes
-  `no-points`, `half`, `quarter`, `size-1` and `size-4`. Scenes don't save settings.
+- **Scenes** (`--scene`) are `top`, `height`, `intensity`, `settings` and `edit-layout`, plus the
+  timing scenes `no-points`, `half`, `quarter`, `size-1` and `size-4`. Scenes don't save settings.
+  Lantern's own flags work headless too: `"-:--layout dashboard"` snaps the dashboard preset.
 
 Most screenshots on this site come from `snap-live.sh`.

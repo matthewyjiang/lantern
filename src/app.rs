@@ -16,6 +16,7 @@ use crate::annotate;
 use crate::camera::OrbitCamera;
 use crate::connection::{Connection, Picked, Post, Received};
 use crate::decode::Kind;
+use crate::layout::Layout;
 use crate::robot::{self, Model};
 use crate::scene::{percentiles, Annotation, Diagnostic, Image, PointCloud, PointColor, Pose, TfTree};
 use crate::settings::Settings;
@@ -61,6 +62,12 @@ pub struct State {
     pub urdf_edit: TextEdit,
     /// Pointer travel already applied by the drag in progress.
     pub drag_seen: (f32, f32),
+    /// Every panel shows its layout controls (what it shows, split, close).
+    pub layout_edit: bool,
+    /// The Settings field for a layout file to load or save.
+    pub layout_file_edit: TextEdit,
+    /// How the last layout file load or save went.
+    pub layout_file_note: Option<Result<String, String>>,
 }
 
 /// The URDF file and the described robot differ: how, and which is drawn.
@@ -78,6 +85,7 @@ struct Mismatch {
 pub struct Overrides {
     pub connections: Option<Vec<String>>,
     pub robot_urdf: Option<String>,
+    pub layout: Option<Layout>,
 }
 
 impl Overrides {
@@ -90,6 +98,9 @@ impl Overrides {
         }
         if self.robot_urdf.as_ref() == Some(&s.robot_urdf) {
             s.robot_urdf = file.robot_urdf.clone();
+        }
+        if self.layout.as_ref() == Some(&s.layout) {
+            s.layout = file.layout.clone();
         }
         s
     }
@@ -167,6 +178,9 @@ impl State {
         if let Some(u) = &overrides.robot_urdf {
             settings.robot_urdf = u.clone();
         }
+        if let Some(l) = &overrides.layout {
+            settings.layout = l.clone();
+        }
         State {
             conns: Vec::new(),
             next_conn: 0,
@@ -190,6 +204,9 @@ impl State {
             frame_with: State::home_view,
             settings_open: false,
             drag_seen: (0.0, 0.0),
+            layout_edit: false,
+            layout_file_edit: TextEdit::new(String::new()),
+            layout_file_note: None,
         }
     }
 
@@ -332,6 +349,27 @@ impl State {
         self.robot_file = None;
     }
 
+    /// Replaces the layout with the preset or layout file named in the Settings field.
+    pub fn load_layout(&mut self) {
+        let value = self.layout_file_edit.text.trim().to_string();
+        if value.is_empty() {
+            return;
+        }
+        self.layout_file_note = Some(Layout::named_or_file(&value).map(|layout| {
+            self.settings.layout = layout;
+            format!("Loaded {value}")
+        }));
+    }
+
+    /// Writes the layout to the file named in the Settings field.
+    pub fn save_layout(&mut self) {
+        let path = self.layout_file_edit.text.trim().to_string();
+        if path.is_empty() {
+            return;
+        }
+        self.layout_file_note = Some(self.settings.layout.save(Path::new(&path)).map(|()| format!("Saved {path}")));
+    }
+
     fn wanted(&self) -> Wanted {
         let s = &self.settings;
         let mut topics: HashSet<String> = self.topics_of(Kind::Transforms).into_iter().collect();
@@ -395,9 +433,15 @@ impl State {
         self.conns.iter_mut().for_each(|c| c.want(&wanted));
         if self.settings != self.applied {
             self.overrides.to_save(&self.settings, &self.from_file).save();
+            // The layout only moves panels: a divider mid-drag changes it every frame, and
+            // nothing the display or the image is derived from.
+            self.applied.layout = self.settings.layout.clone();
+            let layout_only = self.settings == self.applied;
             self.applied = self.settings.clone();
-            self.dirty = true;
-            self.image_dirty = true;
+            if !layout_only {
+                self.dirty = true;
+                self.image_dirty = true;
+            }
         }
         if self.image_dirty {
             self.image_dirty = false;
@@ -772,20 +816,25 @@ fn bounds(sample: &[Vec3], marks: &[Vec3], axis: f32) -> Option<(Vec3, f32)> {
 mod tests {
     use super::*;
 
-    // `--connect B --urdf cli.urdf` for one run: saving keeps the file's servers and URDF, until
-    // the user changes the servers in the UI, which then save as changed.
+    // `--connect B --urdf cli.urdf --layout camera` for one run: saving keeps the file's servers,
+    // URDF and layout, until the user changes the servers or the layout in the UI, which then
+    // save as changed.
     #[test]
     fn command_line_values_last_for_the_run_unless_changed() {
         let mut file = Settings::default();
         (file.connections, file.robot_urdf) = (vec!["ws://a".into()], "file.urdf".into());
-        let o = Overrides { connections: Some(vec!["ws://b".into()]), robot_urdf: Some("cli.urdf".into()) };
+        let camera = Layout::preset("camera").unwrap();
+        let o = Overrides { connections: Some(vec!["ws://b".into()]), robot_urdf: Some("cli.urdf".into()), layout: Some(camera.clone()) };
         let mut running = file.clone();
-        (running.connections, running.robot_urdf, running.axis_length) = (vec!["ws://b".into()], "cli.urdf".into(), 0.5);
+        (running.connections, running.robot_urdf, running.axis_length, running.layout) = (vec!["ws://b".into()], "cli.urdf".into(), 0.5, camera);
         let saved = o.to_save(&running, &file);
         assert_eq!((saved.connections, saved.robot_urdf, saved.axis_length), (file.connections.clone(), file.robot_urdf.clone(), 0.5));
+        assert_eq!(saved.layout, file.layout);
         running.connections.push("ws://c".into());
+        running.layout.split(&[1], crate::layout::Dir::Column);
         let saved = o.to_save(&running, &file);
         assert_eq!((saved.connections, saved.robot_urdf), (running.connections.clone(), file.robot_urdf.clone()));
+        assert_eq!(saved.layout, running.layout);
     }
 
     // The Med 7's root is `world`; a stack that publishes TF under `map` must keep its TF tree
