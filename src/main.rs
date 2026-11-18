@@ -129,7 +129,7 @@ fn main() {
             // The 3D panel's settings, over it.
             ("panel-settings", |s| {
                 if let Some(path) = s.settings.layout.find(layout::PanelKind::View3d) {
-                    s.open_panel_settings(path);
+                    s.toggle_panel_settings(path);
                 }
             }),
             // For timing: the same frame without the points, with half / a quarter of them.

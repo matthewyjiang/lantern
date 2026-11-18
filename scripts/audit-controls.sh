@@ -45,14 +45,15 @@ tap() { echo "[$(ev 1.5 "$1")]"; }
 open='{"t": 0.5, "type": "tap", "key": "open-settings"}'
 # The Settings page, scrolled to its end (the Layout section): taps land only on what's on screen.
 send() { echo "[$open, {\"t\": 1.0, \"type\": \"wheel\", \"x\": 1060, \"y\": 400, \"dx\": 0, \"dy\": -2000}, $(ev 1.5 "$1")]"; }
-# The 3D view's settings, open over the viewport's right part (380 pt wide, from its settings
-# button): checks compare the viewport left of them. `pwtap DY KEY` scrolls them by DY pt first
-# (the tap waits for the scroll to settle), after the events in $PRE if set; `pwclose DY KEY`
-# then closes them with Escape, for controls of what they cover.
+# The 3D view's settings, open over the viewport's right part (from x 1010 px, beside its
+# settings button): checks compare the viewport left of them. `ptab TAB KEY [KEY]` opens them
+# (after the events in $PRE if set), picks tab TAB (0 Scene, 1 Points, 2 Poses, 3 Robot,
+# 4 Cards) and taps the keys in turn (a picker, then its option); `pclose` then closes them
+# with Escape, for controls of what they cover.
 popen='{"t": 0.5, "type": "tap", "key": "panel-settings"}'
-crop_pop=1160x1560+20+20
-pwtap() { echo "[${PRE:+$PRE, }$popen, {\"t\": 1.0, \"type\": \"wheel\", \"x\": 780, \"y\": 400, \"dx\": 0, \"dy\": $1}, $(ev 2.0 "$2")]"; }
-pwclose() { local e; e=$(pwtap "$@"); echo "${e%]}, {\"t\": 2.4, \"type\": \"key\", \"name\": \"Escape\"}]"; }
+crop_pop=980x1560+20+20
+ptab() { echo "[${PRE:+$PRE, }$popen, $(ev 0.9 "tab-$1")${2:+, $(ev 1.3 "$2")}${3:+, $(ev 1.7 "$3")}]"; }
+pclose() { local e; e=$(ptab "$@"); echo "${e%]}, {\"t\": 2.1, \"type\": \"key\", \"name\": \"Escape\"}, {\"t\": 2.2, \"type\": \"move\", \"x\": 400, \"y\": 600}]"; }
 drag='{"t": 1.5, "type": "drag", "x": 400, "y": 330, "dx": 160, "dy": 40, "dur": 0.4}'
 
 snap base '[]'
@@ -81,24 +82,25 @@ side shift-drag-pan   changes "[{\"t\": 1.45, \"hold\": \"shift\"}, $drag, {\"t\
 side middle-drag-pan  changes '[{"t": 1.5, "type": "drag", "button": "middle", "x": 400, "y": 330, "dx": 160, "dy": 40, "dur": 0.4}]'
 side wheel-zoom       changes '[{"t": 1.5, "type": "wheel", "x": 400, "y": 330, "dx": 0, "dy": 120}]'
 side settings-done    same    "[$open, $(ev 1.5 close-settings)]"
-# The 3D view's settings, top to bottom. Topics sort by name: /markers, /objects are the poses.
-pset fixed-frame      changes "$(pwtap 0 frame-1)"
-for k in grid-full frames-full labels axis-0 points-full color-full-1; do
-  pset "$k"           changes "$(pwtap 0 $k)"
+# The 3D view's settings, tab by tab. Topics sort by name: /markers, /objects are the poses.
+pset fixed-frame      changes "$(ptab 0 fixed-frame frame-1)"
+for k in grid-full frames-full labels axis-0; do
+  pset "$k"           changes "$(ptab 0 $k)"
 done
-pset size-full        changes "$(pwtap -600 size-full-3)"
-pset density-full     changes "$(pwtap -600 decimate-full-2)"
-pset poses-full       changes "$(pwtap -600 poses-full)"
-pset pose-markers     changes "$(pwtap -600 pose-0)"
-pset pose-objects     changes "$(pwtap -600 pose-1)"
+for k in points-full color-full-1 size-full-3 decimate-full-2; do
+  pset "$k"           changes "$(ptab 1 $k)"
+done
+for k in poses-full pose-0 pose-1; do
+  pset "$k"           changes "$(ptab 2 $k)"
+done
 # The cards (no Image or Data panel in the layout) are under the settings: each is checked once
 # they're closed.
 for k in show-image-card card-annotation-0 card-text card-text-topic-0 card-stats card-stats-topic-0; do
-  side "$k"           changes "$(pwclose -4000 $k)"
+  side "$k"           changes "$(pclose 4 $k)"
 done
-# Done, Escape and a press outside close them, landing back on the baseline.
-side panel-done       same    "[$popen, $(ev 1.5 close-panel-settings)]"
-# (After Escape the pointer is still over the settings button: moved off, it isn't lit.)
+# Its button again, Escape and a press outside close them, landing back on the baseline (the
+# pointer moved off the button, so it isn't lit by hover).
+side panel-toggle     same    "[$popen, $(ev 1.5 panel-settings), {\"t\": 1.6, \"type\": \"move\", \"x\": 400, \"y\": 600}]"
 side panel-escape     same    "[$popen, {\"t\": 1.5, \"type\": \"key\", \"name\": \"Escape\"}, {\"t\": 1.6, \"type\": \"move\", \"x\": 400, \"y\": 600}]"
 side panel-outside    same    "[$popen, {\"t\": 1.5, \"type\": \"tap\", \"x\": 1100, \"y\": 700}]"
 # The wheel over the page's side margins (x 850 and 1270 pt) scrolls the page, once it has
@@ -147,14 +149,14 @@ rside robot-opacity   changes "$(tap robot-opacity-2)"
 # In the 3D view's settings the robot would be under them: a middle-button pan first moves the
 # scene left of them.
 pan='{"t": 0.2, "type": "drag", "button": "middle", "x": 400, "y": 330, "dx": -300, "dy": 0, "dur": 0.2}'
-snap panel-robot "[$pan, $popen]" "$robot"
+snap panel-robot "$(PRE=$pan ptab 3)" "$robot"
 rpset() { check panel-robot "$crop_pop" "$@" "$robot"; }
-rpset robot-full         changes "$(PRE=$pan pwtap -1200 robot-full)"
-rpset robot-opacity-full changes "$(PRE=$pan pwtap -1200 robot-opacity-full-3)"
+rpset robot-full         changes "$(PRE=$pan ptab 3 robot-full)"
+rpset robot-opacity-full changes "$(PRE=$pan ptab 3 robot-opacity-full-3)"
 # Picking the topic Auto already uses keeps the pose: switching must not drop received joints.
-rpset joints-explicit same    "$(PRE=$pan pwtap -1200 joints-1)"
+rpset joints-explicit same    "$(PRE=$pan ptab 3 joint-topic joints-1)"
 # Typing the path and pressing Enter loads the robot (from no robot, so the arm appears).
 # Typing runs at about 30 characters a second: Enter waits for the whole path.
-snap panel-pan "[$pan, $popen]"
-at=5 check panel-pan "$crop_pop" urdf-enter changes "[$pan, $popen, {\"t\": 0.6, \"type\": \"wheel\", \"x\": 780, \"y\": 400, \"dx\": 0, \"dy\": -600}, $(ev 1.0 urdf), {\"t\": 1.1, \"type\": \"type\", \"text\": \"$PWD/fixtures/med7/med7.urdf\"}, {\"t\": 3.5, \"type\": \"key\", \"name\": \"Enter\"}]"
+snap panel-pan "$(PRE=$pan ptab 3)"
+at=5 check panel-pan "$crop_pop" urdf-enter changes "$(e=$(PRE=$pan ptab 3 urdf); echo "${e%]}, {\"t\": 1.4, \"type\": \"type\", \"text\": \"$PWD/fixtures/med7/med7.urdf\"}, {\"t\": 3.8, \"type\": \"key\", \"name\": \"Enter\"}]")"
 exit $fail

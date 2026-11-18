@@ -23,6 +23,30 @@ use crate::settings::{DataSettings, ImageSettings, Settings, View3dSettings};
 use crate::source::{Event, Wanted};
 use crate::viewport::{self, Lines, RobotView, Shade, View};
 
+/// The tabs of the 3D view's settings.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Tab3d {
+    Scene,
+    Points,
+    Poses,
+    Robot,
+    Cards,
+}
+
+impl Tab3d {
+    pub const ALL: [Tab3d; 5] = [Tab3d::Scene, Tab3d::Points, Tab3d::Poses, Tab3d::Robot, Tab3d::Cards];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Tab3d::Scene => "Scene",
+            Tab3d::Points => "Points",
+            Tab3d::Poses => "Poses",
+            Tab3d::Robot => "Robot",
+            Tab3d::Cards => "Cards",
+        }
+    }
+}
+
 pub struct State {
     pub settings: Settings,
     /// Settings as last saved and applied.
@@ -47,9 +71,9 @@ pub struct State {
     robot_mismatch: Option<Mismatch>,
     /// Joint positions changed: `sync` re-poses the robot without rebuilding the display.
     robot_dirty: bool,
-    /// Each shown image with its annotations drawn in, and whether a new image or annotation
-    /// arrived since they were drawn.
-    images: Vec<Annotated>,
+    /// Each shown image with its annotations drawn in, by its topic and the annotation topics
+    /// its views hide, and whether a new image or annotation arrived since they were drawn.
+    images: BTreeMap<(String, BTreeSet<String>), Pixels>,
     image_dirty: bool,
 
     pub camera: OrbitCamera,
@@ -59,6 +83,10 @@ pub struct State {
     pub settings_open: bool,
     /// The panel whose settings are open over it, by its path in the layout.
     pub panel_settings: Option<Vec<usize>>,
+    /// The 3D view's settings tab on show.
+    pub tab_3d: Tab3d,
+    /// The picker in the open settings whose options are listed, by its key.
+    pub open_picker: Option<String>,
     /// The Settings field for a server to add.
     pub url_edit: TextEdit,
     pub urdf_edit: TextEdit,
@@ -70,13 +98,6 @@ pub struct State {
     pub layout_file_edit: TextEdit,
     /// How the last layout file load or save went.
     pub layout_file_note: Option<Result<String, String>>,
-}
-
-/// An image topic with the annotations a panel draws over it (all but its hidden ones).
-struct Annotated {
-    topic: String,
-    hidden: BTreeSet<String>,
-    pixels: Pixels,
 }
 
 /// The 3D view's settings when the layout has no 3D panel: nothing on, so nothing 3D is
@@ -101,25 +122,33 @@ pub struct Overrides {
     pub robot_urdf: Option<String>,
     /// The layout, as the command line made it (`State::new` puts `robot_urdf` in it).
     pub layout: Option<Layout>,
+    /// The URDF `robot_urdf` replaced (`State::new` sets it).
+    replaced_urdf: String,
 }
 
 impl Overrides {
     /// What to write to the settings file: `settings`, with command-line values the user hasn't
-    /// changed since swapped back for `file`'s. The layout carries its panels' settings, so a
-    /// change to any of them saves the command line's layout with that change (still without
-    /// its `--urdf`).
+    /// changed since swapped back for `file`'s. While the tiling is still the command line's,
+    /// the file's layout stays, with the panels the user changed; once the tiling is edited, the
+    /// layout saves as edited. Either way the 3D panel keeps the URDF `--urdf` replaced, unless
+    /// another was loaded.
     fn to_save(&self, settings: &Settings, file: &Settings) -> Settings {
         let mut s = settings.clone();
         if self.connections.as_ref() == Some(&s.connections) {
             s.connections = file.connections.clone();
         }
-        if self.layout.as_ref() == Some(&s.layout) {
-            s.layout = file.layout.clone();
-        } else if let Some(urdf) = &self.robot_urdf
+        if let Some(cli) = &self.layout
+            && s.layout.same_tiling(cli)
+        {
+            let mut layout = file.layout.clone();
+            layout.adopt_changes(cli, &s.layout);
+            s.layout = layout;
+        }
+        if let Some(urdf) = &self.robot_urdf
             && let Some(v) = s.layout.view3d_mut()
             && v.robot.urdf == *urdf
         {
-            v.robot.urdf = file.layout.view3d().map(|f| f.robot.urdf.clone()).unwrap_or_default();
+            v.robot.urdf = self.replaced_urdf.clone();
         }
         s
     }
@@ -197,20 +226,20 @@ impl State {
         if let Some(l) = &overrides.layout {
             settings.layout = l.clone();
         }
+        let mut replaced_urdf = String::new();
         if let Some(u) = &overrides.robot_urdf {
             match settings.layout.view3d_mut() {
-                Some(v) => v.robot.urdf = u.clone(),
+                Some(v) => replaced_urdf = std::mem::replace(&mut v.robot.urdf, u.clone()),
                 None => eprintln!("lantern: --urdf: the layout has no 3D panel to draw the robot in"),
             }
         }
-        let overrides = Overrides { layout: overrides.layout.as_ref().map(|_| settings.layout.clone()), ..overrides };
-        let urdf = settings.layout.view3d().map(|v| v.robot.urdf.clone()).unwrap_or_default();
+        let overrides = Overrides { layout: overrides.layout.as_ref().map(|_| settings.layout.clone()), replaced_urdf, ..overrides };
         State {
             conns: Vec::new(),
             next_conn: 0,
             post,
             url_edit: TextEdit::new(String::new()),
-            urdf_edit: TextEdit::new(urdf),
+            urdf_edit: TextEdit::new(String::new()),
             applied: settings.clone(),
             settings,
             overrides,
@@ -221,13 +250,15 @@ impl State {
             robot_description: None,
             robot_mismatch: None,
             robot_dirty: false,
-            images: Vec::new(),
+            images: BTreeMap::new(),
             image_dirty: false,
             camera: OrbitCamera::default(),
             framed: Framed::Nothing,
             frame_with: State::home_view,
             settings_open: false,
             panel_settings: None,
+            tab_3d: Tab3d::Scene,
+            open_picker: None,
             drag_seen: (0.0, 0.0),
             layout_edit: false,
             layout_file_edit: TextEdit::new(String::new()),
@@ -256,8 +287,13 @@ impl State {
     }
 
     /// Opens the settings of the panel at `path` over it, its URDF field (for a 3D panel)
-    /// showing what it has.
-    pub fn open_panel_settings(&mut self, path: Vec<usize>) {
+    /// showing what it has, or closes them if they're open.
+    pub fn toggle_panel_settings(&mut self, path: Vec<usize>) {
+        self.open_picker = None;
+        if self.panel_settings.as_ref() == Some(&path) {
+            self.panel_settings = None;
+            return;
+        }
         if let Some(Panel::View3d(v)) = self.settings.layout.panel(&path) {
             self.urdf_edit = TextEdit::new(v.robot.urdf.clone());
         }
@@ -267,15 +303,20 @@ impl State {
     /// The 3D view's image card's settings, when it's drawn: the layout has a 3D panel and no
     /// Image panel, and the card is on.
     pub fn image_card(&self) -> Option<&ImageSettings> {
-        let l = &self.settings.layout;
-        l.view3d().filter(|v| v.image_card && !l.has(PanelKind::Image)).map(|v| &v.image)
+        self.card_for(PanelKind::Image).filter(|v| v.image_card).map(|v| &v.image)
     }
 
     /// The 3D view's text and stats cards' settings, when the layout has a 3D panel and no Data
     /// panel.
     pub fn data_cards(&self) -> Option<&DataSettings> {
+        self.card_for(PanelKind::Data).map(|v| &v.data)
+    }
+
+    /// The 3D view's settings, when it stands in for a `kind` panel with its cards: the layout
+    /// has a 3D panel and no `kind` panel.
+    pub fn card_for(&self, kind: PanelKind) -> Option<&View3dSettings> {
         let l = &self.settings.layout;
-        l.view3d().filter(|_| !l.has(PanelKind::Data)).map(|v| &v.data)
+        l.view3d().filter(|_| !l.has(kind))
     }
 
     /// Every image shown: each Image panel's, and the 3D view's card.
@@ -393,8 +434,7 @@ impl State {
 
     /// The image a view shows with its annotations drawn in, once drawn.
     pub fn pixels(&self, view: &ImageSettings) -> Option<&Pixels> {
-        let topic = self.image_topic(view)?;
-        self.images.iter().find(|a| a.topic == topic && a.hidden == view.hidden).map(|a| &a.pixels)
+        self.images.get(&(self.image_topic(view)?, view.hidden.clone()))
     }
 
     /// The error a topic last reported, on any connection.
@@ -545,8 +585,8 @@ impl State {
         self.conns.iter_mut().for_each(|c| c.want(&wanted));
         if self.settings != self.applied {
             self.overrides.to_save(&self.settings, &self.from_file).save();
-            // Weights alone (a divider mid-drag changes them every frame) change nothing the
-            // display or the images are derived from.
+            // Only the tiling changed (a divider mid-drag moves it every frame): the servers and
+            // panels, which the display and the images are derived from, are the same.
             let moved_only = self.settings.connections == self.applied.connections
                 && self.settings.layout.panels() == self.applied.layout.panels();
             self.applied = self.settings.clone();
@@ -661,27 +701,14 @@ impl State {
     /// Draws each view's annotations into a copy of its image. Views of the same topic that
     /// hide the same annotations share one copy; a copy no view shows any more is dropped.
     fn draw_images(&mut self) {
-        let mut wanted: Vec<(String, BTreeSet<String>)> = Vec::new();
-        for view in self.image_views() {
-            if let Some(key) = self.image_topic(view).map(|t| (t, view.hidden.clone()))
-                && !wanted.contains(&key)
-            {
-                wanted.push(key);
-            }
-        }
-        self.images.retain(|a| wanted.iter().any(|(t, h)| *t == a.topic && *h == a.hidden));
-        for (topic, hidden) in wanted {
-            let Some(image) = self.received().find_map(|r| r.images.get(&topic)).cloned() else { continue };
+        let wanted: BTreeSet<(String, BTreeSet<String>)> =
+            self.image_views().into_iter().filter_map(|view| Some((self.image_topic(view)?, view.hidden.clone()))).collect();
+        self.images.retain(|key, _| wanted.contains(key));
+        for key in wanted {
+            let Some(image) = self.received().find_map(|r| r.images.get(&key.0)).cloned() else { continue };
             let mut rgba = image.rgba.clone();
-            annotate::draw(&mut rgba, image.width, image.height, self.annotations(&hidden).collect::<Vec<_>>());
-            let i = match self.images.iter().position(|a| a.topic == topic && a.hidden == hidden) {
-                Some(i) => i,
-                None => {
-                    self.images.push(Annotated { topic, hidden, pixels: Pixels::new() });
-                    self.images.len() - 1
-                }
-            };
-            self.images[i].pixels.set(image.width, image.height, rgba);
+            annotate::draw(&mut rgba, image.width, image.height, self.annotations(&key.1).collect::<Vec<_>>());
+            self.images.entry(key).or_default().set(image.width, image.height, rgba);
         }
     }
 
@@ -960,23 +987,38 @@ mod tests {
     // still with the file's URDF.
     #[test]
     fn command_line_values_last_for_the_run_unless_changed() {
-        let file = Settings { connections: vec!["ws://a".into()], layout: layout(r#"{"panel": "3d", "robot": {"urdf": "file.urdf"}}"#) };
+        let file = Settings { connections: vec!["ws://a".into()], layout: layout(r#"{"row": [{"panel": "3d", "robot": {"urdf": "file.urdf"}}, {"panel": "data"}]}"#) };
         let camera = Layout::named_or_file("camera", &file.layout).unwrap();
-        let o = Overrides { connections: Some(vec!["ws://b".into()]), robot_urdf: Some("cli.urdf".into()), layout: Some(camera) };
+        let o = Overrides { connections: Some(vec!["ws://b".into()]), robot_urdf: Some("cli.urdf".into()), layout: Some(camera), ..Overrides::default() };
         let post: Post = Arc::new(|_, _| {});
         let mut s = State::new(file.clone(), o, post);
         assert_eq!((s.settings.connections.as_slice(), urdf(&s.settings)), (["ws://b".to_string()].as_slice(), "cli.urdf"));
         assert_eq!(s.overrides.to_save(&s.settings, &file), file, "nothing changed in the UI: the file stays");
+        // A panel setting changed: the file's tiling, with the change.
         s.settings.connections.push("ws://c".into());
         s.edit3d(|v| v.points.size = 4.0);
         let saved = s.overrides.to_save(&s.settings, &file);
         assert_eq!(saved.connections, s.settings.connections);
-        assert!(saved.layout.same_tiling(&s.settings.layout), "the command line's layout, as changed");
+        assert!(saved.layout.same_tiling(&file.layout), "the file's tiling");
         assert_eq!((saved.layout.view3d().unwrap().points.size, urdf(&saved)), (4.0, "file.urdf"));
-        // Without --layout, a URDF override is the only value swapped back.
-        let o = Overrides { robot_urdf: Some("cli.urdf".into()), ..Overrides::default() };
-        let saved = o.to_save(&s.settings, &file);
+        // The tiling edited: the layout as edited, still with the URDF --urdf replaced.
+        s.settings.layout.close(&[1]);
+        let saved = s.overrides.to_save(&s.settings, &file);
+        assert_eq!(saved.layout.panels().len(), 1);
         assert_eq!((saved.layout.view3d().unwrap().points.size, urdf(&saved)), (4.0, "file.urdf"));
+    }
+
+    // A --layout file's own URDF is what --urdf replaced, and what saves.
+    #[test]
+    fn urdf_override_saves_back_the_layout_files_urdf() {
+        let file = Settings::default();
+        let arm = layout(r#"{"panel": "3d", "robot": {"urdf": "arm.urdf"}}"#);
+        let o = Overrides { robot_urdf: Some("cli.urdf".into()), layout: Some(arm), ..Overrides::default() };
+        let post: Post = Arc::new(|_, _| {});
+        let mut s = State::new(file.clone(), o, post);
+        s.edit3d(|v| v.grid = false);
+        s.settings.layout.split(&[], crate::layout::Dir::Row);
+        assert_eq!(urdf(&s.overrides.to_save(&s.settings, &file)), "arm.urdf");
     }
 
     // Each server's topics are subscribed to as some panel shows them: two Image panels' two

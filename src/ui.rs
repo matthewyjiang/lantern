@@ -12,10 +12,10 @@ use rune::tok::{self, TextStyle, motion, type_};
 use rune::color::srgb_decode;
 use rune::{Align, Color, Cx, Drag, El, Phase, PointerButton, ScrollSpec, Side, Tx, WheelEvent, col, effect, el, icon, oklch, oklcha, row, text, text_input};
 
-use crate::app::State;
+use crate::app::{State, Tab3d};
 use crate::connection::Connection;
 use crate::decode::{ColorChoice, Kind};
-use crate::layout::{Panel, PanelKind, Preset, PRESETS};
+use crate::layout::{Layout, Panel, PanelKind, Preset, PRESETS};
 use crate::panels;
 use crate::scene::{Annotation, Diagnostic, Image, Level, PointColor};
 use crate::settings::{DataSettings, ImageSettings, View3dSettings};
@@ -25,7 +25,7 @@ use crate::viewport::{self, Shade};
 const SIDEBAR_W: f32 = 296.0;
 const SETTINGS_W: f32 = 440.0;
 /// A panel's settings, over the window beside its settings button.
-const PANEL_SETTINGS_W: f32 = 380.0;
+const PANEL_SETTINGS_W: f32 = 340.0;
 /// The Settings page's side margin. Inside its scroll area, so the wheel scrolls the page over
 /// the margins too.
 const SETTINGS_PAD: f32 = 22.0;
@@ -424,9 +424,9 @@ fn sidebar(s: &State) -> El {
         .child(toggle_row("points", "Point cloud", v.points.show, |s| s.edit3d(|v| v.points.show ^= true)))
         .child(toggle_row("frames", "TF frames", v.frames, |s| s.edit3d(|v| v.frames ^= true)))
         .child(toggle_row("poses", "Poses", v.poses.show, |s| s.edit3d(|v| v.poses.show ^= true)))
-        .children(offered(Kind::Image, !s.settings.layout.has(PanelKind::Image)).then(|| toggle_row("image", "Camera image", v.image_card, |s| s.edit3d(|v| v.image_card ^= true))))
-        .children(offered(Kind::Text, s.data_cards().is_some()).then(|| toggle_row("text", "Text", v.data.text, |s| s.edit3d(|v| v.data.text ^= true))))
-        .children(offered(Kind::Stats, s.data_cards().is_some()).then(|| toggle_row("stats", "Stats", v.data.stats, |s| s.edit3d(|v| v.data.stats ^= true))));
+        .children(offered(Kind::Image, s.card_for(PanelKind::Image).is_some()).then(|| toggle_row("image", "Camera image", v.image_card, |s| s.edit3d(|v| v.image_card ^= true))))
+        .children(offered(Kind::Text, s.card_for(PanelKind::Data).is_some()).then(|| toggle_row("text", "Text", v.data.text, |s| s.edit3d(|v| v.data.text ^= true))))
+        .children(offered(Kind::Stats, s.card_for(PanelKind::Data).is_some()).then(|| toggle_row("stats", "Stats", v.data.stats, |s| s.edit3d(|v| v.data.stats ^= true))));
 
     let cloud = section("Point cloud")
         .child(field("Color", color_choices("color", s, false)))
@@ -618,10 +618,9 @@ fn layout_section(s: &State) -> El {
     for Preset { name, layout } in PRESETS {
         let chosen = s.settings.layout.same_tiling(&layout());
         presets = presets.child(chip(format!("layout-preset-{name}"), name, chosen, move |s| {
-            // The preset's tiling, keeping the panels' settings.
-            let mut l = layout();
-            l.adopt(&s.settings.layout);
-            s.settings.layout = l;
+            if let Some(l) = Layout::preset_keeping(name, &s.settings.layout) {
+                s.settings.layout = l;
+            }
         }));
     }
     let input = el().key("layout-file-field").grow(1.0).min_w(0.0).h(32.0).px(10.0).radius(tok::radius::MD).clip_rounded(tok::radius::MD).fill(t.card).border(1.0, t.card_border).center_y()
@@ -681,91 +680,99 @@ fn with<T: 'static>(lens: &Lens<T>, edit: impl Fn(&mut T) + 'static) -> impl Fn(
     move |s| lens(s, &mut |t| edit(t))
 }
 
-/// The button that opens the settings of the panel keyed `key` at `path`, over it.
-pub(crate) fn panel_settings_button(key: &str, path: &[usize]) -> El {
+/// The button that opens the settings of the panel keyed `key` at `path` over it, lit while
+/// they're open. Pressed again, it closes them.
+pub(crate) fn panel_settings_button(s: &State, key: &str, path: &[usize]) -> El {
     let t = tok::theme(true);
+    let open = s.panel_settings.as_deref() == Some(path);
     let path = path.to_vec();
-    el().key(format!("{key}-settings")).role("button").label("Panel settings").focusable(true).size(30.0, 30.0).center()
-        .radius(tok::radius::MD).fill(oklcha(0.16, 0.006, 265.0, 0.78)).border(1.0, t.card_border).hover(t.hover).press(t.press).press_scale(0.94)
-        .on_press(move |s: &mut State| s.open_panel_settings(path.clone()))
+    el().key(format!("{key}-settings")).role("button").label("Panel settings").checked(open).focusable(true).size(30.0, 30.0).center()
+        .radius(tok::radius::MD).fill(if open { tok::accent(0, true) } else { oklcha(0.16, 0.006, 265.0, 0.78) }).border(1.0, t.card_border)
+        .hover(t.hover).press(t.press).press_scale(0.94)
+        .on_press(move |s: &mut State| s.toggle_panel_settings(path.clone()))
         .child(sliders_glyph())
 }
 
 /// The settings of panel `p` at `path`, under its settings button, as wide as `PANEL_SETTINGS_W`
-/// and as tall as the window leaves (they scroll). A press outside, Escape or Done closes them.
+/// and as tall as the window leaves (they scroll). The 3D view's are in tabs. Its button again,
+/// a press outside or Escape closes them.
 fn panel_settings(s: &State, path: &[usize], p: &Panel) -> El {
     let t = tok::theme(true);
-    let body = match p {
-        Panel::View3d(v) => view3d_settings(s, v),
-        Panel::Image(view) => image_settings(s, view, "image-panel", &panel_lens(path, |p| match p {
+    let (tabs, body) = match p {
+        Panel::View3d(v) => {
+            let tabs = Tab3d::ALL.map(|tab| (tab, tab.label()));
+            let bar = segmented("tab", &tabs, s.tab_3d, |s, tab| {
+                s.tab_3d = tab;
+                s.open_picker = None;
+            });
+            (Some(bar.w_full()), view3d_settings(s, v))
+        }
+        Panel::Image(view) => (None, image_settings(s, view, "image-panel", &panel_lens(path, |p| match p {
             Panel::Image(i) => Some(i),
             _ => None,
-        })),
-        Panel::Data(view) => data_settings(s, view, "data-panel", &panel_lens(path, |p| match p {
+        }))),
+        Panel::Data(view) => (None, data_settings(s, view, "data-panel", &panel_lens(path, |p| match p {
             Panel::Data(d) => Some(d),
             _ => None,
-        })),
-        Panel::Topics => col(),
+        }))),
+        Panel::Topics => (None, col()),
     };
-    let done = fitted_button("close-panel-settings", "Done", |s| s.panel_settings = None).h(28.0).px(12.0);
-    let top = row().items_center().gap(10.0)
-        .child(text(format!("{} settings", p.kind().label())).font(TextStyle::new(14.0, 600.0)).color(t.text).grow(1.0).min_w(0.0))
-        .child(done);
-    let scroll = col().key("panel-settings-scroll").w_full().shrink().min_h(0.0).scroll(ScrollSpec { stick_bottom: false }).scroll_edge_fade(16.0)
-        .child(body.w_full().px(16.0).pb(16.0));
-    col().key("panel-settings").w(PANEL_SETTINGS_W).min_h(0.0).pt(14.0).gap(12.0)
+    let scroll = col().key("panel-settings-scroll").w_full().shrink().min_h(0.0).scroll(ScrollSpec { stick_bottom: false }).scroll_edge_fade(12.0)
+        .child(body.w_full().px(14.0).pt(if tabs.is_some() { 4.0 } else { 12.0 }).pb(14.0));
+    col().key("panel-settings").w(PANEL_SETTINGS_W).min_h(0.0).gap(8.0)
         .fill(oklcha(0.19, 0.006, 265.0, 0.98)).radius(tok::radius::LG).border(1.0, t.card_border).shadow(8.0, 28.0, oklcha(0.0, 0.0, 0.0, 0.45))
-        .child(top.px(16.0))
+        .children(tabs.map(|bar| el().w_full().px(10.0).pt(10.0).child(bar)))
         .child(scroll)
         .anchored_fit(format!("{}-settings", panels::key_of(path)), Side::Bottom, Align::End, 6.0)
-        .modal(true, |s: &mut State| s.panel_settings = None)
+        .modal(true, |s: &mut State| {
+            s.panel_settings = None;
+            s.open_picker = None;
+        })
 }
 
-/// The 3D view's settings: the scene, the point cloud, poses, the robot, and the cards over it.
+/// The tab of the 3D view's settings on show.
 fn view3d_settings(s: &State, v: &View3dSettings) -> El {
     let t = tok::theme(true);
-    let frames = s.display.tf.frames();
-    let scene = section("Scene")
-        .child(field_note("Fixed frame", "Everything is drawn in this frame. Auto uses the root of the transform tree the point cloud is in."))
-        .child(auto_picker("fixed-frame", "frame", &v.fixed_frame, s.display.fixed.as_deref(), &frames, "not seen yet", |s, f| s.edit3d(|v| v.fixed_frame = f)))
-        .child(text(format!("{} frames received", frames.len())).font(type_::LABEL).color(t.text_secondary))
-        .child(toggle_row("grid-full", "Grid", v.grid, |s| s.edit3d(|v| v.grid ^= true)))
-        .child(toggle_row("frames-full", "TF frames", v.frames, |s| s.edit3d(|v| v.frames ^= true)))
-        .child(toggle_row("labels", "Frame and pose labels", v.labels, |s| s.edit3d(|v| v.labels ^= true)))
-        .child(field("Axis length", segmented("axis", &[(0.05, "5 cm"), (0.1, "10 cm"), (0.25, "25 cm"), (0.5, "50 cm"), (1.0, "1 m")], v.axis_length, |s, a| s.edit3d(|v| v.axis_length = a))));
-
-    let clouds = s.topics_of(Kind::PointCloud);
-    let points = section("Point cloud")
-        .child(toggle_row("points-full", "Show", v.points.show, |s| s.edit3d(|v| v.points.show ^= true)))
-        .child(field_note("Topic", "Hidden points aren't subscribed to."))
-        .child(auto_picker("cloud-topic", "cloud", &v.points.topic, clouds.first().map(String::as_str), &clouds, "not advertised", |s, c| s.edit3d(|v| v.points.topic = c)))
-        .child(field("Color", color_choices("color-full", s, true)))
-        .child(point_size_field("size-full", v))
-        .child(density_field("decimate-full", v));
-
-    let poses = section("Poses")
-        .child(toggle_row("poses-full", "Show", v.poses.show, |s| s.edit3d(|v| v.poses.show ^= true)))
-        .child(topic_switches(s, "pose", Kind::Poses, &v.poses.hidden, &view3d_lens(|v| &mut v.poses.hidden)))
-        .child(field("Expire after", segmented("pose-timeout", &[(0.0, "Never"), (0.5, "0.5 s"), (2.0, "2 s"), (10.0, "10 s")], v.poses.timeout, |s, x| s.edit3d(|v| v.poses.timeout = x))))
-        .child(text("A pose its topic hasn't sent again in this time is removed.").font(type_::LABEL).color(t.text_secondary).max_lines(2))
-        .child(field("Trail", segmented("trail", &[(0.0, "Off"), (5.0, "5 s"), (15.0, "15 s"), (60.0, "60 s")], v.poses.trail, |s, x| s.edit3d(|v| v.poses.trail = x))));
-
-    // The cards stand in for the panels: with an Image or Data panel in the layout, it shows them.
-    let layout = &s.settings.layout;
-    let mut cards = section("Cards");
-    cards = if layout.has(PanelKind::Image) {
-        cards.child(text("The layout's Image panel shows the camera image.").font(type_::LABEL).color(t.text_secondary))
-    } else {
-        cards.child(toggle_row("show-image-card", "Camera image", v.image_card, |s| s.edit3d(|v| v.image_card ^= true)))
-            .child(image_settings(s, &v.image, "card", &view3d_lens(|v| &mut v.image)))
-    };
-    cards = if layout.has(PanelKind::Data) {
-        cards.child(text("The layout's Data panel shows text and stats.").font(type_::LABEL).color(t.text_secondary))
-    } else {
-        cards.child(data_settings(s, &v.data, "card", &view3d_lens(|v| &mut v.data)))
-    };
-
-    col().gap(28.0).child(scene).child(points).child(poses).child(robot_section(s, v)).child(cards)
+    let body = col().w_full().gap(10.0);
+    match s.tab_3d {
+        Tab3d::Scene => {
+            let frames = s.display.tf.frames();
+            body.child(picker(s, "fixed-frame", "frame", "Fixed frame", &v.fixed_frame, s.display.fixed.as_deref(), &frames, "not seen yet", |s, f| s.edit3d(|v| v.fixed_frame = f)))
+                .child(toggle_row("grid-full", "Grid", v.grid, |s| s.edit3d(|v| v.grid ^= true)))
+                .child(toggle_row("frames-full", "TF frames", v.frames, |s| s.edit3d(|v| v.frames ^= true)))
+                .child(toggle_row("labels", "Labels", v.labels, |s| s.edit3d(|v| v.labels ^= true)))
+                .child(field("Axis length", segmented("axis", &[(0.05, "5 cm"), (0.1, "10 cm"), (0.25, "25 cm"), (0.5, "50 cm"), (1.0, "1 m")], v.axis_length, |s, a| s.edit3d(|v| v.axis_length = a))))
+        }
+        Tab3d::Points => {
+            let clouds = s.topics_of(Kind::PointCloud);
+            body.child(toggle_row("points-full", "Show", v.points.show, |s| s.edit3d(|v| v.points.show ^= true)))
+                .child(picker(s, "cloud-topic", "cloud", "Topic", &v.points.topic, clouds.first().map(String::as_str), &clouds, "not advertised", |s, c| s.edit3d(|v| v.points.topic = c)))
+                .child(field("Color", color_choices("color-full", s, true)))
+                .child(point_size_field("size-full", v))
+                .child(density_field("decimate-full", v))
+        }
+        Tab3d::Poses => body
+            .child(toggle_row("poses-full", "Show", v.poses.show, |s| s.edit3d(|v| v.poses.show ^= true)))
+            .child(field("Topics", topic_switches(s, "pose", Kind::Poses, &v.poses.hidden, &view3d_lens(|v| &mut v.poses.hidden))))
+            .child(field("Expire after", segmented("pose-timeout", &[(0.0, "Never"), (0.5, "0.5 s"), (2.0, "2 s"), (10.0, "10 s")], v.poses.timeout, |s, x| s.edit3d(|v| v.poses.timeout = x))))
+            .child(field("Trail", segmented("trail", &[(0.0, "Off"), (5.0, "5 s"), (15.0, "15 s"), (60.0, "60 s")], v.poses.trail, |s, x| s.edit3d(|v| v.poses.trail = x)))),
+        Tab3d::Robot => robot_settings(s, v),
+        // The cards stand in for the panels: with an Image or Data panel in the layout, it shows them.
+        Tab3d::Cards => {
+            let note = |m: &str| text(m.to_string()).font(type_::LABEL).color(t.text_secondary).max_lines(2);
+            let body = if s.card_for(PanelKind::Image).is_none() {
+                body.child(note("The layout's Image panel shows the camera image."))
+            } else {
+                body.child(toggle_row("show-image-card", "Camera image", v.image_card, |s| s.edit3d(|v| v.image_card ^= true)))
+                    .children(v.image_card.then(|| image_settings(s, &v.image, "card", &view3d_lens(|v| &mut v.image))))
+            };
+            if s.card_for(PanelKind::Data).is_none() {
+                body.child(note("The layout's Data panel shows text and stats."))
+            } else {
+                body.child(data_settings(s, &v.data, "card", &view3d_lens(|v| &mut v.data)))
+            }
+        }
+    }
 }
 
 /// An image view's settings: its topic and the annotations drawn over it.
@@ -773,11 +780,9 @@ fn image_settings(s: &State, view: &ImageSettings, key: &str, lens: &Lens<ImageS
     let images = s.topics_of(Kind::Image);
     let pick = lens.clone();
     col().w_full().gap(10.0)
-        .child(field_note("Image topic", "Only the topics a panel shows are subscribed to."))
-        .child(auto_picker(&format!("{key}-image-topic"), &format!("{key}-image"), &view.topic, images.first().map(String::as_str), &images, "not advertised",
+        .child(picker(s, &format!("{key}-image-topic"), &format!("{key}-image"), "Image", &view.topic, images.first().map(String::as_str), &images, "not advertised",
             move |s, topic| pick(s, &mut |i| i.topic = topic.clone())))
-        .child(field_note("Annotations", "Drawn over the image."))
-        .child(topic_switches(s, &format!("{key}-annotation"), Kind::Annotations, &view.hidden, &lens_field(lens, |i| &mut i.hidden)))
+        .child(field("Annotations", topic_switches(s, &format!("{key}-annotation"), Kind::Annotations, &view.hidden, &lens_field(lens, |i| &mut i.hidden))))
 }
 
 /// A text and stats view's settings: each on or off, and each topic.
@@ -796,6 +801,12 @@ fn lens_field<T: 'static, F: 'static>(lens: &Lens<T>, pick: fn(&mut T) -> &mut F
     Rc::new(move |s, edit| lens(s, &mut |t| edit(pick(t))))
 }
 
+/// A list inset in the settings: a picker's options, a view's topics.
+fn inset(list: El) -> El {
+    let t = tok::theme(true);
+    el().w_full().padding(4.0).radius(tok::radius::MD).fill(t.card).border(1.0, t.card_border).child(list)
+}
+
 /// A switch for every advertised topic of `kind`: on unless it's in `hidden` (so new topics are
 /// on), keyed `{key}-0`, `{key}-1`, ...
 fn topic_switches(s: &State, key: &str, kind: Kind, hidden: &BTreeSet<String>, lens: &Lens<BTreeSet<String>>) -> El {
@@ -804,7 +815,7 @@ fn topic_switches(s: &State, key: &str, kind: Kind, hidden: &BTreeSet<String>, l
     if topics.is_empty() {
         return text(format!("No {} topics yet", kind.label().to_lowercase())).font(type_::LABEL).color(t.text_secondary);
     }
-    let mut list = col().key(key.to_string()).gap(2.0);
+    let mut list = col().key(key.to_string()).w_full();
     for (i, topic) in topics.into_iter().enumerate() {
         let on = !hidden.contains(&topic);
         let k = format!("{key}-{i}");
@@ -813,15 +824,15 @@ fn topic_switches(s: &State, key: &str, kind: Kind, hidden: &BTreeSet<String>, l
             .child(text(topic.clone()).font(MONO).color(if on { t.text } else { t.text_secondary }).truncate().grow(1.0).min_w(0.0))
             .child(switch(&k, &topic, on, flip)));
     }
-    list
+    inset(list)
 }
 
 /// The 3D view's robot: its URDF file or a server's description, the joints that pose it, and
 /// how it's drawn.
-fn robot_section(s: &State, v: &View3dSettings) -> El {
+fn robot_settings(s: &State, v: &View3dSettings) -> El {
     let t = tok::theme(true);
     // Clipped: a long path would otherwise draw over the Load button.
-    let input = el().key("urdf-field").grow(1.0).min_w(0.0).h(32.0).px(10.0).radius(tok::radius::MD).clip_rounded(tok::radius::MD).fill(t.card).border(1.0, t.card_border).center_y()
+    let input = el().key("urdf-field").grow(1.0).min_w(0.0).h(30.0).px(10.0).radius(tok::radius::MD).clip_rounded(tok::radius::MD).fill(t.card).border(1.0, t.card_border).center_y()
         .child(
             text_input(&s.urdf_edit, MONO)
                 .key("urdf")
@@ -836,31 +847,34 @@ fn robot_section(s: &State, v: &View3dSettings) -> El {
                 }),
         );
     let error = oklch(0.72, 0.17, 25.0);
-    let mut sec = section("Robot")
-        .child(field_note("URDF file", "Plain URDF (run xacro first). STL meshes, by path relative to the file, file:// or package://."))
-        .child(row().gap(8.0).child(input).child(button("load-urdf", "Load", State::load_robot).grow(0.0).w(92.0).min_w(92.0)));
+    let note = |m: String| text(m).font(type_::LABEL).color(t.text_secondary).max_lines(3);
     let summary = |m: &crate::robot::Model| format!(
         "{}: {} links, {} joints, {} meshes · loaded in {:.0} ms",
         m.robot.name, m.robot.links.len(), m.robot.movable().count(), m.mesh.parts.len(), m.load_ms,
     );
     let status = match s.robot_file() {
-        None => text("No file loaded").font(type_::LABEL).color(t.text_secondary),
+        None => note("Plain URDF (run xacro first), with STL meshes".into()),
         Some(Err(e)) => text(e.clone()).font(type_::LABEL).color(error).max_lines(4),
-        Some(Ok(m)) => text(summary(m)).font(type_::LABEL).color(t.text_secondary).max_lines(2),
+        Some(Ok(m)) => note(summary(m)),
     };
-    sec = sec.child(status.key("robot-status"));
+    let file = col().w_full().gap(6.0)
+        .child(text("URDF file").font(type_::BODY).color(t.text))
+        .child(row().gap(8.0).child(input).child(fitted_button("load-urdf", "Load", State::load_robot).h(30.0).px(14.0)))
+        .child(status.key("robot-status"));
+    let mut sec = col().w_full().gap(10.0)
+        .child(toggle_row("robot-full", "Show", v.robot.show, |s| s.edit3d(|v| v.robot.show ^= true)))
+        .child(file);
 
-    // A server that sends its URDF on a robot_description topic says which robot it drives.
+    // A server that sends its URDF on a robot_description topic says which robot it drives; it
+    // wins over a file that isn't the same robot.
     let descriptions = s.topics_of(Kind::RobotDescription);
     if !descriptions.is_empty() {
-        let list = auto_picker("description-topic", "description", &v.robot.description_topic, descriptions.first().map(String::as_str), &descriptions, "not advertised", |s, d| s.edit3d(|v| v.robot.description_topic = d));
         let status = match s.robot_description() {
-            None => text("Nothing received yet").font(type_::LABEL).color(t.text_secondary),
+            None => note("Nothing received yet".into()),
             Some((_, Err(e))) => text(e.clone()).font(type_::LABEL).color(error).max_lines(4),
-            Some((_, Ok(m))) => text(summary(m)).font(type_::LABEL).color(t.text_secondary).max_lines(2),
+            Some((_, Ok(m))) => note(summary(m)),
         };
-        sec = sec.child(field_note("Robot description", "The URDF a server sends (std_msgs/msg/String). It wins over a file that isn't the same robot."))
-            .child(list)
+        sec = sec.child(picker(s, "description-topic", "description", "Description", &v.robot.description_topic, descriptions.first().map(String::as_str), &descriptions, "not advertised", |s, d| s.edit3d(|v| v.robot.description_topic = d)))
             .child(status.key("description-status"));
     }
     if let Some(m) = s.robot_mismatch() {
@@ -875,22 +889,59 @@ fn robot_section(s: &State, v: &View3dSettings) -> El {
     if m.problems.len() > SHOWN {
         sec = sec.child(text(format!("and {} more visuals not drawn", m.problems.len() - SHOWN)).font(SMALL).color(error));
     }
-    if let Some(note) = &s.display.robot_note {
-        sec = sec.child(text(note.clone()).font(type_::LABEL).color(t.text_secondary).max_lines(3));
+    if let Some(n) = &s.display.robot_note {
+        sec = sec.child(note(n.clone()));
     }
 
     let topics = s.topics_of(Kind::JointStates);
-    let list = auto_picker("joint-topic", "joints", &v.robot.joint_topic, topics.first().map(String::as_str), &topics, "not advertised", |s, j| s.edit3d(|v| v.robot.joint_topic = j));
     let movable: Vec<&str> = m.robot.movable().collect();
     let received = match s.joints() {
-        Some((topic, j)) => format!("{} of {} joints received on {topic}", movable.iter().filter(|n| j.contains_key(**n)).count(), movable.len()),
+        Some((_, j)) => format!("{} of {} joints received", movable.iter().filter(|n| j.contains_key(**n)).count(), movable.len()),
         None => "No joint states yet: drawn at the URDF's zero pose".to_string(),
     };
-    sec.child(field_note("Joint states", "sensor_msgs/msg/JointState (CDR from foxglove_bridge, or JSON from an SDK app), or foxglove.JointStates."))
-        .child(list)
-        .child(text(received).key("joints-received").font(type_::LABEL).color(t.text_secondary).max_lines(2))
-        .child(toggle_row("robot-full", "Show robot", v.robot.show, |s| s.edit3d(|v| v.robot.show ^= true)))
+    sec.child(picker(s, "joint-topic", "joints", "Joint states", &v.robot.joint_topic, topics.first().map(String::as_str), &topics, "not advertised", |s, j| s.edit3d(|v| v.robot.joint_topic = j)))
+        .child(note(received).key("joints-received"))
         .child(opacity_field("robot-opacity-full", v))
+}
+
+/// A setting that takes one of a list of values, Auto first: its label and value on one row
+/// (keyed `key`). Pressed, the options list under it (`auto_picker`, rows keyed `{row_key}-N`);
+/// picking one closes it.
+#[allow(clippy::too_many_arguments)]
+fn picker(
+    s: &State,
+    key: &str,
+    row_key: &str,
+    label: &'static str,
+    chosen: &Option<String>,
+    auto: Option<&str>,
+    available: &[String],
+    missing: &str,
+    set: impl Fn(&mut State, Option<String>) + Clone + 'static,
+) -> El {
+    let t = tok::theme(true);
+    let open = s.open_picker.as_deref() == Some(key);
+    let value = match (chosen, auto) {
+        (None, Some(a)) => format!("Auto · {a}"),
+        (None, None) => "Auto".to_string(),
+        (Some(c), _) if available.contains(c) => c.clone(),
+        (Some(c), _) => format!("{c} ({missing})"),
+    };
+    let k = key.to_string();
+    let head = row().key(key.to_string()).role("button").label(label).focusable(true).h(30.0).gap(10.0).items_center()
+        .on_press(move |s: &mut State| s.open_picker = if s.open_picker.as_ref() == Some(&k) { None } else { Some(k.clone()) })
+        .child(text(label).font(type_::BODY).color(t.text).grow(1.0))
+        .child(row().h(26.0).px(8.0).gap(6.0).items_center().max_w(200.0).radius(tok::radius::SM).fill(if open { t.hover } else { t.control_track })
+            .child(text(value).font(MONO).color(t.text).truncate().min_w(0.0))
+            .child(text(if open { "▴" } else { "▾" }).font(SMALL).color(t.text_secondary)));
+    let list = open.then(|| {
+        let pick = move |s: &mut State, value: Option<String>| {
+            set(s, value);
+            s.open_picker = None;
+        };
+        inset(auto_picker(&format!("{key}-options"), row_key, chosen, auto, available, missing, pick))
+    });
+    col().w_full().gap(4.0).child(head).children(list)
 }
 
 /// Radio rows for an optional setting: Auto (naming what it resolves to), every available value,

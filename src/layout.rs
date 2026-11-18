@@ -9,8 +9,8 @@
 //! ```
 //!
 //! A panel's settings sit beside `panel`, and only those that differ from the defaults are
-//! written; a setting left out takes its default. The file is checked when it's read (`RawNode` → `Layout`), so every `Layout` in the
-//! app is valid: its weights are positive, its branches have children, its panels' settings
+//! written; a setting left out takes its default. The file is checked when it's read
+//! (`RawNode` → `Layout`), so every `Layout` in the app is valid: its weights are positive, its branches have children, its panels' settings
 //! parse, and it has at most one 3D panel. The edits (`split`, `close`, `show`, `move_divider`)
 //! keep it that way. They address a node by its path: the child index to take at each branch,
 //! from the root.
@@ -145,14 +145,18 @@ impl Layout {
         PRESETS.iter().find(|p| p.name == name).map(|p| (p.layout)())
     }
 
+    /// The preset `name`, its panels with the settings of `current`'s same-kind panels.
+    pub fn preset_keeping(name: &str, current: &Layout) -> Option<Layout> {
+        let mut preset = Layout::preset(name)?;
+        preset.adopt(current);
+        Some(preset)
+    }
+
     /// A preset by name, its panels taking the settings of `current`'s (`adopt`), else the
     /// layout file at that path as it is.
     pub fn named_or_file(value: &str, current: &Layout) -> Result<Layout, String> {
-        match Layout::preset(value) {
-            Some(mut preset) => {
-                preset.adopt(current);
-                Ok(preset)
-            }
+        match Layout::preset_keeping(value, current) {
+            Some(preset) => Ok(preset),
             None => Layout::load(Path::new(value)),
         }
     }
@@ -245,13 +249,14 @@ impl Layout {
         if here == kind {
             return;
         }
-        match self.find(kind).filter(|_| kind == PanelKind::View3d) {
-            Some(there) => {
-                let a = std::mem::take(self.at_mut(path).expect("found above"));
-                let b = std::mem::replace(self.at_mut(&there).expect("found above"), a);
-                *self.at_mut(path).expect("found above") = b;
-            }
-            None => *self.panel_mut(path).expect("found above") = Panel::new(kind),
+        if kind == PanelKind::View3d
+            && let Some(there) = self.find(kind)
+        {
+            let a = std::mem::take(self.at_mut(path).expect("found above"));
+            let b = std::mem::replace(self.at_mut(&there).expect("found above"), a);
+            *self.at_mut(path).expect("found above") = b;
+        } else {
+            *self.panel_mut(path).expect("found above") = Panel::new(kind);
         }
     }
 
@@ -316,6 +321,21 @@ impl Layout {
             let old = from.panels().into_iter().filter(|p| p.kind() == kind);
             for (new, old) in self.panels_mut().into_iter().filter(|p| p.kind() == kind).zip(old) {
                 *new = old.clone();
+            }
+        }
+    }
+
+    /// Gives each panel the settings of the same-kind panel in `after`, in order, where those
+    /// differ from `before`'s (`after` and `before` have the same tiling): the panels changed
+    /// since `before`.
+    pub fn adopt_changes(&mut self, before: &Layout, after: &Layout) {
+        for kind in PanelKind::ALL {
+            let of = |l: &Layout| l.panels().into_iter().filter(|p| p.kind() == kind).cloned().collect::<Vec<_>>();
+            let pairs = of(before).into_iter().zip(of(after));
+            for (new, (b, a)) in self.panels_mut().into_iter().filter(|p| p.kind() == kind).zip(pairs) {
+                if a != b {
+                    *new = a;
+                }
             }
         }
     }
@@ -559,7 +579,7 @@ mod tests {
         l.show(&[2], View3d);
         assert_eq!(l, parse(r#"{"row": [{"panel": "data", "text": false}, {"panel": "image"}, {"panel": "3d", "grid": false}]}"#).unwrap());
         l.show(&[0], Image);
-        assert_eq!(l, row(vec![(1.0, leaf(Image)), (1.0, leaf(Image)), (1.0, l.panel(&[2]).cloned().map(Layout::Panel).unwrap())]));
+        assert_eq!(l, parse(r#"{"row": [{"panel": "image"}, {"panel": "image"}, {"panel": "3d", "grid": false}]}"#).unwrap());
     }
 
     // A panel's settings sit beside it in the file, only those off their defaults are written,

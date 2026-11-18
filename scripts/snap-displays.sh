@@ -43,9 +43,9 @@ same() { # a, b: the viewport beside the side panel must match
   local ok=PASS; [[ $px == 0 ]] || { ok=FAIL; fail=1; }
   printf "%-44s %8s px  %s\n" "$1 = $2" "$px" "$ok"
 }
-# The 3D view's settings, scrolled to the Robot section.
+# The 3D view's settings, on the Robot tab.
 open_settings=(--script "$dir/open-settings.json")
-printf '[{"t": 0.5, "type": "tap", "key": "panel-settings"}, {"t": 1.0, "type": "wheel", "x": 780, "y": 400, "dx": 0, "dy": -1200}]\n' > "$dir/open-settings.json"
+printf '[{"t": 0.5, "type": "tap", "key": "panel-settings"}, {"t": 0.9, "type": "tap", "key": "tab-3"}]\n' > "$dir/open-settings.json"
 local8765='"connections": ["ws://127.0.0.1:8765"]'
 robot() { echo "{$local8765, \"layout\": {\"panel\": \"3d\", \"robot\": {\"urdf\": \"$1\"}}}"; }
 

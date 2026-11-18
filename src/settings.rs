@@ -8,6 +8,7 @@
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use serde::{Deserialize, Serialize};
 
@@ -172,8 +173,6 @@ impl View3dSettings {
             points: PointsSettings { show: false, ..d.points },
             poses: PosesSettings { show: false, ..d.poses },
             robot: RobotSettings { show: false, ..d.robot },
-            image_card: false,
-            data: DataSettings { text: false, stats: false, ..d.data },
             ..d
         }
     }
@@ -213,13 +212,19 @@ impl Settings {
         };
         serde_json::from_str(&text).unwrap_or_else(|e| {
             eprintln!("lantern: {} doesn't parse ({e}); using defaults", path.display());
-            back_up(&path);
+            if !back_up(&path) {
+                eprintln!("lantern: so as not to lose it, settings won't be saved this run");
+                KEEP_FILE.store(true, Ordering::Relaxed);
+            }
             Settings::default()
         })
     }
 
     pub fn save(&self) {
         let Some(path) = path() else { return };
+        if KEEP_FILE.load(Ordering::Relaxed) {
+            return;
+        }
         let write = || -> std::io::Result<()> {
             std::fs::create_dir_all(path.parent().unwrap())?;
             let tmp = path.with_extension("json.tmp");
@@ -232,14 +237,34 @@ impl Settings {
     }
 }
 
-/// Copies the settings file to `settings.json.bak` before Lantern's next save replaces it: what
-/// didn't parse stays on disk to fix and put back.
-fn back_up(path: &Path) {
-    let bak = path.with_extension("json.bak");
-    match std::fs::copy(path, &bak) {
-        Ok(_) => eprintln!("lantern: the file as it was is in {}", bak.display()),
-        Err(e) => eprintln!("lantern: can't back up {} to {} ({e})", path.display(), bak.display()),
+/// Set when a settings file that didn't parse couldn't be backed up: saving would lose it.
+static KEEP_FILE: AtomicBool = AtomicBool::new(false);
+
+/// Copies the settings file to `settings.json.bak` (or `.bak.1`, `.bak.2`, ... next to an
+/// earlier backup, which stays) before Lantern's next save replaces it: what didn't parse stays
+/// on disk to fix and put back. Whether it was copied.
+fn back_up(path: &Path) -> bool {
+    let copy = |bak: &Path| -> std::io::Result<()> {
+        let mut to = std::fs::OpenOptions::new().write(true).create_new(true).open(bak)?;
+        std::io::copy(&mut std::fs::File::open(path)?, &mut to)?;
+        Ok(())
+    };
+    let first = path.with_extension("json.bak");
+    let mut bak = first.clone();
+    for n in 1.. {
+        match copy(&bak) {
+            Ok(()) => {
+                eprintln!("lantern: the file as it was is in {}", bak.display());
+                return true;
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => bak = first.with_extension(format!("bak.{n}")),
+            Err(e) => {
+                eprintln!("lantern: can't back up {} to {} ({e})", path.display(), bak.display());
+                return false;
+            }
+        }
     }
+    unreachable!("there's always a free name")
 }
 
 #[cfg(test)]
@@ -254,6 +279,21 @@ mod tests {
         let saved = serde_json::to_value(&s).unwrap();
         assert_eq!(saved.as_object().unwrap().keys().collect::<Vec<_>>(), ["connections", "layout"]);
         assert_eq!(serde_json::from_value::<Settings>(saved).unwrap(), s);
+    }
+
+    // A second file that doesn't parse is backed up beside the first, which stays.
+    #[test]
+    fn backups_dont_replace_earlier_ones() {
+        let dir = std::env::temp_dir().join(format!("lantern-bak-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("settings.json");
+        for text in ["old", "typo"] {
+            std::fs::write(&path, text).unwrap();
+            assert!(back_up(&path));
+        }
+        let read = |name: &str| std::fs::read_to_string(dir.join(name)).unwrap();
+        assert_eq!((read("settings.json.bak"), read("settings.json.bak.1")), ("old".into(), "typo".into()));
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     // A key that isn't app-wide (a panel setting at the top level, as files from before

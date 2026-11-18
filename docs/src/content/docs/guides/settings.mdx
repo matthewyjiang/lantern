@@ -45,19 +45,20 @@ good message.
 ## Panel settings
 
 Each 3D, Image and Data panel has a slider button at its top right; on the 3D view it's next to
-the Drag, Shift-drag and Scroll hints. It opens that panel's settings over the window. A press
-outside, Escape or **Done** closes them. The Topics panel has no settings.
+the Drag, Shift-drag and Scroll hints. It opens that panel's settings under it, and stays lit while
+they're open. Press it again, press outside, or press Escape to close them. A topic or frame
+setting shows its value; press it to list the choices. The Topics panel has no settings.
 
 ### 3D view
 
-The side panel has the 3D view's quick controls. Its settings have everything:
+The side panel has the 3D view's quick controls. Its settings have everything, in tabs:
 
-| Section | Settings |
+| Tab | Settings |
 | --- | --- |
-| **Scene** | Fixed frame, grid, TF frames, frame and pose labels, axis length |
-| **Point cloud** | Show, topic, colour, point size, density |
+| **Scene** | Fixed frame, grid, TF frames, labels (frame and pose names), axis length |
+| **Points** | Show, topic, colour, point size, density |
 | **Poses** | Show, a switch per pose topic, expire after, trail |
-| **Robot** | URDF file, robot description topic, joint states topic, show, opacity. See [Robot model](/lantern/guides/robot-model/). |
+| **Robot** | Show, URDF file, robot description topic, joint states topic, opacity. See [Robot model](/lantern/guides/robot-model/). |
 | **Cards** | The camera image card with its topic and annotations, and the text and stats cards with a switch per topic |
 
 **Fixed frame** is the frame everything is drawn in. **Auto** shows what it picked, for example
@@ -89,7 +90,7 @@ each pose has been over that time.
 
 **Cards.** Without an Image panel in the layout, the 3D view draws the camera image as a card in its
 lower right corner, set like an Image panel. Without a Data panel, it draws text and stats cards at
-its top right, set like a Data panel. When the layout has the panel, **Cards** says so instead.
+its top right, set like a Data panel. When the layout has the panel, the **Cards** tab says so instead.
 
 ### Image
 
@@ -138,8 +139,9 @@ panels show the two cameras, the right one without its detections:
 Only values that differ from the defaults are written, and a missing key takes its default.
 
 Every key is checked. If the file doesn't parse (an unknown key, a wrong type, a mistake in the
-layout), Lantern prints why on stderr, copies the file to `settings.json.bak` next to it, and starts
-with the defaults. Fix the copy and put it back while Lantern is closed.
+layout), Lantern prints why on stderr, copies the file to `settings.json.bak` next to it (or
+`.bak.1`, `.bak.2`, ... so an earlier backup stays), and starts with the defaults. Fix the copy
+and put it back while Lantern is closed. If the copy fails, Lantern doesn't save that run.
 
 ### Panel keys
 
@@ -203,7 +205,8 @@ Other flags go to Rune, the UI library, for headless runs; see
 thing during the run:
 
 - If you change the servers, the list is saved as you left it.
-- If you change the layout or any panel's settings during a `--layout` run, the layout the command
-  line gave is saved, with your change.
-- A `--urdf` file is never saved. The saved 3D view keeps its own URDF, unless you load a different
-  one.
+- If you change a panel's settings during a `--layout` run, your saved layout keeps its tiling and
+  takes the change. If you change the tiling (split, close, resize, a preset), the layout is saved
+  as you left it.
+- A `--urdf` file is never saved. The 3D view keeps the URDF it had before, unless you load a
+  different one.

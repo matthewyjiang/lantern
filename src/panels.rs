@@ -104,7 +104,7 @@ fn panel(s: &State, cx: &mut Cx<State>, p: &Panel, path: &[usize]) -> El {
 /// What panel `p` at `path` shows, filling its card. `key` is the panel's, to prefix the keys of
 /// what's inside (a kind can be in several panels).
 fn body(s: &State, cx: &mut Cx<State>, p: &Panel, key: &str, path: &[usize]) -> El {
-    let gear = || ui::panel_settings_button(key, path);
+    let gear = || ui::panel_settings_button(s, key, path);
     match p {
         Panel::View3d(_) => ui::view3d(s, cx, gear()),
         Panel::Image(view) => image(s, cx, view, key, gear()),
