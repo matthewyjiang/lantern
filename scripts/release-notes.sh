@@ -6,13 +6,20 @@
 # refactor are left out. Any other subject is listed under Other changes, so a commit that
 # doesn't follow the convention still shows.
 # Usage: scripts/release-notes.sh TAG   (needs the history and tags: `fetch-depth: 0` in CI)
-# Env: GITHUB_REPOSITORY (owner/name for the links, default matthewyjiang/lantern)
 set -euo pipefail
 cd "$(dirname "$0")/.."
 tag=${1:?usage: scripts/release-notes.sh TAG}
-repo=${GITHUB_REPOSITORY:-matthewyjiang/lantern}
-git rev-parse -q --verify "$tag^{commit}" > /dev/null || { echo "release-notes: no tag or commit called $tag" >&2; exit 1; }
-prev=$(git describe --tags --abbrev=0 --match 'v[0-9]*' "$tag^" 2> /dev/null || true)
+# The repository scripts/install.sh downloads from.
+repo=matthewyjiang/lantern
+fail() {
+  echo "release-notes: $1" >&2
+  exit 1
+}
+git rev-parse -q --verify "$tag^{commit}" > /dev/null || fail "no tag or commit called $tag"
+# A shallow clone can't see the previous tag, and would pass for a first release.
+[[ $(git rev-parse --is-shallow-repository) == false ]] || fail "this clone is shallow; fetch the whole history (fetch-depth: 0)"
+# No tag before this one is the first release: every commit is in it.
+prev=$(git describe --tags --abbrev=0 --first-parent --match 'v[0-9]*' "$tag^" 2> /dev/null || true)
 
 sections=(breaking feat fix perf docs other)
 declare -A title=([breaking]="Breaking changes" [feat]="Features" [fix]="Fixes" [perf]="Performance" [docs]="Documentation" [other]="Other changes")
@@ -33,6 +40,8 @@ while IFS= read -r subject; do
     fi
     [[ -n $breaking ]] && section=breaking
   fi
+  # GitHub reads `<mesh>` in a subject as an HTML tag and drops it.
+  text=${text//</\\<}
   if [[ -n $section ]]; then
     lines[$section]+="- $text"$'\n'
   fi

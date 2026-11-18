@@ -4,15 +4,13 @@
 # from the commits since the previous tag (scripts/release-notes.sh).
 #
 # Run it by hand (Actions → Release → Run workflow) for a dry run: it builds the archives and
-# keeps them as workflow artifacts, and publishes nothing.
+# keeps them as workflow artifacts, and publishes nothing, whatever ref it's run from.
 name: Release
 
 on:
   push:
     tags: ["v[0-9]+.[0-9]+.[0-9]+"]
   workflow_dispatch:
-  # Temporary, to prove the build matrix on the PR that adds this file. Removed before merge.
-  pull_request:
 
 permissions:
   contents: read
@@ -33,11 +31,13 @@ jobs:
           - target: aarch64-unknown-linux-gnu
             runner: ubuntu-22.04-arm
     runs-on: ${{ matrix.runner }}
+    # A cold build took 6m20s on x86_64 and 5m15s on aarch64; five times that means it's stuck.
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
+      # The only push this workflow hears is a version tag's.
       - name: Check the tag is the version in Cargo.toml
-        if: github.ref_type == 'tag'
+        if: github.event_name == 'push'
         run: |
           version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n 1)
           if [[ "v$version" != "$GITHUB_REF_NAME" ]]; then
@@ -55,7 +55,9 @@ jobs:
           strip target/release/lantern
           # The binary runs on this runner, and reports the version it was built from.
           target/release/lantern --version
-          tar -czf "dist/lantern-${{ matrix.target }}.tar.gz" -C target/release lantern
+          # Owned by root in the archive: tar run as root (a sudo install) restores the owner,
+          # and the runner's uid may be some other account's on that machine.
+          tar -czf "dist/lantern-${{ matrix.target }}.tar.gz" --owner=0 --group=0 --numeric-owner -C target/release lantern
           cd dist && sha256sum "lantern-${{ matrix.target }}.tar.gz" > "lantern-${{ matrix.target }}.tar.gz.sha256"
       - uses: actions/upload-artifact@v4
         with:
@@ -65,7 +67,7 @@ jobs:
 
   release:
     name: Publish the release
-    if: github.ref_type == 'tag'
+    if: github.event_name == 'push'
     needs: build
     runs-on: ubuntu-24.04
     permissions:
@@ -80,14 +82,8 @@ jobs:
           path: dist
           merge-multiple: true
       - run: scripts/release-notes.sh "$GITHUB_REF_NAME" > notes.md
-      # A re-run of a failed release replaces what the first run published.
+      # Fails if the tag already has a release: a published release's binaries are never replaced.
       - name: Publish
         env:
           GH_TOKEN: ${{ github.token }}
-        run: |
-          if gh release view "$GITHUB_REF_NAME" > /dev/null 2>&1; then
-            gh release edit "$GITHUB_REF_NAME" --notes-file notes.md
-            gh release upload "$GITHUB_REF_NAME" dist/* --clobber
-          else
-            gh release create "$GITHUB_REF_NAME" dist/* --title "Lantern $GITHUB_REF_NAME" --notes-file notes.md --verify-tag
-          fi
+        run: gh release create "$GITHUB_REF_NAME" dist/* --title "Lantern $GITHUB_REF_NAME" --notes-file notes.md --verify-tag
