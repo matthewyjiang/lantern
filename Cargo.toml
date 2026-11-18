@@ -6,7 +6,7 @@ license = "MIT"
 publish = false
 
 [dependencies]
-rune = { git = "https://github.com/anomalyco/rune", rev = "631e8a67cb3c40225efa3f6c4f57b80e7b18f190", features = ["tooling"] }
+rune = { git = "https://github.com/anomalyco/rune", rev = "4a2e437954f01eaacc13c0515a1d39474dd6512c", features = ["tooling"] }
 wgpu = { version = "~30.0.1", default-features = false, features = ["std", "parking_lot", "wgsl", "vulkan"] }
 bytemuck = { version = "1.25", features = ["derive"] }
 glam = { version = "0.30", features = ["bytemuck"] }
@@ -24,11 +24,11 @@ image = { version = "0.25", default-features = false, features = ["jpeg", "png"]
 # Rune ships patched copies of these crates and asks every app that builds it to apply them too
 # (a dependency's `[patch]` doesn't reach the workspace that depends on it). Same rev as `rune`.
 [patch.crates-io]
-wgpu-hal = { git = "https://github.com/anomalyco/rune", rev = "631e8a67cb3c40225efa3f6c4f57b80e7b18f190" }
-winit = { git = "https://github.com/anomalyco/rune", rev = "631e8a67cb3c40225efa3f6c4f57b80e7b18f190" }
-parley_engine = { git = "https://github.com/anomalyco/rune", rev = "631e8a67cb3c40225efa3f6c4f57b80e7b18f190" }
-accesskit_windows = { git = "https://github.com/anomalyco/rune", rev = "631e8a67cb3c40225efa3f6c4f57b80e7b18f190" }
-accesskit_macos = { git = "https://github.com/anomalyco/rune", rev = "631e8a67cb3c40225efa3f6c4f57b80e7b18f190" }
+wgpu-hal = { git = "https://github.com/anomalyco/rune", rev = "4a2e437954f01eaacc13c0515a1d39474dd6512c" }
+winit = { git = "https://github.com/anomalyco/rune", rev = "4a2e437954f01eaacc13c0515a1d39474dd6512c" }
+parley_engine = { git = "https://github.com/anomalyco/rune", rev = "4a2e437954f01eaacc13c0515a1d39474dd6512c" }
+accesskit_windows = { git = "https://github.com/anomalyco/rune", rev = "4a2e437954f01eaacc13c0515a1d39474dd6512c" }
+accesskit_macos = { git = "https://github.com/anomalyco/rune", rev = "4a2e437954f01eaacc13c0515a1d39474dd6512c" }
 
 [profile.dev.package."*"]
 opt-level = 2
