@@ -11,6 +11,8 @@ on:
   push:
     tags: ["v[0-9]+.[0-9]+.[0-9]+"]
   workflow_dispatch:
+  # Temporary, to prove the build matrix on the PR that adds this file. Removed before merge.
+  pull_request:
 
 permissions:
   contents: read
