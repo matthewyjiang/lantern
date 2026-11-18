@@ -1,7 +1,7 @@
 //! Lantern: a small RViz stand-in. Connects to Foxglove WebSocket servers (foxglove_bridge for
 //! ROS 2, or any app on a Foxglove SDK) and draws their point clouds, TF frames, poses and robot
-//! in a 3D viewport, with camera images, text and stats over it or in panels of their own, a
-//! side panel for quick display controls and a Settings page.
+//! in a 3D viewport, with camera images, text and stats over it or in panels of their own, each
+//! panel with its own settings, and a Settings page for what's app-wide.
 //!
 //! `cargo run --release` opens the window. `--connect URL` (repeatable), `--layout NAME|PATH`
 //! and `--urdf PATH` set the servers, the panel layout and the 3D panel's robot for this run. Headless
@@ -125,7 +125,6 @@ fn main() {
             ("height", |s| s.set_unsaved(|v| v.points.color = ColorChoice::Height)),
             ("intensity", |s| s.set_unsaved(|v| v.points.color = ColorChoice::Field("intensity".into()))),
             ("settings", |s| s.settings_open = true),
-            ("edit-layout", |s| s.layout_edit = true),
             // The 3D panel's settings, over it.
             ("panel-settings", |s| {
                 if let Some(path) = s.settings.layout.find(layout::PanelKind::View3d) {

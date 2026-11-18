@@ -18,12 +18,12 @@ trap 'kill $server 2>/dev/null; wait $server 2>/dev/null || true; rm -rf "$cfg"'
 for _ in $(seq 100); do grep -q "^serving" "$dir/serve.log" && break; sleep 0.1; done
 # Data lands within ~0.3 s of start; inputs start at 1.5 s and the snap is at 3 s.
 at=3
-# Viewport in device px at --scale 2 (window 1280×800 pt, 10 pt padding): beside the 296 pt
-# side panel, and beside the 440 pt Settings page.
-crop_side=1948x1560+20+20
-crop_settings=1640x1560+20+20
+# Viewport in device px at --scale 2 (window 1280×800 pt, under the 52 pt top bar, 10 pt
+# padding): the whole width, and beside the 440 pt Settings page.
+crop_view=2520x1476+20+104
+crop_settings=1640x1476+20+104
 # The Settings page itself, for checks that the page scrolls.
-crop_page=880x1560+1660+20
+crop_page=880x1476+1680+104
 
 snap() { # name, events JSON array, [settings JSON to start from]
   printf '%s\n' "$2" > "$dir/$1.json"
@@ -41,68 +41,70 @@ check() { # baseline, crop, name, expect, events, [settings JSON]
   printf "%-22s %-8s %10s px  %s\n" "$3" "$4" "$px" "$ok"
 }
 ev() { echo "{\"t\": $1, \"type\": \"tap\", \"key\": \"$2\"}"; }
-tap() { echo "[$(ev 1.5 "$1")]"; }
+# Taps at the given times, in turn: `taps 1.0 a 1.4 b`.
+taps() { local e=() ; while (($#)); do e+=("$(ev "$1" "$2")"); shift 2; done; local IFS=,; echo "[${e[*]}]"; }
+# The pointer off the panels (on the top bar), so no panel header shows: for checks that must
+# land back on a baseline taken without a pointer.
+away='{"t": 2.6, "type": "move", "x": 640, "y": 26}'
+with_away() { echo "${1%]}, $away]"; }
 open='{"t": 0.5, "type": "tap", "key": "open-settings"}'
 # The Settings page, scrolled to its end (the Layout section): taps land only on what's on screen.
 send() { echo "[$open, {\"t\": 1.0, \"type\": \"wheel\", \"x\": 1060, \"y\": 400, \"dx\": 0, \"dy\": -2000}, $(ev 1.5 "$1")]"; }
-# The 3D view's settings, open over the viewport's right part (from x 1010 px, beside its
+# The 3D view's settings, open over the viewport's right part (from x 1775 px, under its
 # settings button): checks compare the viewport left of them. `ptab TAB KEY [KEY]` opens them
 # (after the events in $PRE if set), picks tab TAB (0 Scene, 1 Points, 2 Poses, 3 Robot,
-# 4 Cards) and taps the keys in turn (a picker, then its option); `pclose` then closes them
-# with Escape, for controls of what they cover.
+# 4 Cards) and taps the keys in turn (a picker's field, then its option); `pclose` then closes
+# them with Escape, for controls of what they cover.
 popen='{"t": 0.5, "type": "tap", "key": "panel-settings"}'
-crop_pop=980x1560+20+20
+crop_pop=1740x1476+20+104
 ptab() { echo "[${PRE:+$PRE, }$popen, $(ev 0.9 "tab-$1")${2:+, $(ev 1.3 "$2")}${3:+, $(ev 1.7 "$3")}]"; }
-pclose() { local e; e=$(ptab "$@"); echo "${e%]}, {\"t\": 2.1, \"type\": \"key\", \"name\": \"Escape\"}, {\"t\": 2.2, \"type\": \"move\", \"x\": 400, \"y\": 600}]"; }
+pclose() { local e; e=$(ptab "$@"); echo "${e%]}, {\"t\": 2.1, \"type\": \"key\", \"name\": \"Escape\"}, $away]"; }
 drag='{"t": 1.5, "type": "drag", "x": 400, "y": 330, "dx": 160, "dy": 40, "dur": 0.4}'
+# The 3D panel's menu (panel-menu): Reset view, Top down, then (after a separator) Split right,
+# Split down, Show, each with a submenu of the panel kinds (3D view, Image, Data, Topics).
+menu=panel-menu
 
 snap base '[]'
 snap settings "[$open]"
 snap panel "[$popen]"
 printf "%-22s %-8s %13s  %s\n" control expect "viewport diff" result
-side() { check base "$crop_side" "$@"; }
+view() { check base "$crop_view" "$@"; }
 sett() { check settings "$crop_settings" "$@"; }
 pset() { check panel "$crop_pop" "$@"; }
 # The live data must give the same frame twice, or a "changes" proves nothing.
-side no-input-again   same    '[]'
-# Side panel. Each toggle twice: its row (tapped at the centre) and the switch track.
-for k in grid points frames poses image text stats; do
-  side "$k"       changes "$(tap $k)"
-  side "$k-track" changes "$(tap $k-track)"
-done
-side color-height     changes "$(tap color-1)"
-side size-1           changes "$(tap size-0)"
-side size-4           changes "$(tap size-3)"
-side density-half     changes "$(tap decimate-1)"
-side density-eighth   changes "$(tap decimate-3)"
-side top-down         changes "$(tap top)"
-side reset-after-orbit same   "[$drag, $(ev 2.2 home)]"
-side orbit-drag       changes "[$drag]"
-side shift-drag-pan   changes "[{\"t\": 1.45, \"hold\": \"shift\"}, $drag, {\"t\": 2.1, \"hold\": \"\"}]"
-side middle-drag-pan  changes '[{"t": 1.5, "type": "drag", "button": "middle", "x": 400, "y": 330, "dx": 160, "dy": 40, "dur": 0.4}]'
-side wheel-zoom       changes '[{"t": 1.5, "type": "wheel", "x": 400, "y": 330, "dx": 0, "dy": 120}]'
-side settings-done    same    "[$open, $(ev 1.5 close-settings)]"
+view no-input-again   same    '[]'
+# A panel's header shows while the pointer is over the panel, and goes with it.
+view header-on-hover  changes '[{"t": 1.5, "type": "move", "x": 400, "y": 330}]'
+view header-hides     same    "[{\"t\": 1.5, \"type\": \"move\", \"x\": 400, \"y\": 330}, $away]"
+view top-down         changes "$(taps 1.0 $menu 1.5 $menu-item1)"
+view reset-after-orbit same   "$(with_away "[$drag, $(ev 2.0 $menu), $(ev 2.3 $menu-item0)]")"
+view menu-escape      same    "$(with_away "[$(ev 1.0 $menu), {\"t\": 1.5, \"type\": \"key\", \"name\": \"Escape\"}]")"
+view orbit-drag       changes "[$drag]"
+view shift-drag-pan   changes "[{\"t\": 1.45, \"hold\": \"shift\"}, $drag, {\"t\": 2.1, \"hold\": \"\"}]"
+view middle-drag-pan  changes '[{"t": 1.5, "type": "drag", "button": "middle", "x": 400, "y": 330, "dx": 160, "dy": 40, "dur": 0.4}]'
+view wheel-zoom       changes '[{"t": 1.5, "type": "wheel", "x": 400, "y": 330, "dx": 0, "dy": 120}]'
+# The top bar's button opens the Settings page and closes it again.
+view settings-toggle  same    "$(with_away "[$open, $(ev 1.5 open-settings)]")"
 # The 3D view's settings, tab by tab. Topics sort by name: /markers, /objects are the poses.
-pset fixed-frame      changes "$(ptab 0 fixed-frame frame-1)"
-for k in grid-full frames-full labels axis-0; do
+pset fixed-frame      changes "$(ptab 0 fixed-frame-trigger option1)"
+for k in grid grid-track frames labels axis-0; do
   pset "$k"           changes "$(ptab 0 $k)"
 done
-for k in points-full color-full-1 size-full-3 decimate-full-2; do
+for k in points color-1 size-3 decimate-2; do
   pset "$k"           changes "$(ptab 1 $k)"
 done
-for k in poses-full pose-0 pose-1; do
+for k in poses pose-0 pose-1; do
   pset "$k"           changes "$(ptab 2 $k)"
 done
 # The cards (no Image or Data panel in the layout) are under the settings: each is checked once
 # they're closed.
 for k in show-image-card card-annotation-0 card-text card-text-topic-0 card-stats card-stats-topic-0; do
-  side "$k"           changes "$(pclose 4 $k)"
+  view "$k"           changes "$(pclose 4 $k)"
 done
-# Its button again, Escape and a press outside close them, landing back on the baseline (the
-# pointer moved off the button, so it isn't lit by hover).
-side panel-toggle     same    "[$popen, $(ev 1.5 panel-settings), {\"t\": 1.6, \"type\": \"move\", \"x\": 400, \"y\": 600}]"
-side panel-escape     same    "[$popen, {\"t\": 1.5, \"type\": \"key\", \"name\": \"Escape\"}, {\"t\": 1.6, \"type\": \"move\", \"x\": 400, \"y\": 600}]"
-side panel-outside    same    "[$popen, {\"t\": 1.5, \"type\": \"tap\", \"x\": 1100, \"y\": 700}]"
+# Its button again, Escape and a press outside close them, landing back on the baseline.
+view panel-toggle     same    "$(with_away "[$popen, $(ev 1.5 panel-settings)]")"
+view panel-escape     same    "$(with_away "[$popen, {\"t\": 1.5, \"type\": \"key\", \"name\": \"Escape\"}]")"
+view panel-outside    same    "$(with_away "[$popen, {\"t\": 1.5, \"type\": \"tap\", \"x\": 300, \"y\": 700}]")"
 # The wheel over the page's side margins (x 850 and 1270 pt) scrolls the page, once it has
 # settled from opening (by about 2.2 s; the snap is at 3 s), and never zooms the viewport.
 for x in 850 1270; do
@@ -119,42 +121,43 @@ dead='{"connections": ["ws://10.255.255.1:8765"]}'
 switch="[$open, $(ev 0.6 url), {\"t\": 0.8, \"type\": \"type\", \"text\": \"ws://127.0.0.1:8765\"}, {\"t\": 2.2, \"type\": \"key\", \"name\": \"Enter\"}, $(ev 2.4 remove-0)]"
 at=6 sett switch-from-dead  same    "$switch" "$dead"
 
-# Layout. Edit layout draws each panel's controls; with it switched off again, a split leaves a
-# second panel, and closing that panel lands back on the baseline. A preset replaces the layout.
-edit="$(ev 0.6 edit-layout)"
-side edit-layout      changes "[$edit]"
-side split-right      changes "[$edit, $(ev 1.0 panel-split-right), $(ev 1.5 edit-layout)]"
-side split-then-close same    "[$edit, $(ev 1.0 panel-split-right), $(ev 1.5 panel-1-close), $(ev 2.0 edit-layout)]"
-sett edit-layout-full changes "$(send edit-layout-full)"
+# Layout, from panels' menus: splitting adds a panel, and closing it lands back on the
+# baseline once the viewport has settled from resizing twice (by 4.5 s). A preset replaces the
+# layout.
+view split-right      changes "$(taps 1.0 $menu 1.3 $menu-item3 1.6 $menu-item3-sub-item2)"
+at=5 view split-then-close same "$(with_away "$(taps 1.0 $menu 1.3 $menu-item3 1.6 $menu-item3-sub-item2 2.0 panel-1-menu 2.3 panel-1-menu-item4)")"
 sett layout-preset    changes "$(send layout-preset-dashboard)"
 # Dragging a divider resizes the panels beside it; the 3D view is the one that moves the camera.
 dash='{"layout": {"row": [{"panel": "3d", "weight": 2}, {"column": [{"panel": "image"}, {"panel": "data"}]}]}}'
 snap base-dash '[]' "$dash"
-check base-dash "$crop_side" divider-drag changes '[{"t": 1.5, "type": "drag", "key": "panel-divider-0", "dx": -150, "dy": 0, "dur": 0.4}]' "$dash"
+dview() { check base-dash "$crop_view" "$@" "$dash"; }
+dview divider-drag    changes '[{"t": 1.5, "type": "drag", "key": "panel-divider-0", "dx": -150, "dy": 0, "dur": 0.4}]'
 # Weights are shares: 0.5 and 0.25 fill the window as 2 and 1 do.
 snap base-thirds '[]' '{"layout": {"row": [{"panel": "3d", "weight": 2}, {"panel": "image"}]}}'
-check base-thirds "$crop_side" small-weights same '[]' '{"layout": {"row": [{"panel": "3d", "weight": 0.5}, {"panel": "image", "weight": 0.25}]}}'
-# Showing the 3D view in the Data panel swaps it with the 3D panel.
-check base-dash "$crop_side" show-3d-swaps changes "[$edit, $(ev 1.0 panel-1-1-show-3d), $(ev 1.5 edit-layout)]" "$dash"
+check base-thirds "$crop_view" small-weights same '[]' '{"layout": {"row": [{"panel": "3d", "weight": 0.5}, {"panel": "image", "weight": 0.25}]}}'
+# Showing the 3D view in the Data panel (its menu's Show) swaps it with the 3D panel.
+dview show-3d-swaps   changes "$(with_away "$(taps 1.0 panel-1-1-menu 1.3 panel-1-1-menu-item2 1.6 panel-1-1-menu-item2-sub-item0)")"
+# Dragging a panel by its header's name: onto another's middle swaps them, onto its side moves
+# it there, onto itself changes nothing. The 3D panel's handle is at about (60, 76) pt; the Data
+# panel's middle at (1060, 600), its bottom edge at y 770.
+hdrag() { echo "[{\"t\": 1.0, \"type\": \"move\", \"x\": 60, \"y\": 76}, {\"t\": 1.2, \"type\": \"drag\", \"x\": 60, \"y\": 76, \"dx\": $1, \"dy\": $2, \"dur\": 0.6}, $away]"; }
+dview drag-swap       changes "$(hdrag 1000 524)"
+dview drag-move       changes "$(hdrag 1000 694)"
+dview drag-onto-self  same    "$(hdrag 300 300)"
 
-# Robot (the Med 7 from scripts/robot_fixture.py, posed by serve.py's joint states). Its side
-# panel section only exists once it has loaded, so these start from settings that load it.
+# Robot (the Med 7 from scripts/robot_fixture.py, posed by serve.py's joint states), on the
+# Robot tab. The robot would be under the settings: a middle-button pan first moves the scene
+# left of them.
 robot="{\"layout\": {\"panel\": \"3d\", \"robot\": {\"urdf\": \"$PWD/fixtures/med7/med7.urdf\"}}}"
 [[ -f fixtures/med7/med7.urdf ]] || { echo "no fixtures/med7: run scripts/robot_fixture.py"; exit 1; }
-snap base-robot '[]' "$robot"
-rside() { check base-robot "$crop_side" "$@" "$robot"; }
-rside robot           changes "$(tap robot)"
-rside robot-track     changes "$(tap robot-track)"
-rside robot-opacity   changes "$(tap robot-opacity-2)"
-# In the 3D view's settings the robot would be under them: a middle-button pan first moves the
-# scene left of them.
 pan='{"t": 0.2, "type": "drag", "button": "middle", "x": 400, "y": 330, "dx": -300, "dy": 0, "dur": 0.2}'
 snap panel-robot "$(PRE=$pan ptab 3)" "$robot"
 rpset() { check panel-robot "$crop_pop" "$@" "$robot"; }
-rpset robot-full         changes "$(PRE=$pan ptab 3 robot-full)"
-rpset robot-opacity-full changes "$(PRE=$pan ptab 3 robot-opacity-full-3)"
+rpset robot              changes "$(PRE=$pan ptab 3 robot)"
+rpset robot-track        changes "$(PRE=$pan ptab 3 robot-track)"
+rpset robot-opacity      changes "$(PRE=$pan ptab 3 robot-opacity-3)"
 # Picking the topic Auto already uses keeps the pose: switching must not drop received joints.
-rpset joints-explicit same    "$(PRE=$pan ptab 3 joint-topic joints-1)"
+rpset joints-explicit    same    "$(PRE=$pan ptab 3 joint-topic-trigger option1)"
 # Typing the path and pressing Enter loads the robot (from no robot, so the arm appears).
 # Typing runs at about 30 characters a second: Enter waits for the whole path.
 snap panel-pan "$(PRE=$pan ptab 3)"

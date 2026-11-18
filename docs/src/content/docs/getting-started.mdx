@@ -58,7 +58,7 @@ Run `lantern`. It connects to `ws://localhost:8765`. Until something answers the
 chip over the viewport says `Can't reach ws://localhost:8765: …` and Lantern retries every second,
 so you can start the [source](/lantern/connect/) before or after it.
 
-![Lantern's window: a table scan coloured by intensity, two labelled objects, TF axes and a KUKA arm in the viewport, with the side panel on the right.](../../../screenshots/robot-home-sdk.png)
+![Lantern's window: a table scan coloured by intensity, two labelled objects, TF axes and a KUKA arm in the viewport, under the top bar with the connection.](../../../screenshots/robot-home-sdk.png)
 
 | Input | Action |
 | --- | --- |
@@ -66,21 +66,14 @@ so you can start the [source](/lantern/connect/) before or after it.
 | Shift-drag or middle-drag | Pan |
 | Scroll | Zoom |
 
-The top of the side panel shows the connection. Below it are the 3D view's quick controls:
+The top bar shows the connection. Point at a panel and its header appears: the panel's name, which
+you drag to [move the panel](/lantern/guides/layout/#edit-the-layout), a slider button and a **⋯**
+menu. On the 3D view, the slider button opens [its settings](/lantern/guides/settings/#3d-view):
+the fixed frame, the point cloud, poses, the robot and the cards. The menu has **Reset view**,
+**Top down**, and the layout's split, show and close.
 
-- **Displays:** grid, point cloud, TF frames and poses, plus the camera image, text and stats cards
-  while the 3D view draws them and a server offers their topics.
-- **Point cloud:** colour, point size and density.
-- **Robot:** visibility and opacity, once a robot model is loaded.
-- **Camera:** **Reset view** and **Top down**.
-
-With no 3D view in the layout, the side panel says so instead.
-
-The slider button at the top right of the 3D view opens
-[its settings](/lantern/guides/settings/#3d-view): the fixed frame, the point cloud topic, poses,
-the robot and the cards. The slider button at the top of the side panel opens the
-[Settings page](/lantern/guides/settings/), with the servers, the topic list and the layout. The
-tiles button next to it [edits the panel layout](/lantern/guides/layout/).
+The slider button at the right of the top bar opens the [Settings page](/lantern/guides/settings/),
+with the servers, the topic list and the layout presets and files.
 
 [Flags](/lantern/guides/settings/#command-line) set the servers, robot and layout for one run:
 

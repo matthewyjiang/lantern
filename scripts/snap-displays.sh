@@ -38,8 +38,8 @@ shot() { # name, settings JSON, seconds, [Lantern flags...]
   echo "$dir/$name.png: $(grep -o '[0-9]* points and [0-9]* robot vertices drawn' "$dir/$name.log")"
 }
 fail=0
-same() { # a, b: the viewport beside the side panel must match
-  local px; px=$(compare -metric AE -fuzz 1% -extract 1948x1560+20+20 "$dir/$1.png" "$dir/$2.png" null: 2>&1 | cut -d' ' -f1 || true)
+same() { # a, b: the viewport under the top bar must match
+  local px; px=$(compare -metric AE -fuzz 1% -extract 2520x1476+20+104 "$dir/$1.png" "$dir/$2.png" null: 2>&1 | cut -d' ' -f1 || true)
   local ok=PASS; [[ $px == 0 ]] || { ok=FAIL; fail=1; }
   printf "%-44s %8s px  %s\n" "$1 = $2" "$px" "$ok"
 }

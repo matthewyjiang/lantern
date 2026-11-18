@@ -3,8 +3,8 @@ title: Panels and layouts
 description: Split the window into panels, choose what each one shows, and save the layout to a file.
 ---
 
-The area beside the side panel is a layout of panels. It starts as a single 3D view. You can split
-it, choose what each panel shows, and resize panels. Each panel keeps its own settings in the
+The window under the top bar is a layout of panels. It starts as a single 3D view. You can split
+it, choose what each panel shows, rearrange panels by dragging them, and resize them. Each panel keeps its own settings in the
 layout. The layout is saved with your settings, and you can also save it to a file and load it
 with `--layout`.
 
@@ -21,8 +21,8 @@ This is the `dashboard` preset (`--layout dashboard`).
 | **Data** | `data` | Stats topics' statuses, then text topics' newest messages |
 | **Topics** | `topics` | Every advertised topic, the list from [Settings → Topics](/lantern/guides/settings/#topics) |
 
-A layout has at most one 3D view; the other panels can appear more than once. The slider button at
-the top right of a 3D, Image or Data panel opens its [settings](/lantern/guides/settings/#panel-settings):
+A layout has at most one 3D view; the other panels can appear more than once. The slider button in
+a 3D, Image or Data panel's header opens its [settings](/lantern/guides/settings/#panel-settings):
 what it draws and from which topics. Two Image panels can show two cameras, or the same camera with
 different annotations.
 
@@ -32,21 +32,30 @@ in the 3D view's settings, under **Cards**.
 
 ## Edit the layout
 
-Drag the gap between two panels to resize them, at any time.
+Point at a panel and its header appears over its top: the panel's name, its settings button and
+its **⋯** menu. Changes are saved as you make them.
 
-For anything else, press the tiles button at the top of the side panel, or turn on **Edit layout**
-in **Settings → Layout**. Each panel then shows its controls:
+![The 3D view's header with its menu open: Reset view and Top down, then Split right with its submenu of panel types (3D view greyed out), Split down, Show and Close.](../../../../screenshots/layout-menu.png)
 
-![The same three panels dimmed, each with a row of four panel names (its own highlighted) above Split right, Split down and Close buttons.](../../../../screenshots/layout-edit.png)
+The menu has:
 
-- The panel names set what the panel shows. A panel given a new type starts with that type's
+- **Reset view** and **Top down**, on the 3D view only.
+- **Split right** and **Split down**, each with a submenu of panel types: the new panel takes half
+  of this one's space and starts with that type's default settings. **3D view** is greyed out when
+  the layout already has one.
+- **Show**, to change what the panel shows. A panel given a new type starts with that type's
   default settings. Picking **3D view** where another panel has it swaps the two, each with its
   settings.
-- **Split right** and **Split down** halve the panel. The new panel shows the first type the layout
-  doesn't have yet, with default settings.
-- **Close** removes the panel and its neighbours take the space. The last panel can't be closed.
+- **Close**, which removes the panel; its neighbours take the space. The last panel can't be
+  closed.
 
-Press the tiles button again when you're done. Changes are saved as you make them.
+Drag a panel by its name to move it. Over another panel, a highlight shows where it will land:
+drop it near an edge to put it on that side, or in the middle to swap the two panels. Each keeps
+its settings. Press Escape during the drag to cancel it.
+
+![The 3D view being dragged onto the Data panel's lower half, which is highlighted; the 3D view is dimmed in its old place.](../../../../screenshots/layout-drag.png)
+
+Drag the gap between two panels to resize them.
 
 ## Presets
 

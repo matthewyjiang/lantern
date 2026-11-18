@@ -16,12 +16,28 @@ use crate::annotate;
 use crate::camera::OrbitCamera;
 use crate::connection::{Connection, Picked, Post, Received};
 use crate::decode::Kind;
-use crate::layout::{Layout, Panel, PanelKind};
+use crate::layout::{Edge, Layout, Panel, PanelKind};
 use crate::robot::{self, Model};
 use crate::scene::{percentiles, Annotation, Diagnostic, Image, PointCloud, PointColor, Pose, TfTree};
 use crate::settings::{DataSettings, ImageSettings, Settings, View3dSettings};
 use crate::source::{Event, Wanted};
 use crate::viewport::{self, Lines, RobotView, Shade, View};
+
+/// The submenus of a panel's menu.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Submenu {
+    SplitRight,
+    SplitDown,
+    Show,
+}
+
+/// A panel dragged by its header.
+pub struct PanelDrag {
+    pub from: Vec<usize>,
+    /// The panel under the pointer, other than `from`, and the side of it the dragged one
+    /// would go to, or `None` in its middle, to swap.
+    pub over: Option<(Vec<usize>, Option<Edge>)>,
+}
 
 /// The tabs of the 3D view's settings.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -92,8 +108,10 @@ pub struct State {
     pub urdf_edit: TextEdit,
     /// Pointer travel already applied by the drag in progress.
     pub drag_seen: (f32, f32),
-    /// Every panel shows its layout controls (what it shows, split, close).
-    pub layout_edit: bool,
+    /// The panel whose menu is open, and the submenu open in it.
+    pub panel_menu: Option<(Vec<usize>, Option<Submenu>)>,
+    /// The panel being dragged by its header, and where it would land.
+    pub panel_drag: Option<PanelDrag>,
     /// The Settings field for a layout file to load or save.
     pub layout_file_edit: TextEdit,
     /// How the last layout file load or save went.
@@ -260,7 +278,8 @@ impl State {
             tab_3d: Tab3d::Scene,
             open_picker: None,
             drag_seen: (0.0, 0.0),
-            layout_edit: false,
+            panel_menu: None,
+            panel_drag: None,
             layout_file_edit: TextEdit::new(String::new()),
             layout_file_note: None,
         }
@@ -290,6 +309,7 @@ impl State {
     /// showing what it has, or closes them if they're open.
     pub fn toggle_panel_settings(&mut self, path: Vec<usize>) {
         self.open_picker = None;
+        self.panel_menu = None;
         if self.panel_settings.as_ref() == Some(&path) {
             self.panel_settings = None;
             return;
@@ -1017,7 +1037,7 @@ mod tests {
         let post: Post = Arc::new(|_, _| {});
         let mut s = State::new(file.clone(), o, post);
         s.edit3d(|v| v.grid = false);
-        s.settings.layout.split(&[], crate::layout::Dir::Row);
+        s.settings.layout.insert(&[], crate::layout::Edge::Right, Panel::new(PanelKind::Data));
         assert_eq!(urdf(&s.overrides.to_save(&s.settings, &file)), "arm.urdf");
     }
 

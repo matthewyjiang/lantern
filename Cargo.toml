@@ -7,6 +7,8 @@ publish = false
 
 [dependencies]
 rune = { git = "https://github.com/anomalyco/rune", rev = "4a2e437954f01eaacc13c0515a1d39474dd6512c", features = ["tooling"] }
+# Drawn menus, selects and overlays (Rune's native menus are macOS and Windows only).
+rune-kit = { git = "https://github.com/anomalyco/rune", rev = "4a2e437954f01eaacc13c0515a1d39474dd6512c" }
 wgpu = { version = "~30.0.1", default-features = false, features = ["std", "parking_lot", "wgsl", "vulkan"] }
 bytemuck = { version = "1.25", features = ["derive"] }
 glam = { version = "0.30", features = ["bytemuck"] }
