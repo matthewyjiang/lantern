@@ -1,19 +1,21 @@
 //! Lantern: a small RViz stand-in. Connects to Foxglove WebSocket servers (foxglove_bridge for
 //! ROS 2, or any app on a Foxglove SDK) and draws their point clouds, TF frames, poses and robot
-//! in a 3D viewport, with camera images, text and stats over it, a side panel for quick display
-//! controls and a Settings page.
+//! in a 3D viewport, with camera images, text and stats over it or in panels of their own, a
+//! side panel for quick display controls and a Settings page.
 //!
-//! `cargo run --release` opens the window. `--connect URL` (repeatable) and `--urdf PATH` set the
-//! servers and the robot for this run. Headless (Rune's tooling): `--snap out/lantern.png
-//! --realtime --at 3` renders a frame three seconds in, once data has arrived; `--frames 240`
-//! times 240 frames with no readback; the run ends with Rune's CPU timing and Lantern's GPU
-//! timestamps.
+//! `cargo run --release` opens the window. `--connect URL` (repeatable), `--urdf PATH` and
+//! `--layout NAME|PATH` set the servers, the robot and the panel layout for this run. Headless
+//! (Rune's tooling): `--snap out/lantern.png --realtime --at 3` renders a frame three seconds in,
+//! once data has arrived; `--frames 240` times 240 frames with no readback; the run ends with
+//! Rune's CPU timing and Lantern's GPU timestamps.
 
 mod annotate;
 mod app;
 mod connection;
 mod camera;
 mod decode;
+mod layout;
+mod panels;
 mod robot;
 mod scene;
 mod settings;
@@ -29,6 +31,7 @@ use rune::{App, AppHandle, AppSpec};
 use app::{Overrides, State};
 use connection::Post;
 use decode::{ColorChoice, Decoded};
+use layout::Layout;
 use settings::Settings;
 use source::Event;
 use viewport::Viewport;
@@ -97,6 +100,12 @@ fn parse_args() -> (Overrides, Vec<String>) {
                 }
             }
             "--urdf" => overrides.robot_urdf = Some(value()),
+            "--layout" => {
+                overrides.layout = Some(Layout::named_or_file(&value()).unwrap_or_else(|e| {
+                    eprintln!("lantern: --layout: {e}");
+                    std::process::exit(2);
+                }));
+            }
             _ => rest.push(a),
         }
     }
@@ -111,6 +120,7 @@ fn main() {
             ("height", |s| s.set_unsaved(|c| c.color = ColorChoice::Height)),
             ("intensity", |s| s.set_unsaved(|c| c.color = ColorChoice::Field("intensity".into()))),
             ("settings", |s| s.settings_open = true),
+            ("edit-layout", |s| s.layout_edit = true),
             // For timing: the same frame without the points, with half / a quarter of them.
             ("no-points", |s| s.set_unsaved(|c| c.show_points = false)),
             ("half", |s| s.set_unsaved(|c| c.decimate = 2)),

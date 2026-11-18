@@ -1,7 +1,8 @@
-//! The window: the viewport card with its overlays (camera image, text, stats), and on the right
-//! either the side panel (quick display controls) or the Settings page (connections, topics,
-//! frames, poses, robot, display). Every control here edits `State::settings` or the camera;
-//! `State::sync` applies the edit.
+//! The window: the panels the layout tiles (`panels.rs`), and on the right either the side panel
+//! (quick display controls) or the Settings page (connections, topics, frames, poses, robot,
+//! display, layout). The 3D view is here with its overlays; so are the pieces other panels share
+//! with them (the annotated image, a status block, the topic list). Every control edits
+//! `State::settings` or the camera; `State::sync` applies the edit.
 
 use std::collections::BTreeSet;
 
@@ -12,7 +13,9 @@ use rune::{Color, Cx, Drag, El, Phase, PointerButton, ScrollSpec, Tx, WheelEvent
 use crate::app::State;
 use crate::connection::Connection;
 use crate::decode::{ColorChoice, Kind};
-use crate::scene::{Annotation, Level, PointColor};
+use crate::layout::{PanelKind, Preset, PRESETS};
+use crate::panels;
+use crate::scene::{Annotation, Diagnostic, Image, Level, PointColor};
 use crate::settings::Settings;
 use crate::source::Status;
 use crate::viewport::{self, Shade};
@@ -43,20 +46,22 @@ fn waiting() -> Color {
 fn failed() -> Color {
     oklch(0.66, 0.2, 25.0)
 }
-const SMALL: TextStyle = TextStyle::new(11.0, 500.0);
+pub(crate) const SMALL: TextStyle = TextStyle::new(11.0, 500.0);
 /// Topic, frame and URL text: names people type and match character for character.
-const MONO: TextStyle = TextStyle::new(12.0, 500.0).mono();
-const MONO_SMALL: TextStyle = TextStyle::new(11.0, 500.0).mono();
+pub(crate) const MONO: TextStyle = TextStyle::new(12.0, 500.0).mono();
+pub(crate) const MONO_SMALL: TextStyle = TextStyle::new(11.0, 500.0).mono();
 
 pub fn view(s: &State, cx: &mut Cx<State>) -> El {
     let t = tok::theme(true);
     let side = if s.settings_open { settings_page(s) } else { sidebar(s) };
-    row().w_full().h_full().fill(t.bg).child(viewport_pane(s, cx)).child(side)
+    row().w_full().h_full().fill(t.bg).child(panels::layout(s, cx)).child(side)
 }
 
-// ---- viewport ----
+// ---- 3D view ----
 
-fn viewport_pane(s: &State, cx: &mut Cx<State>) -> El {
+/// The 3D panel: the viewport, with frame labels and its overlays. The camera image, text and
+/// stats sit over it as cards unless the layout has a panel for them (Image, Data).
+pub(crate) fn view3d(s: &State, cx: &mut Cx<State>) -> El {
     let stage = effect(viewport::MARK)
         .key("viewport")
         .w_full()
@@ -67,30 +72,28 @@ fn viewport_pane(s: &State, cx: &mut Cx<State>) -> El {
             s.camera.zoom((-e.dy * 0.004).exp());
             true
         });
-    let mut card = el()
-        .grow(1.0)
-        .h_full()
-        .clip_rounded(tok::radius::LG)
-        .border(1.0, oklcha(1.0, 0.0, 0.0, 0.07))
-        .child(stage);
+    let mut card = el().w_full().h_full().child(stage);
     let size = cx.layout_size("viewport");
     if let Some(size) = size {
         for label in frame_labels(s, size) {
             card = card.child(label);
         }
     }
-    let right = col().key("overlay-right").gap(8.0).items_end().child(hints()).children(text_cards(s)).children(stats_card(s));
+    let layout = &s.settings.layout;
+    let (image_inset, data_inset) = (!layout.has(PanelKind::Image), !layout.has(PanelKind::Data));
+    let mut right = col().key("overlay-right").gap(8.0).items_end().child(hints());
+    if data_inset {
+        right = right.children(text_cards(s)).children(stats_card(s));
+    }
     // The status chip wraps short of the right column (hints, text and stats cards).
     let chip_w = match (size, cx.layout_size("overlay-right")) {
         (Some([vw, _]), Some([rw, _])) => (vw - rw - 3.0 * 14.0).clamp(200.0, 520.0),
         _ => 520.0,
     };
-    card = card
-        .child(col().gap(8.0).items_start().child(point_badge(s)).children(status_chip(s, chip_w)).pin(Some(14.0), Some(14.0), None, None))
+    card.child(col().gap(8.0).items_start().child(point_badge(s)).children(status_chip(s, chip_w)).pin(Some(14.0), Some(14.0), None, None))
         .child(right.pin(None, Some(14.0), Some(14.0), None))
         .children(legend(s).map(|l| l.pin(Some(14.0), None, None, Some(14.0))))
-        .children(size.and_then(|size| image_card(s, size)).map(|c| c.pin(None, None, Some(14.0), Some(14.0))));
-    el().grow(1.0).h_full().padding(10.0).pr(0.0).child(card)
+        .children(size.filter(|_| image_inset).and_then(|size| image_card(s, size)).map(|c| c.pin(None, None, Some(14.0), Some(14.0))))
 }
 
 /// Orbit with the primary button; pan with the middle button or Shift.
@@ -130,7 +133,7 @@ fn frame_labels(s: &State, [w, h]: [f32; 2]) -> Vec<El> {
 }
 
 /// Translucent dark glass for overlays on the viewport.
-fn glass() -> El {
+pub(crate) fn glass() -> El {
     el().fill(oklcha(0.16, 0.006, 265.0, 0.78)).radius(tok::radius::MD).border(1.0, oklcha(1.0, 0.0, 0.0, 0.06))
 }
 
@@ -260,11 +263,23 @@ fn image_card(s: &State, [vw, vh]: [f32; 2]) -> Option<El> {
         return None;
     }
     let (topic, image) = s.shown_image()?;
-    let t = tok::theme(true);
     let (iw, ih) = (image.width as f32, image.height as f32);
     let w = (vw * 0.4).min(IMAGE_MAX_W).min(vh * 0.45 * iw / ih);
-    let scale = w / iw;
-    let mut picture = el().key("image-card").size(w, ih * scale).radius(tok::radius::SM).pixels(&s.image);
+    Some(glass().padding(6.0).child(col().gap(5.0).child(image_caption(topic, image)).child(picture(s, "image-card", image, w))))
+}
+
+/// An image's topic and size, on one line.
+pub(crate) fn image_caption(topic: &str, image: &Image) -> El {
+    let t = tok::theme(true);
+    row().px(2.0).gap(8.0).justify_between()
+        .child(text(topic.to_string()).font(MONO_SMALL).color(t.text_secondary).truncate())
+        .child(text(format!("{}×{}", image.width, image.height)).font(MONO_SMALL.features("tnum")).color(t.text_secondary))
+}
+
+/// The shown image `w` points wide, annotations drawn in, with its text annotations set over it.
+pub(crate) fn picture(s: &State, key: impl Into<String>, image: &Image, w: f32) -> El {
+    let scale = w / image.width as f32;
+    let mut picture = el().key(key).size(w, image.height as f32 * scale).radius(tok::radius::SM).pixels(&s.image);
     for a in s.annotations() {
         let Annotation::Text { at, text: label, size, color, background } = a else { continue };
         // 9 pt at the least, to stay legible on a small card; the chip's top is a line (Rune's
@@ -277,13 +292,7 @@ fn image_card(s: &State, [vw, vh]: [f32; 2]) -> Option<El> {
         }
         picture = picture.child(chip);
     }
-    Some(glass().padding(6.0).child(
-        col().gap(5.0)
-            .child(row().px(2.0).gap(8.0).justify_between()
-                .child(text(topic.clone()).font(MONO_SMALL).color(t.text_secondary).truncate())
-                .child(text(format!("{}×{}", image.width, image.height)).font(MONO_SMALL.features("tnum")).color(t.text_secondary)))
-            .child(picture),
-    ))
+    picture
 }
 
 /// "and N more …", when a card shows only the first of its items.
@@ -315,34 +324,37 @@ fn stats_card(s: &State) -> Option<El> {
     if !s.settings.show_stats {
         return None;
     }
-    let t = tok::theme(true);
-    let mut body = col().gap(8.0);
     let statuses: Vec<_> = s.stats().flat_map(|(_, d)| d).collect();
     if statuses.is_empty() {
         return None;
     }
-    for d in statuses.iter().take(STATUSES) {
-        let hue = match d.level {
-            Level::Ok => good(),
-            Level::Warn => waiting(),
-            Level::Error => failed(),
-            Level::Stale => t.text_secondary,
-        };
-        let mut block = col().gap(3.0).child(
-            row().gap(7.0).items_center()
-                .child(el().size(7.0, 7.0).radius(3.5).fill(hue))
-                .child(text(d.name.clone()).font(type_::LABEL).color(t.text))
-                .child(text(d.message.clone()).font(type_::LABEL).color(t.text_secondary).truncate().grow(1.0).min_w(0.0)),
-        );
-        for (k, v) in &d.values {
-            block = block.child(row().pl(14.0).gap(8.0).justify_between()
-                .child(text(k.clone()).font(SMALL).color(t.text_secondary).truncate().min_w(0.0))
-                .child(text(v.clone()).font(MONO_SMALL.features("tnum")).color(t.text)));
-        }
-        body = body.child(block);
-    }
-    body = body.children(more(statuses.len().saturating_sub(STATUSES), "statuses"));
+    let body = col().gap(8.0)
+        .children(statuses.iter().take(STATUSES).map(|d| status_block(d)))
+        .children(more(statuses.len().saturating_sub(STATUSES), "statuses"));
     Some(glass().key("stats-card").w(CARD_W).px(10.0).py(8.0).child(body))
+}
+
+/// One status: its level, name and message, then each reading.
+pub(crate) fn status_block(d: &Diagnostic) -> El {
+    let t = tok::theme(true);
+    let hue = match d.level {
+        Level::Ok => good(),
+        Level::Warn => waiting(),
+        Level::Error => failed(),
+        Level::Stale => t.text_secondary,
+    };
+    let mut block = col().gap(3.0).child(
+        row().gap(7.0).items_center()
+            .child(el().size(7.0, 7.0).radius(3.5).fill(hue))
+            .child(text(d.name.clone()).font(type_::LABEL).color(t.text))
+            .child(text(d.message.clone()).font(type_::LABEL).color(t.text_secondary).truncate().grow(1.0).min_w(0.0)),
+    );
+    for (k, v) in &d.values {
+        block = block.child(row().pl(14.0).gap(8.0).justify_between()
+            .child(text(k.clone()).font(SMALL).color(t.text_secondary).truncate().min_w(0.0))
+            .child(text(v.clone()).font(MONO_SMALL.features("tnum")).color(t.text)));
+    }
+    block
 }
 
 // ---- side panel ----
@@ -395,7 +407,8 @@ fn host(url: &str) -> &str {
 
 fn sidebar(s: &State) -> El {
     let st = &s.settings;
-    let gear = icon_button("open-settings", "Settings", |s| s.settings_open = true);
+    let gear = icon_button("open-settings", "Settings", false, sliders_glyph(), |s| s.settings_open = true);
+    let tiles = icon_button("edit-layout", "Edit layout", s.layout_edit, tiles_glyph(), |s| s.layout_edit ^= true);
 
     let displays = section("Displays")
         .child(toggle_row("grid", "Grid", st.show_grid, |s| s.settings.show_grid ^= true))
@@ -426,7 +439,7 @@ fn sidebar(s: &State) -> El {
     );
 
     col().key("sidebar").w(SIDEBAR_W).h_full().px(20.0).py(22.0).gap(26.0)
-        .child(row().items_center().gap(8.0).child(header(s).grow(1.0).min_w(0.0)).child(gear))
+        .child(row().items_center().gap(8.0).child(header(s).grow(1.0).min_w(0.0)).child(tiles).child(gear))
         .child(displays)
         .child(cloud)
         .children(robot)
@@ -442,17 +455,10 @@ fn color_choices(key: &'static str, s: &State, full: bool) -> El {
             options.push((ColorChoice::Field(f.clone()), f));
         }
     }
-    let t = tok::theme(true);
-    let mut wrap = row().key(key).role("radiogroup").gap(6.0).wrap();
+    let mut wrap = row().key(key).role("radiogroup").gap(6.0).flex_wrap();
     for (i, (choice, label)) in options.into_iter().enumerate() {
         let chosen = choice == s.settings.color;
-        let set = choice.clone();
-        let mut chip = el().key(format!("{key}-{i}")).role("radio").label(label.clone()).checked(chosen).focusable(true)
-            .h(28.0).px(12.0).center().radius(tok::radius::MD)
-            .on_press(move |s: &mut State| s.settings.color = set.clone())
-            .child(text(label).font(type_::LABEL).color(if chosen { t.text } else { t.text_secondary }));
-        chip = if chosen { selected(chip) } else { chip.fill(t.control_track).hover(t.hover).press(t.press) };
-        wrap = wrap.child(chip);
+        wrap = wrap.child(chip(format!("{key}-{i}"), &label, chosen, move |s| s.settings.color = choice.clone()));
     }
     wrap
 }
@@ -477,7 +483,8 @@ fn settings_page(s: &State) -> El {
         .child(frames_section(s))
         .child(poses_section(s))
         .child(robot_section(s))
-        .child(display_section(s));
+        .child(display_section(s))
+        .child(layout_section(s));
 
     col().key("settings").w(SETTINGS_W).h_full().pt(22.0).gap(20.0).min_h(0.0)
         .child(top.px(SETTINGS_PAD))
@@ -533,15 +540,20 @@ fn connection_section(s: &State) -> El {
 }
 
 fn topics_section(s: &State) -> El {
+    section("Topics").child(topics(s, "topic"))
+}
+
+/// Every server's topics, each with its kind, schema, last error and its control (pick it, or
+/// switch it on or off), under a line counting them. Settings → Topics and the Topics panel show
+/// it; `prefix` keys their rows apart (`{prefix}-0`, `{prefix}-1`, … across every server).
+pub(crate) fn topics(s: &State, prefix: &str) -> El {
     let t = tok::theme(true);
-    let sec = section("Topics");
     let conns = s.connections();
     let total: usize = conns.iter().map(|c| c.received.channels.len()).sum();
     if total == 0 {
-        return sec.child(text("No topics yet. Topics appear here as the servers advertise them.").font(type_::LABEL).color(t.text_secondary).max_lines(3));
+        return text("No topics yet. Topics appear here as the servers advertise them.").font(type_::LABEL).color(t.text_secondary).max_lines(3);
     }
-    let mut list = col().key("topics").radius(tok::radius::MD).fill(t.card).border(1.0, t.card_border);
-    // Rows are keyed topic-0, topic-1, … across every server.
+    let mut list = col().key(format!("{prefix}s")).radius(tok::radius::MD).fill(t.card).border(1.0, t.card_border);
     let mut i = 0;
     for conn in conns.iter().filter(|c| !c.received.channels.is_empty()) {
         // With several servers, each one's topics sit under its address.
@@ -552,7 +564,7 @@ fn topics_section(s: &State) -> El {
             list = list.child(row().px(12.0).pt(8.0).pb(4.0).child(text(host(&conn.url).to_string()).font(MONO_SMALL).color(t.text_secondary)));
         }
         for (row_in_group, c) in conn.received.channels.iter().enumerate() {
-            let key = format!("topic-{i}");
+            let key = format!("{prefix}-{i}");
             let topic = c.topic.clone();
             let control: El = match c.kind {
                 // One topic of the kind is drawn: pick it.
@@ -586,7 +598,7 @@ fn topics_section(s: &State) -> El {
         }
     }
     let supported = conns.iter().flat_map(|c| &c.received.channels).filter(|c| c.kind.is_some()).count();
-    sec.child(text(format!("{total} topics, {supported} Lantern can draw")).font(type_::LABEL).color(t.text_secondary)).child(list)
+    col().w_full().gap(10.0).child(text(format!("{total} topics, {supported} Lantern can draw")).font(type_::LABEL).color(t.text_secondary)).child(list)
 }
 
 fn toggle_in(set: &mut BTreeSet<String>, topic: &str) {
@@ -756,6 +768,41 @@ fn display_section(s: &State) -> El {
         .child(toggle_row("stats-full", "Stats", st.show_stats, |s| s.settings.show_stats ^= true))
 }
 
+fn layout_section(s: &State) -> El {
+    let t = tok::theme(true);
+    let mut presets = row().key("layout-presets").gap(6.0).flex_wrap();
+    for Preset { name, layout } in PRESETS {
+        presets = presets.child(chip(format!("layout-preset-{name}"), name, layout() == s.settings.layout, move |s| s.settings.layout = layout()));
+    }
+    let input = el().key("layout-file-field").grow(1.0).min_w(0.0).h(32.0).px(10.0).radius(tok::radius::MD).clip_rounded(tok::radius::MD).fill(t.card).border(1.0, t.card_border).center_y()
+        .child(
+            text_input(&s.layout_file_edit, MONO)
+                .key("layout-file")
+                .w_full()
+                .single_line()
+                .color(t.text)
+                .placeholder("/path/to/layout.json", t.text_secondary)
+                .on_edit(|s: &mut State| &mut s.layout_file_edit)
+                .on_submit(|s: &mut State, tx: &mut Tx| {
+                    s.load_layout();
+                    tx.blur();
+                }),
+        );
+    let note = s.layout_file_note.as_ref().map(|note| match note {
+        Ok(done) => text(done.clone()).font(type_::LABEL).color(t.text_secondary).max_lines(2),
+        Err(e) => text(e.clone()).font(type_::LABEL).color(oklch(0.72, 0.17, 25.0)).max_lines(4),
+    });
+    section("Layout")
+        .child(toggle_row("edit-layout-full", "Edit layout", s.layout_edit, |s| s.layout_edit ^= true))
+        .child(text("While editing, each panel has controls to change what it shows, split it or close it. Drag the gap between two panels to resize them, editing or not.").font(type_::LABEL).color(t.text_secondary).max_lines(3))
+        .child(field("Presets", presets))
+        .child(field_note("Layout file", "Save writes the layout to this file. Load reads a file, or a preset by name. To start with one: lantern --layout FILE."))
+        .child(row().gap(8.0).child(input)
+            .child(button("load-layout", "Load", State::load_layout).grow(0.0).w(64.0).min_w(64.0))
+            .child(button("save-layout", "Save", State::save_layout).grow(0.0).w(64.0).min_w(64.0)))
+        .children(note.map(|n| n.key("layout-file-note")))
+}
+
 // The side panel and the Settings page both offer these (keyed apart).
 fn point_size_field(key: &'static str, st: &Settings) -> El {
     field("Point size (pt)", segmented(key, &[(1.0, "1"), (2.0, "2"), (3.0, "3"), (4.0, "4")], st.point_size, |s, v| s.settings.point_size = v))
@@ -847,6 +894,16 @@ fn selected(e: El) -> El {
     e.fill(oklch(0.36, 0.008, 265.0)).shadow(1.0, 2.0, tok::theme(true).edge)
 }
 
+/// One option of a wrapping row of them; the chosen one sits raised.
+pub(crate) fn chip(key: String, label: &str, chosen: bool, pick: impl Fn(&mut State) + 'static) -> El {
+    let t = tok::theme(true);
+    let chip = el().key(key).role("radio").label(label.to_string()).checked(chosen).focusable(true)
+        .h(28.0).px(12.0).center().radius(tok::radius::MD)
+        .on_press(pick)
+        .child(text(label.to_string()).font(type_::LABEL).color(if chosen { t.text } else { t.text_secondary }));
+    if chosen { selected(chip) } else { chip.fill(t.control_track).hover(t.hover).press(t.press) }
+}
+
 /// Equal-width options in a track; the chosen one sits raised.
 fn segmented<T: Copy + PartialEq + 'static>(key: &'static str, options: &[(T, &str)], current: T, set: fn(&mut State, T)) -> El {
     let t = tok::theme(true);
@@ -867,23 +924,41 @@ fn segmented<T: Copy + PartialEq + 'static>(key: &'static str, options: &[(T, &s
     track
 }
 
+/// A button that shares its row's width with its neighbours.
 fn button(key: &'static str, label: &'static str, act: fn(&mut State)) -> El {
+    fitted_button(key, label, act).grow(1.0)
+}
+
+/// A button as wide as its label and the padding it's given.
+pub(crate) fn fitted_button(key: impl Into<String>, label: &'static str, act: impl Fn(&mut State) + 'static) -> El {
     let t = tok::theme(true);
-    el().key(key).role("button").label(label).focusable(true).grow(1.0).h(32.0).center().radius(tok::radius::MD)
+    el().key(key).role("button").label(label).focusable(true).h(32.0).center().radius(tok::radius::MD)
         .fill(t.control_off).border(1.0, t.card_border).hover(t.hover).press(t.press).press_scale(0.97)
         .on_press(act)
         .child(text(label).font(type_::LABEL).color(t.text))
 }
 
-/// A square button with a gear drawn from primitives (no icon font needed).
-fn icon_button(key: &'static str, label: &'static str, act: fn(&mut State)) -> El {
+/// Two sliders, drawn from primitives (no icon font needed): the Settings button's glyph.
+fn sliders_glyph() -> El {
     let t = tok::theme(true);
     let bar = |w: f32| el().w(w).h(2.0).radius(1.0).fill(t.text_secondary);
-    let glyph = col().gap(3.0).items_end()
+    col().gap(3.0).items_end()
         .child(row().gap(2.0).items_center().child(bar(4.0)).child(el().size(5.0, 5.0).radius(2.5).border(1.5, t.text_secondary)).child(bar(5.0)))
-        .child(row().gap(2.0).items_center().child(bar(9.0)).child(el().size(5.0, 5.0).radius(2.5).border(1.5, t.text_secondary)).child(bar(0.0)));
+        .child(row().gap(2.0).items_center().child(bar(9.0)).child(el().size(5.0, 5.0).radius(2.5).border(1.5, t.text_secondary)).child(bar(0.0)))
+}
+
+/// A wide pane beside two stacked ones: the Edit layout button's glyph.
+fn tiles_glyph() -> El {
+    let t = tok::theme(true);
+    let pane = |w: f32, h: f32| el().size(w, h).radius(1.5).border(1.5, t.text_secondary);
+    row().gap(2.0).child(pane(8.0, 14.0)).child(col().gap(2.0).child(pane(6.0, 6.0)).child(pane(6.0, 6.0)))
+}
+
+/// A square button around `glyph`, filled with the accent while `on`.
+fn icon_button(key: &'static str, label: &'static str, on: bool, glyph: El, act: fn(&mut State)) -> El {
+    let t = tok::theme(true);
     el().key(key).role("button").label(label).focusable(true).size(32.0, 32.0).center().radius(tok::radius::MD)
-        .fill(t.control_off).border(1.0, t.card_border).hover(t.hover).press(t.press).press_scale(0.94)
+        .fill(if on { tok::accent(0, true) } else { t.control_off }).border(1.0, t.card_border).hover(t.hover).press(t.press).press_scale(0.94)
         .on_press(act)
         .child(glyph)
 }
