@@ -1,0 +1,62 @@
+---
+title: Replay server
+description: scripts/serve.py serves recorded scans, joint states, a camera image and status topics, for testing Lantern without a robot.
+---
+
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+
+[`scripts/serve.py`](https://github.com/matthewyjiang/lantern/blob/main/scripts/serve.py) serves
+fixed test data over the Foxglove WebSocket protocol: a recorded scan with the transform that
+places the sensor, and optionally a robot's joint states, a camera image, status topics and moving
+poses. It's for trying Lantern out, taking screenshots and testing changes. Run it from a checkout
+of the repository.
+
+It needs Python with the Foxglove SDK, numpy and Pillow:
+
+```sh
+uv venv --python /usr/bin/python3 --system-site-packages /tmp/fxenv
+uv pip install --python /tmp/fxenv/bin/python foxglove-sdk==0.31.0 numpy pillow
+```
+
+<Tabs>
+<TabItem label="Foxglove SDK">
+
+```sh
+/tmp/fxenv/bin/python scripts/serve.py --cloud table
+```
+
+Serves `foxglove.*` protobuf on `ws://127.0.0.1:8765`, like any SDK app.
+
+</TabItem>
+<TabItem label="ROS 2 + foxglove_bridge">
+
+```sh
+source /opt/ros/humble/setup.bash
+/tmp/fxenv/bin/python scripts/serve.py --cloud table --via ros
+# in a second shell
+ros2 run foxglove_bridge foxglove_bridge --ros-args -p address:=127.0.0.1
+```
+
+Publishes ROS 2 messages with rclpy, and Lantern connects to the bridge.
+
+</TabItem>
+</Tabs>
+
+| Option | Values |
+| --- | --- |
+| `--cloud` | `table` (default; 460,400 points with intensity, plus two tracked objects and two markers), `rgbd` (307,200 points with RGB), `terrain` (1,366,408 points of airborne LiDAR), or `none`\* |
+| `--via` | `sdk` (default) or `ros` |
+| `--robot-pose` | `home` or `reach`: also publish fixed joint states for the KUKA Med 7. See [Robot model](/lantern/guides/robot-model/#try-it-with-the-med-7). |
+| `--joints` | `json` (default) or `proto`\* (`foxglove.JointStates`) |
+| `--robot-description PATH`\* | Publish this URDF on `/robot_description` |
+| `--camera`\* | A camera image with annotations |
+| `--status`\* | A text topic and diagnostics |
+| `--motion`\* | A pose moving in a circle on `/tracked`, and one on `/once` sent only on subscribe |
+| `--hz` | Publish rate, 10 by default. With `--via sdk`, `0` publishes only when a client subscribes. |
+| `--topic` | The cloud's topic, `/points` by default |
+| `--port`\* | 8765 by default |
+
+\* `--via sdk` only.
+
+The scans come from the [PCL data repository](https://github.com/PointCloudLibrary/data)
+(BSD-3-Clause). The first run downloads them, checks their SHA-256 and caches them in `fixtures/`.

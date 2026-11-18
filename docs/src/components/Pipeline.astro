@@ -6,7 +6,7 @@ const stages = [
 	{ name: 'Source', file: 'src/source.rs', thread: 'WebSocket thread', edge: 'WebSocket frames' },
 	{ name: 'Decoders', file: 'src/decode/', thread: 'WebSocket thread', edge: 'message bytes + (encoding, schema)' },
 	{ name: 'Inbox', file: 'src/main.rs', thread: '', edge: 'Event: Status, Channels, Data, …' },
-	{ name: 'App state', file: 'src/app.rs, src/scene.rs', thread: 'UI thread', edge: 'events, newest cloud per topic' },
+	{ name: 'App state', file: 'src/app.rs, src/scene.rs', thread: 'UI thread', edge: 'events; newest cloud and image per topic' },
 	{ name: 'Viewport and UI', file: 'src/viewport.rs, src/ui.rs', thread: 'UI thread → GPU', edge: 'Display: frame, lines, labels, robot' },
 ];
 ---
