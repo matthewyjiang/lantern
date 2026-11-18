@@ -98,6 +98,10 @@ The side panel holds what you change while looking:
 The settings button (the slider icon) opens the [Settings page](/lantern/guides/settings/), for everything else:
 the servers, topics, the fixed frame, pose expiry and trails, and the robot's URDF.
 
+The tiles button beside it edits the layout: split the window into panels, such as the camera
+image or the live text and stats beside the 3D view. See
+[Panels and layouts](/lantern/guides/layout/).
+
 To read other servers or load a robot for one run without changing your settings:
 
 ```sh
@@ -109,3 +113,4 @@ cargo run --release -- --connect ws://a:8765 --connect ws://b:8765 --urdf robot.
 - [Connect a source](/lantern/connect/): foxglove_bridge, a Foxglove SDK app, or the replay
   server that needs no robot.
 - [Load a robot model](/lantern/guides/robot-model/) from a URDF.
+- [Arrange panels](/lantern/guides/layout/) and save the layout to a file.

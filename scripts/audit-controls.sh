@@ -45,7 +45,7 @@ tap() { echo "[$(ev 1.5 "$1")]"; }
 open='{"t": 0.5, "type": "tap", "key": "open-settings"}'
 stap() { echo "[$open, $(ev 1.5 "$1")]"; }
 # The same, after scrolling the page partway (Frames' axis length and the Robot section) or
-# to its end (the Display section): taps land only on what's on screen.
+# to its end (the Display and Layout sections): taps land only on what's on screen.
 mtap() { echo "[$open, {\"t\": 1.0, \"type\": \"wheel\", \"x\": 1060, \"y\": 400, \"dx\": 0, \"dy\": -900}, $(ev 1.5 "$1")]"; }
 send() { echo "[$open, {\"t\": 1.0, \"type\": \"wheel\", \"x\": 1060, \"y\": 400, \"dx\": 0, \"dy\": ${SCROLL_DY:--2000}}, $(ev 1.5 "$1")]"; }
 # After scrolling the page by $1 pt (negative: down).
@@ -109,6 +109,24 @@ sett url-enter        changes "[$open, $(ev 0.6 url), {\"t\": 0.7, \"type\": \"k
 dead='{"connections": ["ws://10.255.255.1:8765"]}'
 switch="[$open, $(ev 0.6 url), {\"t\": 0.8, \"type\": \"type\", \"text\": \"ws://127.0.0.1:8765\"}, {\"t\": 2.2, \"type\": \"key\", \"name\": \"Enter\"}, $(ev 2.4 remove-0)]"
 at=6 sett switch-from-dead  same    "$switch" "$dead"
+
+# Layout. Edit layout draws each panel's controls; with it switched off again, a split leaves a
+# second panel, and closing that panel lands back on the baseline. A preset replaces the layout.
+edit="$(ev 0.6 edit-layout)"
+side edit-layout      changes "[$edit]"
+side split-right      changes "[$edit, $(ev 1.0 panel-split-right), $(ev 1.5 edit-layout)]"
+side split-then-close same    "[$edit, $(ev 1.0 panel-split-right), $(ev 1.5 panel-1-close), $(ev 2.0 edit-layout)]"
+sett edit-layout-full changes "$(send edit-layout-full)"
+sett layout-preset    changes "$(send layout-preset-dashboard)"
+# Dragging a divider resizes the panels beside it; the 3D view is the one that moves the camera.
+dash='{"layout": {"row": [{"panel": "3d", "weight": 2}, {"column": [{"panel": "image"}, {"panel": "data"}]}]}}'
+snap base-dash '[]' "$dash"
+check base-dash "$crop_side" divider-drag changes '[{"t": 1.5, "type": "drag", "key": "panel-divider-0", "dx": -150, "dy": 0, "dur": 0.4}]' "$dash"
+# Weights are shares: 0.5 and 0.25 fill the window as 2 and 1 do.
+snap base-thirds '[]' '{"layout": {"row": [{"panel": "3d", "weight": 2}, {"panel": "image"}]}}'
+check base-thirds "$crop_side" small-weights same '[]' '{"layout": {"row": [{"panel": "3d", "weight": 0.5}, {"panel": "image", "weight": 0.25}]}}'
+# Showing the 3D view in the Data panel swaps it with the 3D panel.
+check base-dash "$crop_side" show-3d-swaps changes "[$edit, $(ev 1.0 panel-1-1-show-3d), $(ev 1.5 edit-layout)]" "$dash"
 
 # Robot (the Med 7 from scripts/robot_fixture.py, posed by serve.py's joint states). Its side
 # panel section only exists once it has loaded, so these start from settings that load it.

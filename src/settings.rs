@@ -8,6 +8,7 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 
 use crate::decode::{ColorChoice, Kind};
+use crate::layout::Layout;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -55,6 +56,9 @@ pub struct Settings {
     pub show_image: bool,
     pub show_text: bool,
     pub show_stats: bool,
+    /// The panels and how they tile the window.
+    #[serde(deserialize_with = "layout_or_default")]
+    pub layout: Layout,
 }
 
 impl Default for Settings {
@@ -86,8 +90,19 @@ impl Default for Settings {
             show_image: true,
             show_text: true,
             show_stats: true,
+            layout: Layout::default(),
         }
     }
+}
+
+/// The file's layout, or the default with the reason reported when it isn't a valid one (a
+/// hand edit, or a panel type from a newer Lantern): the other settings in the file still load.
+fn layout_or_default<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Layout, D::Error> {
+    let value = serde_json::Value::deserialize(d)?;
+    Ok(serde_json::from_value(value).unwrap_or_else(|e| {
+        eprintln!("lantern: the layout in the settings file isn't valid ({e}); using the default layout");
+        Layout::default()
+    }))
 }
 
 fn path() -> Option<PathBuf> {
@@ -190,5 +205,12 @@ mod tests {
         assert_eq!(old.checked().connections, ["ws://robot:9090"]);
         let new: Settings = serde_json::from_str(r#"{"connections": ["ws://a:1", "ws://b:2"]}"#).unwrap();
         assert_eq!(new.checked().connections, ["ws://a:1", "ws://b:2"]);
+    }
+
+    // A layout this Lantern can't read costs only the layout: the rest of the file still loads.
+    #[test]
+    fn a_bad_layout_keeps_the_other_settings() {
+        let s: Settings = serde_json::from_str(r#"{"connections": ["ws://robot:9090"], "layout": {"panel": "plot"}}"#).unwrap();
+        assert_eq!((s.connections, s.layout), (vec!["ws://robot:9090".to_string()], Layout::default()));
     }
 }
