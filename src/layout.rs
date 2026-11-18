@@ -11,8 +11,8 @@
 //! A panel's settings sit beside `panel`, and only those that differ from the defaults are
 //! written; a setting left out takes its default. The file is checked when it's read
 //! (`RawNode` → `Layout`), so every `Layout` in the app is valid: its weights are positive, its branches have children, its panels' settings
-//! parse, and it has at most one 3D panel. The edits (`split`, `close`, `show`, `move_divider`)
-//! keep it that way. They address a node by its path: the child index to take at each branch,
+//! parse, and it has at most one 3D panel. The edits (`insert`, `close`, `show`, `swap`,
+//! `move_panel`, `move_divider`) keep it that way. They address a node by its path: the child index to take at each branch,
 //! from the root.
 
 use std::path::Path;
@@ -89,6 +89,13 @@ impl Panel {
             Panel::Topics => PanelKind::Topics,
         }
     }
+}
+
+/// Where a panel dropped onto another lands: in its place, the two swapping, or on one side.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Landing {
+    Swap,
+    Beside(Edge),
 }
 
 /// A side of a panel, where another goes beside it.
@@ -228,9 +235,16 @@ impl Layout {
 
     /// The panel at `path`, if there's one there.
     pub fn panel(&self, path: &[usize]) -> Option<&Panel> {
+        match self.at(path)? {
+            Layout::Panel(p) => Some(p),
+            Layout::Split { .. } => None,
+        }
+    }
+
+    fn at(&self, path: &[usize]) -> Option<&Layout> {
         match (path, self) {
-            ([], Layout::Panel(p)) => Some(p),
-            ([i, rest @ ..], Layout::Split { children, .. }) => children.get(*i)?.1.panel(rest),
+            ([], node) => Some(node),
+            ([i, rest @ ..], Layout::Split { children, .. }) => children.get(*i)?.1.at(rest),
             _ => None,
         }
     }
@@ -273,9 +287,7 @@ impl Layout {
         if kind == PanelKind::View3d
             && let Some(there) = self.find(kind)
         {
-            let a = std::mem::take(self.at_mut(path).expect("found above"));
-            let b = std::mem::replace(self.at_mut(&there).expect("found above"), a);
-            *self.at_mut(path).expect("found above") = b;
+            self.swap(path, &there);
         } else {
             *self.panel_mut(path).expect("found above") = Panel::new(kind);
         }
@@ -306,18 +318,30 @@ impl Layout {
         }
     }
 
-    /// Exchanges the panels at `a` and `b`, each with its settings; the tiling stays.
-    pub fn swap(&mut self, a: &[usize], b: &[usize]) {
-        let (Some(pa), Some(pb)) = (self.panel(a).cloned(), self.panel(b).cloned()) else { return };
-        *self.panel_mut(a).expect("found above") = pb;
-        *self.panel_mut(b).expect("found above") = pa;
+    /// Puts the panel at `from` where `landing` says, relative to the panel at `to`.
+    pub fn drop_panel(&mut self, from: &[usize], to: &[usize], landing: Landing) {
+        match landing {
+            Landing::Swap => self.swap(from, to),
+            Landing::Beside(edge) => self.move_panel(from, to, edge),
+        }
     }
 
-    /// Moves the panel at `from`, with its settings, to the `edge` side of the panel at `to`.
-    pub fn move_panel(&mut self, from: &[usize], to: &[usize], edge: Edge) {
+    /// Exchanges the panels at `a` and `b`, each with its settings; the tiling stays.
+    fn swap(&mut self, a: &[usize], b: &[usize]) {
+        if a == b || self.panel(a).is_none() || self.panel(b).is_none() {
+            return;
+        }
+        let first = std::mem::take(self.at_mut(a).expect("found above"));
+        let second = std::mem::replace(self.at_mut(b).expect("found above"), first);
+        *self.at_mut(a).expect("found above") = second;
+    }
+
+    /// Moves the panel at `from`, with its settings, to the `edge` side of the panel at `to`. A
+    /// panel already there stays as it is.
+    fn move_panel(&mut self, from: &[usize], to: &[usize], edge: Edge) {
         let paths = self.paths();
         let (Some(f), Some(t)) = (paths.iter().position(|p| p == from), paths.iter().position(|p| p == to)) else { return };
-        if f == t {
+        if f == t || self.beside(from, to, edge) {
             return;
         }
         let panel = self.panel(from).cloned().expect("found above");
@@ -325,6 +349,15 @@ impl Layout {
         // Closing shifts paths but not the order of the panels: find `to` by its place in it.
         let to = self.paths().swap_remove(if t > f { t - 1 } else { t });
         self.insert(&to, edge, panel);
+    }
+
+    /// Whether the node at `a` is already on the `edge` side of its sibling at `b`.
+    fn beside(&self, a: &[usize], b: &[usize], edge: Edge) -> bool {
+        let (dir, first) = edge.placement();
+        let (Some((&i, parent)), Some((&j, other))) = (a.split_last(), b.split_last()) else { return false };
+        parent == other
+            && matches!(self.at(parent), Some(Layout::Split { dir: d, .. }) if *d == dir)
+            && if first { i + 1 == j } else { j + 1 == i }
     }
 
     /// Every panel's path, in the order of `panels`.
@@ -634,6 +667,13 @@ mod tests {
         assert_eq!(l, parse(r#"{"column": [{"panel": "image", "topic": "/a"}, {"panel": "data", "weight": 0.5}, {"panel": "3d", "grid": false, "weight": 0.5}]}"#).unwrap());
         l.swap(&[0], &[2]);
         assert_eq!(l, parse(r#"{"column": [{"panel": "3d", "grid": false}, {"panel": "data", "weight": 0.5}, {"panel": "image", "topic": "/a", "weight": 0.5}]}"#).unwrap());
+        // Onto the side of a neighbour it's already on: nothing moves, weights included.
+        let mut l = parse(r#"{"row": [{"panel": "image", "weight": 2}, {"panel": "data"}]}"#).unwrap();
+        let before = l.clone();
+        l.drop_panel(&[0], &[1], Landing::Beside(Edge::Left));
+        assert_eq!(l, before);
+        l.drop_panel(&[0], &[1], Landing::Swap);
+        assert_eq!(l, parse(r#"{"row": [{"panel": "data", "weight": 2}, {"panel": "image"}]}"#).unwrap());
         // Onto a later panel in the same branch: closing shifts its path, not the target.
         let mut l = parse(r#"{"row": [{"panel": "image"}, {"panel": "data"}, {"panel": "topics"}]}"#).unwrap();
         l.move_panel(&[0], &[2], Edge::Left);

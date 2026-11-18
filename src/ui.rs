@@ -11,9 +11,9 @@ use std::rc::Rc;
 
 use rune::tok::{self, TextStyle, motion, type_};
 use rune::color::srgb_decode;
-use rune_kit::{Kit, Select, SelectAppearance};
-
 use rune::{Align, Color, Cx, Drag, El, Phase, PointerButton, ScrollSpec, Side, Tx, WheelEvent, col, effect, el, icon, oklch, oklcha, row, text, text_input};
+
+use rune_kit::{Kit, Select, SelectAppearance};
 
 use crate::app::{State, Tab3d};
 use crate::connection::Connection;
@@ -64,7 +64,7 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
     let below = row().w_full().grow(1.0).min_h(0.0).child(panels::layout(s, cx, &k, &mut layer)).children(s.settings_open.then(|| settings_page(s)));
     let window = col().w_full().h_full().fill(t.bg).child(top_bar(s)).child(below);
     // The open panel's settings, then what they open (a picker's options) over them.
-    if let Some((path, p)) = s.panel_settings.as_ref().and_then(|path| Some((path, s.settings.layout.panel(path)?))) {
+    if let Some((path, p)) = s.settings_at().and_then(|path| Some((path, s.settings.layout.panel(path)?))) {
         let mut over = Vec::new();
         layer.push(panel_settings(s, &k, &mut over, path, p));
         layer.extend(over);
@@ -631,7 +631,7 @@ fn with<T: 'static>(lens: &Lens<T>, edit: impl Fn(&mut T) + 'static) -> impl Fn(
 /// they're open. Pressed again, it closes them.
 pub(crate) fn panel_settings_button(s: &State, key: &str, path: &[usize]) -> El {
     let t = tok::theme(true);
-    let open = s.panel_settings.as_deref() == Some(path);
+    let open = s.settings_at() == Some(path);
     let path = path.to_vec();
     el().key(format!("{key}-settings")).role("button").label("Panel settings").checked(open).focusable(true).size(30.0, 30.0).center()
         .radius(tok::radius::MD).fill(if open { tok::accent(0, true) } else { oklcha(0.16, 0.006, 265.0, 0.78) }).border(1.0, t.card_border)
@@ -650,7 +650,7 @@ fn panel_settings(s: &State, k: &Kit, layer: &mut Vec<El>, path: &[usize], p: &P
             let tabs = Tab3d::ALL.map(|tab| (tab, tab.label()));
             let bar = segmented("tab", &tabs, s.tab_3d, |s, tab| {
                 s.tab_3d = tab;
-                s.open_picker = None;
+                s.close_picker();
             });
             (Some(bar.w_full()), view3d_settings(s, k, layer, v))
         }
@@ -664,17 +664,14 @@ fn panel_settings(s: &State, k: &Kit, layer: &mut Vec<El>, path: &[usize], p: &P
         }))),
         Panel::Topics => (None, col()),
     };
-    let scroll = col().key("panel-settings-scroll").w_full().shrink().min_h(0.0).scroll(ScrollSpec { stick_bottom: false }).scroll_edge_fade(12.0)
+    let scroll = col().key("panel-popover-scroll").w_full().shrink().min_h(0.0).scroll(ScrollSpec { stick_bottom: false }).scroll_edge_fade(12.0)
         .child(body.w_full().px(14.0).pt(if tabs.is_some() { 4.0 } else { 12.0 }).pb(14.0));
-    col().key("panel-settings").w(PANEL_SETTINGS_W).min_h(0.0).gap(8.0)
+    col().key("panel-popover").w(PANEL_SETTINGS_W).min_h(0.0).gap(8.0)
         .fill(oklcha(0.19, 0.006, 265.0, 0.98)).radius(tok::radius::LG).border(1.0, t.card_border).shadow(8.0, 28.0, oklcha(0.0, 0.0, 0.0, 0.45))
         .children(tabs.map(|bar| el().w_full().px(10.0).pt(10.0).child(bar)))
         .child(scroll)
         .anchored_fit(format!("{}-settings", panels::key_of(path)), Side::Bottom, Align::End, 6.0)
-        .modal(true, |s: &mut State| {
-            s.panel_settings = None;
-            s.open_picker = None;
-        })
+        .modal(true, |s: &mut State| s.popup = None)
 }
 
 /// The tab of the 3D view's settings on show.
@@ -852,8 +849,8 @@ fn robot_settings(s: &State, k: &Kit, layer: &mut Vec<El>, v: &View3dSettings) -
         .child(field("Opacity", segmented("robot-opacity", &[(1.0, "100%"), (0.75, "75%"), (0.5, "50%"), (0.25, "25%")], v.robot.opacity, |s, x| s.edit3d(|v| v.robot.opacity = x))))
 }
 
-/// A setting that takes one of a list of values, Auto first: its label, and a select (keyed
-/// `key`) whose options are Auto (naming what it resolves to), every available value, and the
+/// A setting that takes one of a list of values, Auto first: its label, and a select (its field
+/// keyed `{key}-trigger`, its options `optionN`) whose options are Auto (naming what it resolves to), every available value, and the
 /// chosen value when it isn't available, marked `missing`. The options open in `layer`.
 #[allow(clippy::too_many_arguments)]
 fn picker(
@@ -876,20 +873,23 @@ fn picker(
     {
         options.push((Some(c.clone()), format!("{c} ({missing})")));
     }
-    let current = options.iter().find(|(v, _)| v == chosen).map(|(_, l)| l.clone());
-    let labels: Vec<&str> = options.iter().map(|(_, l)| l.as_str()).collect();
     // `on_choose` takes a cloneable handler.
-    let (options, set) = (Rc::new(options.clone()), Rc::new(set));
-    let (open, toggle) = (s.open_picker.as_deref() == Some(key), key.to_string());
-    let select = Select::new(key, &labels).label(label).current(current.as_deref()).open(open)
+    let (options, set) = (Rc::new(options), Rc::new(set));
+    let current = options.iter().find(|(v, _)| v == chosen).map(|(_, l)| l.as_str());
+    let labels: Vec<&str> = options.iter().map(|(_, l)| l.as_str()).collect();
+    let toggle = key.to_string();
+    let select = Select::new(key, &labels).label(label).current(current).open(s.open_picker() == Some(key))
         .appearance(SelectAppearance::Field).width(196.0)
-        .on_toggle(move |s: &mut State| s.open_picker = if s.open_picker.as_ref() == Some(&toggle) { None } else { Some(toggle.clone()) })
-        .on_close(|s: &mut State| s.open_picker = None)
-        .on_choose(move |s: &mut State, picked: &str, _: &mut Tx| {
-            if let Some((value, _)) = options.iter().find(|(_, l)| l == picked) {
-                set(s, value.clone());
+        .on_toggle(move |s: &mut State| s.toggle_picker(&toggle))
+        .on_close(State::close_picker)
+        .on_choose({
+            let options = options.clone();
+            move |s: &mut State, picked: &str, _: &mut Tx| {
+                if let Some((value, _)) = options.iter().find(|(_, l)| l == picked) {
+                    set(s, value.clone());
+                }
+                s.close_picker();
             }
-            s.open_picker = None;
         })
         .build(k, layer);
     row().w_full().h(32.0).gap(10.0).items_center()

@@ -16,7 +16,7 @@ cfg=$(mktemp -d)
 server=$!
 trap 'kill $server 2>/dev/null; wait $server 2>/dev/null || true; rm -rf "$cfg"' EXIT
 for _ in $(seq 100); do grep -q "^serving" "$dir/serve.log" && break; sleep 0.1; done
-# Data lands within ~0.3 s of start; inputs start at 1.5 s and the snap is at 3 s.
+# Data lands within ~0.3 s of start; inputs start at 0.5 s or later and the snap is at 3 s.
 at=3
 # Viewport in device px at --scale 2 (window 1280×800 pt, under the 52 pt top bar, 10 pt
 # padding): the whole width, and beside the 440 pt Settings page.

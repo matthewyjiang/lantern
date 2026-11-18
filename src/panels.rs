@@ -17,7 +17,7 @@ use rune::{Cursor, Cx, Drag, El, Phase, ScrollSpec, Tx, col, el, oklcha, row, te
 use rune_kit::{Kit, Menu, MenuEntry, MenuItem, Placement};
 
 use crate::app::{PanelDrag, State, Submenu};
-use crate::layout::{Dir, Edge, Layout, Panel, PanelKind};
+use crate::layout::{Dir, Edge, Landing, Layout, Panel, PanelKind};
 use crate::settings::{DataSettings, ImageSettings};
 use crate::ui::{self, MONO_SMALL};
 
@@ -37,7 +37,7 @@ type Places = Rc<Vec<(Vec<usize>, [f32; 4])>>;
 
 /// The layout, filling the window under the top bar. Menus go to `layer`.
 pub fn layout(s: &State, cx: &mut Cx<State>, k: &Kit, layer: &mut Vec<El>) -> El {
-    let places: Places = Rc::new(s.settings.layout.paths().into_iter().filter_map(|p| Some((cx.window_layout(&key_of(&p))?, p))).map(|(r, p)| (p, r)).collect());
+    let places: Places = Rc::new(s.settings.layout.paths().into_iter().filter_map(|p| cx.window_layout(&key_of(&p)).map(|r| (p, r))).collect());
     let root = node(s, cx, k, layer, &places, &s.settings.layout, &mut Vec::new());
     // Like every node, the root may be smaller than its content (an image as wide as it was
     // before the Settings page opened).
@@ -107,13 +107,13 @@ fn divider(dir: Dir, key: String, path: Vec<usize>, i: usize, weight: f32, per_w
 fn panel(s: &State, cx: &mut Cx<State>, k: &Kit, layer: &mut Vec<El>, places: &Places, p: &Panel, path: &[usize]) -> El {
     let key = key_of(path);
     let dragged = s.panel_drag.as_ref().is_some_and(|d| d.from == path);
-    let drop = s.panel_drag.as_ref().and_then(|d| d.over.as_ref()).filter(|(to, _)| to == path).map(|(_, edge)| *edge);
+    let drop = s.panel_drag.as_ref().and_then(|d| d.over.as_ref()).filter(|(to, _)| to == path).map(|(_, landing)| *landing);
     let size = cx.layout_size(&key);
     el().key(key.clone()).hover_group().clip_rounded(tok::radius::LG).border(1.0, oklcha(1.0, 0.0, 0.0, 0.07))
         .opacity(if dragged { 0.45 } else { 1.0 })
         .child(body(s, cx, p, &key))
         .child(header(s, k, layer, places, p, &key, path))
-        .children(drop.map(|edge| drop_zone(edge, size)))
+        .children(drop.map(|landing| drop_zone(landing, size)))
 }
 
 /// What panel `p` shows, filling its card. `key` is the panel's, to prefix the keys of what's
@@ -145,7 +145,7 @@ fn header(s: &State, k: &Kit, layer: &mut Vec<El>, places: &Places, p: &Panel, k
         .child(grip_glyph())
         .child(text(title).font(type_::LABEL).color(t.text).truncate().min_w(0.0))
         .on_drag(move |s: &mut State, d: &mut Drag, _: &mut Tx| drag_panel(s, d, &from, &places));
-    let open = s.panel_menu.as_ref().is_some_and(|(p, _)| p == path) || s.panel_settings.as_deref() == Some(path);
+    let open = s.popup.as_ref().is_some_and(|p| p.path() == path);
     let buttons = row().gap(6.0).items_center()
         .children(has_settings(p).then(|| ui::panel_settings_button(s, key, path)))
         .child(menu(s, k, layer, p.kind(), key, path));
@@ -166,8 +166,9 @@ fn has_settings(p: &Panel) -> bool {
 fn drag_panel(s: &mut State, d: &mut Drag, from: &[usize], places: &Places) {
     match d.phase {
         Phase::Down => {
-            s.panel_menu = None;
-            s.panel_settings = None;
+            s.popup = None;
+            // A drag can end without an `Up` (a modal opening under it): never finish that one.
+            s.panel_drag = None;
         }
         Phase::Move => {
             if s.panel_drag.is_none() && d.dx.hypot(d.dy) < DRAG_START {
@@ -177,14 +178,10 @@ fn drag_panel(s: &mut State, d: &mut Drag, from: &[usize], places: &Places) {
             s.panel_drag = Some(PanelDrag { from: from.to_vec(), over });
         }
         Phase::Up => {
-            let Some(drag) = s.panel_drag.take() else { return };
-            if d.cancelled() {
-                return;
-            }
-            match drag.over {
-                Some((to, None)) => s.settings.layout.swap(from, &to),
-                Some((to, Some(edge))) => s.settings.layout.move_panel(from, &to, edge),
-                None => {}
+            if let Some(PanelDrag { over: Some((to, landing)), .. }) = s.panel_drag.take()
+                && !d.cancelled()
+            {
+                s.settings.layout.drop_panel(from, &to, landing);
             }
         }
     }
@@ -192,7 +189,7 @@ fn drag_panel(s: &mut State, d: &mut Drag, from: &[usize], places: &Places) {
 
 /// Where a panel dragged from `from` lands with the pointer at `at`: the panel there and the side
 /// of it the pointer is nearest, or its middle (the inner 40% each way) to swap. Not on itself.
-fn landing(places: &Places, from: &[usize], [x, y]: [f32; 2]) -> Option<(Vec<usize>, Option<Edge>)> {
+fn landing(places: &[(Vec<usize>, [f32; 4])], from: &[usize], [x, y]: [f32; 2]) -> Option<(Vec<usize>, Landing)> {
     let (path, [px, py, w, h]) = places.iter().find(|(_, [px, py, w, h])| (*px..px + w).contains(&x) && (*py..py + h).contains(&y))?;
     if path == from {
         return None;
@@ -200,87 +197,80 @@ fn landing(places: &Places, from: &[usize], [x, y]: [f32; 2]) -> Option<(Vec<usi
     let (u, v) = ((x - px) / w, (y - py) / h);
     let middle = 0.3..0.7;
     if middle.contains(&u) && middle.contains(&v) {
-        return Some((path.clone(), None));
+        return Some((path.clone(), Landing::Swap));
     }
     let sides = [(u, Edge::Left), (1.0 - u, Edge::Right), (v, Edge::Top), (1.0 - v, Edge::Bottom)];
-    let edge = sides.into_iter().min_by(|a, b| a.0.total_cmp(&b.0)).map(|(_, e)| e);
-    Some((path.clone(), edge))
+    let (_, edge) = sides.into_iter().min_by(|a, b| a.0.total_cmp(&b.0)).expect("four sides");
+    Some((path.clone(), Landing::Beside(edge)))
 }
 
-/// Where a dropped panel would go in this one (of `size`): the half on `edge`, or all of it to swap.
-fn drop_zone(edge: Option<Edge>, size: Option<[f32; 2]>) -> El {
+/// Where a dropped panel would go in this one (of `size`): all of it to swap, or the half on a side.
+fn drop_zone(landing: Landing, size: Option<[f32; 2]>) -> El {
     let accent = tok::accent(0, true);
     let [w, h] = size.unwrap_or([0.0, 0.0]);
     let zone = el().fill(accent.alpha(0.18)).border(2.0, accent.alpha(0.8)).radius(tok::radius::LG);
-    match edge {
-        None => zone.pin(Some(0.0), Some(0.0), Some(0.0), Some(0.0)),
-        Some(Edge::Left) => zone.pin(Some(0.0), Some(0.0), None, Some(0.0)).w(w / 2.0),
-        Some(Edge::Right) => zone.pin(None, Some(0.0), Some(0.0), Some(0.0)).w(w / 2.0),
-        Some(Edge::Top) => zone.pin(Some(0.0), Some(0.0), Some(0.0), None).h(h / 2.0),
-        Some(Edge::Bottom) => zone.pin(Some(0.0), None, Some(0.0), Some(0.0)).h(h / 2.0),
+    match landing {
+        Landing::Swap => zone.pin(Some(0.0), Some(0.0), Some(0.0), Some(0.0)),
+        Landing::Beside(Edge::Left) => zone.pin(Some(0.0), Some(0.0), None, Some(0.0)).w(w / 2.0),
+        Landing::Beside(Edge::Right) => zone.pin(None, Some(0.0), Some(0.0), Some(0.0)).w(w / 2.0),
+        Landing::Beside(Edge::Top) => zone.pin(Some(0.0), Some(0.0), Some(0.0), None).h(h / 2.0),
+        Landing::Beside(Edge::Bottom) => zone.pin(Some(0.0), None, Some(0.0), Some(0.0)).h(h / 2.0),
     }
 }
 
-/// The panel's menu: (the 3D view's camera,) split it, change what it shows, close it.
+/// The panel's menu: (the 3D view's camera,) split it, change what it shows, close it. Its
+/// item keys are rune-kit's: `{key}-menu-itemN`, N counting separators too, and a submenu's
+/// `{key}-menu-itemN-sub-itemM`.
 fn menu(s: &State, k: &Kit, layer: &mut Vec<El>, kind: PanelKind, key: &str, path: &[usize]) -> El {
     let t = tok::theme(true);
-    let open = s.panel_menu.as_ref().filter(|(p, _)| p == path);
-    let sub = open.and_then(|(_, sub)| *sub);
+    let open = s.menu_at().filter(|(p, _)| *p == path);
+    let sub = open.and_then(|(_, sub)| sub);
     let at = path.to_vec();
     let trigger = el().key(format!("{key}-menu")).role("button").label("Panel menu").focusable(true).size(28.0, 28.0).center()
         .radius(tok::radius::MD).fill(oklcha(0.16, 0.006, 265.0, 0.78)).border(1.0, t.card_border).hover(t.hover).press(t.press)
-        .on_press(move |s: &mut State| {
-            s.panel_settings = None;
-            s.panel_menu = if s.panel_menu.as_ref().is_some_and(|(p, _)| *p == at) { None } else { Some((at.clone(), None)) };
-        })
+        .on_press(move |s: &mut State| s.toggle_panel_menu(at.clone()))
         .child(text("⋯").font(type_::BODY).color(t.text_secondary));
     let has_3d = s.settings.layout.has(PanelKind::View3d);
     let kinds = |which: Submenu| -> Vec<MenuEntry> {
         PanelKind::ALL.into_iter().map(|k| {
             let item = match which {
-                Submenu::SplitRight => act(k.label(), path, move |l, p| l.insert(p, Edge::Right, Panel::new(k))).disabled(k == PanelKind::View3d && has_3d),
-                Submenu::SplitDown => act(k.label(), path, move |l, p| l.insert(p, Edge::Bottom, Panel::new(k))).disabled(k == PanelKind::View3d && has_3d),
-                Submenu::Show => act(k.label(), path, move |l, p| l.show(p, k)).checked(k == kind),
+                Submenu::Split(edge) => edit(k.label(), path, move |l, p| l.insert(p, edge, Panel::new(k))).disabled(k == PanelKind::View3d && has_3d),
+                Submenu::Show => edit(k.label(), path, move |l, p| l.show(p, k)).checked(k == kind),
             };
             MenuEntry::Item(Box::new(item))
         }).collect()
     };
     let opener = |label: &str, which: Submenu| {
-        let at = path.to_vec();
-        MenuItem::new(label).submenu(kinds(which), sub == Some(which)).on_select(move |s: &mut State| {
-            let open = s.panel_menu.as_ref().and_then(|(_, sub)| *sub);
-            s.panel_menu = Some((at.clone(), if open == Some(which) { None } else { Some(which) }));
-        })
+        MenuItem::new(label).submenu(kinds(which), sub == Some(which)).on_select(move |s: &mut State| s.toggle_submenu(which))
     };
     let mut m = Menu::new(format!("{key}-menu")).trigger(trigger).open(open.is_some()).placement(Placement::BottomEnd).min_width(180.0)
-        .on_close(|s: &mut State| s.panel_menu = None);
+        .on_close(|s: &mut State| s.popup = None);
     if kind == PanelKind::View3d {
-        m = m.item(MenuItem::new("Reset view").on_select(|s: &mut State| {
-            s.camera = s.home_view();
-            s.panel_menu = None;
-        }))
-        .item(MenuItem::new("Top down").on_select(|s: &mut State| {
-            s.camera = s.top_view();
-            s.panel_menu = None;
-        }))
-        .separator();
+        m = m.item(act("Reset view", |s| s.camera = s.home_view()))
+            .item(act("Top down", |s| s.camera = s.top_view()))
+            .separator();
     }
-    m.item(opener("Split right", Submenu::SplitRight))
-        .item(opener("Split down", Submenu::SplitDown))
+    m.item(opener("Split right", Submenu::Split(Edge::Right)))
+        .item(opener("Split down", Submenu::Split(Edge::Bottom)))
         .item(opener("Show", Submenu::Show))
         .separator()
         // The last panel stays.
-        .item(act("Close", path, Layout::close).danger(true).disabled(path.is_empty()))
+        .item(edit("Close", path, Layout::close).danger(true).disabled(path.is_empty()))
         .build(k, layer)
 }
 
-/// A menu item that edits the layout at the panel at `path`, then closes the menu.
-fn act(label: &str, path: &[usize], edit: impl Fn(&mut Layout, &[usize]) + 'static) -> MenuItem {
-    let at = path.to_vec();
+/// A menu item that does `f`, then closes the menu.
+fn act(label: &str, f: impl Fn(&mut State) + 'static) -> MenuItem {
     MenuItem::new(label).on_select(move |s: &mut State| {
-        edit(&mut s.settings.layout, &at);
-        s.panel_menu = None;
+        f(s);
+        s.popup = None;
     })
+}
+
+/// A menu item that edits the layout at the panel at `path`, then closes the menu.
+fn edit(label: &str, path: &[usize], edit: impl Fn(&mut Layout, &[usize]) + 'static) -> MenuItem {
+    let at = path.to_vec();
+    act(label, move |s| edit(&mut s.settings.layout, &at))
 }
 
 /// Six dots: something to grab.
@@ -348,4 +338,27 @@ fn data(s: &State, view: &DataSettings, key: &str) -> El {
         return empty("No text or stats topics yet".into());
     }
     scrolling(format!("{key}-scroll")).child(body)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Two panels side by side, 100 × 100 each with a 10 pt gap.
+    fn places() -> Vec<(Vec<usize>, [f32; 4])> {
+        vec![(vec![0], [0.0, 0.0, 100.0, 100.0]), (vec![1], [110.0, 0.0, 100.0, 100.0])]
+    }
+
+    #[test]
+    fn a_drop_lands_in_the_middle_or_on_the_nearest_side() {
+        let at = |x, y| landing(&places(), &[0], [x, y]);
+        assert_eq!(at(160.0, 50.0), Some((vec![1], Landing::Swap)));
+        assert_eq!(at(115.0, 50.0), Some((vec![1], Landing::Beside(Edge::Left))));
+        assert_eq!(at(205.0, 50.0), Some((vec![1], Landing::Beside(Edge::Right))));
+        assert_eq!(at(150.0, 5.0), Some((vec![1], Landing::Beside(Edge::Top))));
+        assert_eq!(at(150.0, 95.0), Some((vec![1], Landing::Beside(Edge::Bottom))));
+        // Not on itself, nor in the gap.
+        assert_eq!(at(50.0, 50.0), None);
+        assert_eq!(at(105.0, 50.0), None);
+    }
 }
