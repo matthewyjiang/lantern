@@ -24,6 +24,7 @@ in each panel's settings.
 | **Point cloud** | The 3D view, one topic |
 | **Transforms** | Always read, every topic, so the TF tree is complete |
 | **Poses** | The 3D view, each topic on or off |
+| **Objects** | The 3D view, each topic on or off |
 | **Joints**, **Robot** | The 3D view's robot, one topic each |
 | **Image** | Each Image panel, and the 3D view's image card, one topic each |
 | **Annotations** | Drawn over an image, each topic on or off per image |
@@ -47,6 +48,7 @@ outside, or press Escape to close them. The Topics panel has no settings.
 | **Points** | Show, topic, colour, point size, density |
 | **Poses** | Show, a switch per pose topic, expire after, trail |
 | **Robot** | Show, URDF file, robot description topic, joint states topic, opacity. See [Robot model](/lantern/guides/robot-model/). |
+| **Objects** | Show, a switch per scene topic. See [Objects](/lantern/guides/objects/). |
 | **Cards** | The camera image card with its topic and annotations, and the text and stats cards with a switch per topic |
 
 **Fixed frame** is the frame everything is drawn in. **Auto** shows what it picked, for example
@@ -69,7 +71,7 @@ A frame or topic you pick stays selected even when the data doesn't have it; it'
 colour map over their 1st to 99th percentile, so a few outliers don't wash out the rest. The legend
 at the bottom left of the viewport shows the field and its range.
 
-Hiding the point cloud also unsubscribes from it.
+Hiding the point cloud also unsubscribes from it, as switching off a pose or scene topic does.
 
 **Expire after** removes a pose its topic hasn't sent again within that time. **Trail** draws where
 each pose has been over that time.
@@ -131,6 +133,8 @@ A dot is a nested key: `points.size` is written `"points": { "size": 3 }`.
 | `robot.urdf` | `""` | The URDF file; empty for none |
 | `robot.description_topic`, `robot.joint_topic` | `null` | `null` is Auto |
 | `robot.opacity` | `1` | 0 to 1 |
+| `objects.show` | `true` | |
+| `objects.hidden` | `[]` | Scene topics switched off |
 | `image_card` | `true` | The camera image card |
 | `image` | | What the card shows, with an `image` panel's keys |
 | `data` | | The text and stats cards, with a `data` panel's keys |

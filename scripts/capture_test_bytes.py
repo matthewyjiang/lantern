@@ -2,7 +2,9 @@
 rclpy's CDR (what foxglove_bridge forwards) and the Foxglove Python SDK's protobuf (what an
 SDK app publishes). The Rust tests in src/decode/mod.rs assert on exactly these values.
 
-Needs ROS 2 (for rclpy) and foxglove-sdk; neither is needed to build or run Lantern:
+Needs ROS 2 (for rclpy) with foxglove_msgs, and foxglove-sdk; none is needed to build or run
+Lantern:
+    sudo apt install ros-humble-foxglove-msgs
     source /opt/ros/humble/setup.bash
     uv venv --python /usr/bin/python3 --system-site-packages /tmp/fxenv
     uv pip install --python /tmp/fxenv/bin/python foxglove-sdk==0.31.0
@@ -27,6 +29,9 @@ POINTS = [(1.0, 2.0, 3.0, 10.0), (4.0, 5.0, 6.0, 20.0), (math.nan, 0.0, 0.0, 30.
 YAW90 = (0.0, 0.0, math.sqrt(0.5), math.sqrt(0.5))
 TFS = [("map", "base_link", (1.0, 2.0, 0.0), YAW90), ("base_link", "lidar", (0.2, 0.0, 0.5), (0.0, 0.0, 0.0, 1.0))]
 POSES = [((0.0, 0.0, 0.0), (0.0, 0.0, 0.0, 1.0)), ((0.5, -0.25, 0.1), YAW90)]
+# Header stamps: seconds and nanoseconds.
+TF_STAMP = (1_700_000_000, 250_000_000)
+ENTITY_STAMP = (1_700_000_001, 5)
 
 
 def write(name, data):
@@ -52,6 +57,7 @@ tf = TFMessage()
 for parent, child, t, q in TFS:
     m = TransformStamped()
     m.header.frame_id, m.child_frame_id = parent, child
+    m.header.stamp.sec, m.header.stamp.nanosec = TF_STAMP
     m.transform.translation.x, m.transform.translation.y, m.transform.translation.z = t
     m.transform.rotation.x, m.transform.rotation.y, m.transform.rotation.z, m.transform.rotation.w = q
     tf.transforms.append(m)
@@ -83,7 +89,7 @@ cloud = fm.PointCloud(
 write("pointcloud.pb", cloud.encode())
 
 fts = fm.FrameTransforms(transforms=[
-    fm.FrameTransform(parent_frame_id=p, child_frame_id=c, translation=fm.Vector3(x=t[0], y=t[1], z=t[2]), rotation=fm.Quaternion(x=q[0], y=q[1], z=q[2], w=q[3]))
+    fm.FrameTransform(timestamp=fm.Timestamp(sec=TF_STAMP[0], nsec=TF_STAMP[1]), parent_frame_id=p, child_frame_id=c, translation=fm.Vector3(x=t[0], y=t[1], z=t[2]), rotation=fm.Quaternion(x=q[0], y=q[1], z=q[2], w=q[3]))
     for p, c, t, q in TFS
 ])
 write("frametransforms.pb", fts.encode())
@@ -163,3 +169,89 @@ write("string.cdr", serialize_message(String(data="tracking ok\nlate ticks: 0"))
 da = DiagnosticArray()
 da.status = [DiagnosticStatus(level=DiagnosticStatus.WARN, name="controller", message="velocity limit binding", hardware_id="arm", values=[KeyValue(key="tracking error", value="1.8 mm"), KeyValue(key="late ticks", value="3")])]
 write("diagnostics.cdr", serialize_message(da))
+
+# One scene in both encodings: two deletions, a grasped object (a model sent as bytes, one by
+# URL with its scale unset) that expires after 1.5 s, and one of every other shape. The line's
+# indices close it back to its first point; the triangle list's per-vertex colours draw as the
+# first.
+from foxglove_msgs import msg as fx
+from geometry_msgs.msg import Point, Vector3
+from builtin_interfaces.msg import Duration as RosDuration
+from builtin_interfaces.msg import Time as RosTime
+
+MODEL_BYTES = b"glTF fake model bytes"
+LINE = [(0.0, 0.0, 0.0), (1.0, 0.0, 0.0), (1.0, 1.0, 0.0)]
+LINE_COLORS = [(1.0, 0.0, 0.0, 1.0), (0.0, 1.0, 0.0, 1.0), (0.0, 0.0, 1.0, 1.0)]
+TRI = [(0.0, 0.0, 0.0), (0.1, 0.0, 0.0), (0.0, 0.1, 0.0)]
+AT = ((0.5, -0.25, 0.1), YAW90)
+
+
+def fcol(c):
+    return fm.Color(r=c[0], g=c[1], b=c[2], a=c[3])
+
+
+def fv(v):
+    return fm.Vector3(x=v[0], y=v[1], z=v[2])
+
+
+def fp(v):
+    return fm.Point3(x=v[0], y=v[1], z=v[2])
+
+
+write("sceneupdate.pb", fm.SceneUpdate(
+    deletions=[fm.SceneEntityDeletion(type=fm.SceneEntityDeletionType.MatchingId, id="old"), fm.SceneEntityDeletion(type=fm.SceneEntityDeletionType.All)],
+    entities=[
+        fm.SceneEntity(timestamp=fm.Timestamp(sec=ENTITY_STAMP[0], nsec=ENTITY_STAMP[1]), frame_id="gripper", id="grasped", lifetime=fm.Duration(sec=1, nsec=500_000_000), frame_locked=True, models=[
+            fm.ModelPrimitive(pose=fpose(*AT), scale=fv((2.0, 2.0, 2.0)), color=fcol((1.0, 0.0, 0.0, 1.0)), override_color=True, media_type="model/gltf-binary", data=MODEL_BYTES),
+            fm.ModelPrimitive(pose=fpose(*AT), url="package://objects/meshes/cup.stl"),
+        ]),
+        fm.SceneEntity(frame_id="world", id="shapes",
+            arrows=[fm.ArrowPrimitive(pose=fpose(*AT), shaft_length=0.3, shaft_diameter=0.02, head_length=0.1, head_diameter=0.05, color=fcol((1.0, 1.0, 0.0, 1.0)))],
+            cubes=[fm.CubePrimitive(pose=fpose(*AT), size=fv((0.1, 0.2, 0.3)), color=fcol((0.0, 1.0, 0.0, 0.5)))],
+            spheres=[fm.SpherePrimitive(pose=fpose(*AT), size=fv((0.2, 0.2, 0.2)), color=fcol((0.0, 0.0, 1.0, 1.0)))],
+            cylinders=[fm.CylinderPrimitive(pose=fpose(*AT), size=fv((0.1, 0.1, 0.4)), bottom_scale=1.0, top_scale=0.0, color=fcol((1.0, 0.5, 0.0, 1.0)))],
+            lines=[fm.LinePrimitive(type=fm.LinePrimitiveLineType.LineStrip, pose=fpose(*AT), thickness=0.01, scale_invariant=False, points=[fp(p) for p in LINE], color=fcol((1.0, 1.0, 1.0, 1.0)), colors=[fcol(c) for c in LINE_COLORS], indices=[0, 1, 2, 0])],
+            triangles=[fm.TriangleListPrimitive(pose=fpose(*AT), points=[fp(p) for p in TRI], colors=[fcol(c) for c in LINE_COLORS])],
+            texts=[fm.TextPrimitive(pose=fpose(*AT), billboard=True, font_size=14.0, scale_invariant=True, color=fcol((1.0, 1.0, 1.0, 1.0)), text="cup")],
+        ),
+    ],
+).encode())
+
+
+def rpose(t, q):
+    p = Pose()
+    p.position.x, p.position.y, p.position.z = t
+    p.orientation.x, p.orientation.y, p.orientation.z, p.orientation.w = q
+    return p
+
+
+def rcol(c):
+    return fx.Color(r=c[0], g=c[1], b=c[2], a=c[3])
+
+
+def rv(v):
+    return Vector3(x=v[0], y=v[1], z=v[2])
+
+
+def rp(v):
+    return Point(x=v[0], y=v[1], z=v[2])
+
+
+su = fx.SceneUpdate()
+su.deletions = [fx.SceneEntityDeletion(type=fx.SceneEntityDeletion.MATCHING_ID, id="old"), fx.SceneEntityDeletion(type=fx.SceneEntityDeletion.ALL)]
+su.entities = [
+    fx.SceneEntity(timestamp=RosTime(sec=ENTITY_STAMP[0], nanosec=ENTITY_STAMP[1]), frame_id="gripper", id="grasped", lifetime=RosDuration(sec=1, nanosec=500_000_000), frame_locked=True, models=[
+        fx.ModelPrimitive(pose=rpose(*AT), scale=rv((2.0, 2.0, 2.0)), color=rcol((1.0, 0.0, 0.0, 1.0)), override_color=True, media_type="model/gltf-binary", data=MODEL_BYTES),
+        fx.ModelPrimitive(pose=rpose(*AT), url="package://objects/meshes/cup.stl"),
+    ]),
+    fx.SceneEntity(frame_id="world", id="shapes",
+        arrows=[fx.ArrowPrimitive(pose=rpose(*AT), shaft_length=0.3, shaft_diameter=0.02, head_length=0.1, head_diameter=0.05, color=rcol((1.0, 1.0, 0.0, 1.0)))],
+        cubes=[fx.CubePrimitive(pose=rpose(*AT), size=rv((0.1, 0.2, 0.3)), color=rcol((0.0, 1.0, 0.0, 0.5)))],
+        spheres=[fx.SpherePrimitive(pose=rpose(*AT), size=rv((0.2, 0.2, 0.2)), color=rcol((0.0, 0.0, 1.0, 1.0)))],
+        cylinders=[fx.CylinderPrimitive(pose=rpose(*AT), size=rv((0.1, 0.1, 0.4)), bottom_scale=1.0, top_scale=0.0, color=rcol((1.0, 0.5, 0.0, 1.0)))],
+        lines=[fx.LinePrimitive(type=fx.LinePrimitive.LINE_STRIP, pose=rpose(*AT), thickness=0.01, scale_invariant=False, points=[rp(p) for p in LINE], color=rcol((1.0, 1.0, 1.0, 1.0)), colors=[rcol(c) for c in LINE_COLORS], indices=[0, 1, 2, 0])],
+        triangles=[fx.TriangleListPrimitive(pose=rpose(*AT), points=[rp(p) for p in TRI], colors=[rcol(c) for c in LINE_COLORS])],
+        texts=[fx.TextPrimitive(pose=rpose(*AT), billboard=True, font_size=14.0, scale_invariant=True, color=rcol((1.0, 1.0, 1.0, 1.0)), text="cup")],
+    ),
+]
+write("sceneupdate.cdr", serialize_message(su))

@@ -78,7 +78,7 @@ const SUBPROTOCOLS: &str = "foxglove.sdk.v1, foxglove.websocket.v1";
 /// The largest message Lantern accepts: 5.6 M points at the 48-byte point_step Ouster drivers
 /// publish, 8.4 M (the GPU's cap, `viewport::MAX_POINTS`) at 32 bytes. A larger one fails the
 /// connection with tungstenite's "Message too long: N > 268435456", shown as the status.
-const MAX_MESSAGE: usize = 256 << 20;
+pub const MAX_MESSAGE: usize = 256 << 20;
 // Latencies the user sees, chosen rather than measured: none caps throughput (a busy socket
 // never waits on POLL; data is read as it arrives).
 /// How long an idle read waits before checking for a stop or a new subscription: a toggle

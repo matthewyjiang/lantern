@@ -1,9 +1,9 @@
 //! App state: the user's settings, what each connection has delivered, the robot model, and the
-//! display derived from them (fixed frame, the cloud's placement, lines, labels, link poses).
-//! Handlers only edit `settings` and the camera; `sync` runs at the start of every frame and
-//! does the rest: opens and closes connections to match the list, loads the URDF when its path
-//! or the server's description changes, expires old poses, tells each source what to deliver,
-//! saves settings, rebuilds the display.
+//! display derived from them (fixed frame, the cloud's placement, lines, labels, link poses,
+//! objects). Handlers only edit `settings` and the camera; `sync` runs at the start of every
+//! frame and does the rest: opens and closes connections to match the list, loads the URDF when
+//! its path or the server's description changes, expires old poses and objects, tells each
+//! source what to deliver, saves settings, loads the models objects name, rebuilds the display.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::Path;
@@ -17,11 +17,13 @@ use crate::camera::OrbitCamera;
 use crate::connection::{Connection, Picked, Post, Received};
 use crate::decode::Kind;
 use crate::layout::{Dir, Layout, PaneId, Panel, PanelKind};
+use crate::mesh::Mesh;
+use crate::objects::{self, Geom, LabelStyle, Models, Placed};
 use crate::robot::{self, Model};
-use crate::scene::{percentiles, Annotation, Diagnostic, Image, PointCloud, PointColor, Pose, TfTree};
+use crate::scene::{percentiles, Annotation, Diagnostic, Geometry, Image, ModelSource, PointCloud, PointColor, Pose, Tf};
 use crate::settings::{DataSettings, ImageSettings, Settings, View3dSettings};
 use crate::source::{Event, Wanted};
-use crate::viewport::{self, Lines, RobotView, Shade, View};
+use crate::viewport::{self, Lines, MeshView, PartDraw, Shade, View};
 
 /// The submenus of a panel's menu, each a list of panel kinds: split in that direction, or show.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -65,11 +67,12 @@ pub enum Tab3d {
     Points,
     Poses,
     Robot,
+    Objects,
     Cards,
 }
 
 impl Tab3d {
-    pub const ALL: [Tab3d; 5] = [Tab3d::Scene, Tab3d::Points, Tab3d::Poses, Tab3d::Robot, Tab3d::Cards];
+    pub const ALL: [Tab3d; 6] = [Tab3d::Scene, Tab3d::Points, Tab3d::Poses, Tab3d::Robot, Tab3d::Objects, Tab3d::Cards];
 
     pub fn label(self) -> &'static str {
         match self {
@@ -77,6 +80,7 @@ impl Tab3d {
             Tab3d::Points => "Points",
             Tab3d::Poses => "Poses",
             Tab3d::Robot => "Robot",
+            Tab3d::Objects => "Objects",
             Tab3d::Cards => "Cards",
         }
     }
@@ -104,6 +108,8 @@ pub struct State {
     robot_description: Option<(String, String, Result<Model, String>)>,
     /// How the file's robot differs from the described one, when both loaded and they differ.
     robot_mismatch: Option<Mismatch>,
+    /// The models the shown objects name, loaded or why not (`sync_models`).
+    models: Models,
     /// Joint positions changed: `sync` re-poses the robot without rebuilding the display.
     robot_dirty: bool,
     /// Each shown image with its annotations drawn in, by its topic and the annotation topics
@@ -206,14 +212,14 @@ enum Framed {
 pub struct Display {
     /// The frame everything is drawn in, once there's data to name one.
     pub fixed: Option<String>,
-    /// Every connection's transforms, as one tree.
-    pub tf: TfTree,
+    /// Every TF frame, sorted.
+    pub frames: Vec<String>,
     /// `fixed_T_cloud`, when the cloud's frame connects to the fixed frame.
     pub cloud_model: Option<Mat4>,
     pub shade: Shade,
     pub lines: Arc<Lines>,
-    /// Names to draw at display-frame positions (TF frames, tracked objects).
-    pub labels: Vec<(String, Vec3)>,
+    /// Text to draw at display-frame positions: TF frame and pose names, objects' text.
+    pub labels: Vec<Label>,
     /// Centre and radius of the data, metres.
     pub bounds: Option<(Vec3, f32)>,
     pub grid_cell: f32,
@@ -223,6 +229,24 @@ pub struct Display {
     pub robot: Option<PosedRobot>,
     /// Why the robot sits at the fixed frame's origin, when TF doesn't place its root.
     pub robot_note: Option<String>,
+    pub objects: ObjectsDisplay,
+}
+
+/// A frame or pose name (`style` `None`), or an object's text in its own colour and size.
+pub struct Label {
+    pub text: String,
+    pub at: Vec3,
+    pub style: Option<LabelStyle>,
+}
+
+/// The shown objects' mesh, built from `geoms` (one part each), and each part's placement.
+#[derive(Default)]
+pub struct ObjectsDisplay {
+    pub mesh: Arc<Mesh>,
+    pub geoms: Vec<Geom>,
+    pub draws: Vec<PartDraw>,
+    /// Why some parts are empty: the mesh would pass `viewport::MAX_MESH_VERTICES`.
+    pub too_big: Option<String>,
 }
 
 pub struct PosedRobot {
@@ -236,7 +260,7 @@ impl Default for Display {
     fn default() -> Self {
         Display {
             fixed: None,
-            tf: TfTree::default(),
+            frames: Vec::new(),
             cloud_model: None,
             shade: Shade::Height { lo: 0.0, hi: 1.0 },
             lines: Arc::default(),
@@ -246,6 +270,7 @@ impl Default for Display {
             problem: None,
             robot: None,
             robot_note: None,
+            objects: ObjectsDisplay::default(),
         }
     }
 }
@@ -288,6 +313,7 @@ impl State {
             robot_file: None,
             robot_description: None,
             robot_mismatch: None,
+            models: Models::default(),
             robot_dirty: false,
             images: BTreeMap::new(),
             image_dirty: false,
@@ -624,6 +650,9 @@ impl State {
         if self.shown_robot().is_some() {
             topics.extend(self.joint_topic());
         }
+        if v.objects.show {
+            topics.extend(all_but(Kind::Objects, &v.objects.hidden));
+        }
         // With a 3D panel, always: the description says which robot the server drives, shown
         // or not.
         topics.extend(self.description_topic());
@@ -672,6 +701,13 @@ impl State {
             tx.wake_at(due);
         }
         let wanted = self.wanted();
+        // Entities only of topics still subscribed: one switched off or hidden with Show misses
+        // its deletions, so its entities would be stale when shown again.
+        for r in self.conns.iter_mut().map(|c| &mut c.received) {
+            let before = r.objects.len();
+            r.objects.retain(|(topic, _), _| wanted.topics.contains(topic));
+            self.dirty |= r.objects.len() != before;
+        }
         self.conns.iter_mut().for_each(|c| c.want(&wanted));
         if self.settings != self.applied {
             self.overrides.to_save(&self.settings, &self.from_file).save();
@@ -694,6 +730,7 @@ impl State {
         if self.dirty {
             self.dirty = false;
             self.robot_dirty = false;
+            self.sync_models();
             self.display = self.derive();
             changed = true;
             self.frame();
@@ -739,7 +776,7 @@ impl State {
         let want = (!urdf.is_empty()).then(|| urdf.to_string());
         if self.robot_file.as_ref().map(|(p, _)| p) != want.as_ref() {
             self.robot_file = want.map(|path| {
-                let model = robot::load(Path::new(&path), viewport::MAX_ROBOT_VERTICES);
+                let model = robot::load(Path::new(&path), viewport::MAX_MESH_VERTICES);
                 log_load(&path, &model);
                 (path, model)
             });
@@ -750,7 +787,7 @@ impl State {
         let current = self.robot_description.as_ref().map(|(t, x, _)| (t, x));
         if current != topic.as_ref().zip(text) {
             self.robot_description = topic.zip(text.cloned()).map(|(topic, text)| {
-                let model = robot::load_text(&text, viewport::MAX_ROBOT_VERTICES);
+                let model = robot::load_text(&text, viewport::MAX_MESH_VERTICES);
                 log_load(&topic, &model);
                 (topic, text, model)
             });
@@ -773,6 +810,17 @@ impl State {
             });
             self.dirty = true;
         }
+    }
+
+    /// Loads the models the received entities name (only shown topics' entities are kept).
+    /// Runs when the display is rebuilt, just before `derive`.
+    fn sync_models(&mut self) {
+        let shapes = self.received().flat_map(|r| r.objects.values()).flat_map(|(_, e)| &e.shapes);
+        let named: Vec<ModelSource> = shapes.filter_map(|s| match &s.geometry {
+            Geometry::Model { source, .. } => Some(source.clone()),
+            _ => None,
+        }).collect();
+        self.models.sync(named, viewport::MAX_MESH_VERTICES);
     }
 
     /// Expires every connection's poses and trails (`Received::expire`); returns when the next
@@ -834,25 +882,22 @@ impl State {
         Some(PosedRobot { root, links })
     }
 
-    fn fixed_frame(&self, tf: &TfTree) -> Option<String> {
+    fn fixed_frame(&self, tf: &Tf, frames: &[String]) -> Option<String> {
         if let Some(f) = &self.v3().fixed_frame {
             return Some(f.clone());
         }
         let data_frame = self.cloud().map(|(_, c)| c.frame_id.clone())
             .or_else(|| self.received().find_map(|r| r.poses.values().next()).map(|(_, p)| p.frame_id.clone()));
         let robot_root = self.shown_robot().map(|m| m.robot.links[0].clone());
-        Some(tf.root_of(&anchor_frame(data_frame, robot_root, &tf.frames())?))
+        Some(tf.root_of(&anchor_frame(data_frame, robot_root, frames)?))
     }
 
     fn derive(&self) -> Display {
         let s = self.v3();
-        let mut tf = TfTree::default();
-        self.received().for_each(|r| tf.extend(&r.tf));
-        let mut d = Display { fixed: self.fixed_frame(&tf), ..Display::default() };
-        let Some(fixed) = d.fixed.clone() else {
-            d.tf = tf;
-            return d;
-        };
+        let tf = Tf(self.received().map(|r| &r.tf).collect());
+        let frames = tf.frames();
+        let mut d = Display { fixed: self.fixed_frame(&tf, &frames), frames, ..Display::default() };
+        let Some(fixed) = d.fixed.clone() else { return d };
         // The shown cloud's and image card's errors first: a cloud or image refused or
         // undecodable is why it isn't drawn. (Joint names the robot lacks go before even those,
         // below.)
@@ -866,7 +911,7 @@ impl State {
         // height ramp (16 Ki points: percentiles to well under 1%).
         let mut sample: Vec<Vec3> = Vec::new();
         if let Some((topic, c)) = self.cloud() {
-            match tf.lookup(&fixed, &c.frame_id) {
+            match tf.lookup(&fixed, &c.frame_id, None) {
                 Some(p) => {
                     let m = p.then(&c.origin).matrix();
                     d.cloud_model = Some(m);
@@ -883,16 +928,16 @@ impl State {
         let mut marks: Vec<Vec3> = Vec::new();
         if s.frames {
             let mut origins = BTreeMap::new();
-            for f in tf.frames() {
-                if let Some(p) = tf.lookup(&fixed, &f) {
+            for f in &d.frames {
+                if let Some(p) = tf.lookup(&fixed, f, None) {
                     let m = p.matrix();
                     lines.axes(m, axis, 2.5);
                     let o = m.transform_point3(Vec3::ZERO);
                     marks.push(o);
                     if s.labels {
-                        d.labels.push((f.clone(), o));
+                        d.labels.push(Label { text: f.clone(), at: o, style: None });
                     }
-                    origins.insert(f, o);
+                    origins.insert(f.as_str(), o);
                 }
             }
             for (parent, child) in tf.edges() {
@@ -904,7 +949,7 @@ impl State {
         if s.poses.show {
             for r in self.received() {
                 for ((topic, _), (_, poses)) in &r.poses {
-                    let Some(frame) = tf.lookup(&fixed, &poses.frame_id) else {
+                    let Some(frame) = tf.lookup(&fixed, &poses.frame_id, None) else {
                         problems.push(format!("{topic}: no transform from {} to {fixed}", poses.frame_id));
                         continue;
                     };
@@ -914,7 +959,7 @@ impl State {
                         let o = m.transform_point3(Vec3::ZERO);
                         marks.push(o);
                         if let (true, Some(l)) = (s.labels, &item.label) {
-                            d.labels.push((l.clone(), o));
+                            d.labels.push(Label { text: l.clone(), at: o, style: None });
                         }
                         if let Some(v) = item.velocity {
                             let v = frame.rotation.as_quat() * v.as_vec3();
@@ -923,7 +968,7 @@ impl State {
                     }
                 }
                 for t in r.trails.values() {
-                    let Some(frame) = tf.lookup(&fixed, &t.frame_id) else { continue };
+                    let Some(frame) = tf.lookup(&fixed, &t.frame_id, None) else { continue };
                     let at = |p: &DVec3| frame.then(&Pose { translation: *p, rotation: Default::default() }).translation.as_vec3();
                     let pts: Vec<Vec3> = t.points.iter().map(|(_, p)| at(p)).collect();
                     for w in pts.windows(2) {
@@ -932,9 +977,14 @@ impl State {
                 }
             }
         }
+        if s.objects.show {
+            let (objects, labels) = self.place_objects(&tf, &fixed, &mut lines, &mut marks, &mut problems);
+            d.objects = objects;
+            d.labels.extend(labels);
+        }
         if let Some(m) = self.shown_robot() {
             let root = &m.robot.links[0];
-            let placed = tf.lookup(&fixed, root).unwrap_or_else(|| {
+            let placed = tf.lookup(&fixed, root, None).unwrap_or_else(|| {
                 d.robot_note = Some(format!("No transform from {root} to {fixed}: drawn at {fixed}'s origin"));
                 Pose::IDENTITY
             });
@@ -969,8 +1019,42 @@ impl State {
             },
         };
         d.problem = problems.into_iter().next();
-        d.tf = tf;
         d
+    }
+
+    /// Places the shown topics' entities in the fixed frame: their
+    /// mesh parts (the last display's mesh again when the parts are the same, so moving objects
+    /// don't rebuild it), their lines into `lines`, their text as labels, and each shape's
+    /// origin into `marks`. Why something isn't drawn goes to `problems`.
+    fn place_objects(&self, tf: &Tf, fixed: &str, lines: &mut Lines, marks: &mut Vec<Vec3>, problems: &mut Vec<String>) -> (ObjectsDisplay, Vec<Label>) {
+        let v = &self.v3().objects;
+        let mut placed = Placed::default();
+        for topic in self.topics_of(Kind::Objects).into_iter().filter(|t| !v.hidden.contains(t)) {
+            problems.extend(self.error(&topic).map(|e| format!("{topic}: {e}")));
+        }
+        for ((topic, _), (_, e)) in self.received().flat_map(|r| &r.objects) {
+            let Some(frame) = tf.lookup(fixed, &e.frame_id, e.placed_at) else {
+                problems.push(format!("{topic}: no transform from {} to {fixed}", e.frame_id));
+                continue;
+            };
+            for shape in &e.shapes {
+                let at = frame.then(&shape.pose);
+                marks.push(at.translation.as_vec3());
+                if let Some(err) = placed.shape(shape, at, lines, &self.models) {
+                    problems.push(format!("{topic}: {}: {err}", e.id));
+                }
+            }
+        }
+        let last = &self.display.objects;
+        let (mesh, too_big) = if placed.geoms == last.geoms {
+            (Arc::clone(&last.mesh), last.too_big.clone())
+        } else {
+            let (mesh, too_big) = objects::build(&placed.geoms, viewport::MAX_MESH_VERTICES);
+            (Arc::new(mesh), too_big)
+        };
+        problems.extend(too_big.clone());
+        let labels = placed.labels.into_iter().map(|(text, at, style)| Label { text, at, style: Some(style) }).collect();
+        (ObjectsDisplay { mesh, geoms: placed.geoms, draws: placed.draws, too_big }, labels)
     }
 
     /// Three-quarter view framing the data.
@@ -1007,7 +1091,15 @@ impl State {
             // A robot with nothing drawable (every mesh failed) has no parts to draw.
             robot: self.display.robot.as_ref().zip(self.shown_robot())
                 .filter(|(_, m)| !m.mesh.parts.is_empty())
-                .map(|(p, m)| RobotView { mesh: &m.mesh, links: &p.links, opacity: s.robot.opacity }),
+                .map(|(p, m)| MeshView {
+                    mesh: &m.mesh,
+                    parts: m.parts.iter().map(|part| {
+                        let [r, g, b, a] = part.color;
+                        PartDraw { model: p.links[part.link], color: [r, g, b, a * s.robot.opacity] }
+                    }).collect(),
+                }),
+            objects: Some(&self.display.objects).filter(|o| !o.mesh.parts.is_empty())
+                .map(|o| MeshView { mesh: &o.mesh, parts: o.draws.clone() }),
         }
     }
 
@@ -1139,6 +1231,63 @@ mod tests {
         let mut wanted: Vec<String> = s.wanted().topics.into_iter().collect();
         wanted.sort();
         assert_eq!(wanted, ["/cloud", "/diag", "/left", "/marks", "/right"]);
+    }
+
+    // A gripper at x 1 m at 1 s, then x 3 m at 2 s. A frame-locked cube in it moves with it; one
+    // sent unlocked with a 1 s timestamp stays where the gripper was then, as in Foxglove.
+    #[test]
+    fn unlocked_entities_stay_where_their_frame_was_at_their_timestamp() {
+        use crate::decode::Decoded;
+        use crate::scene::{Entity, SceneUpdate, Shape, Transform};
+        let settings = Settings { connections: vec!["ws://127.0.0.1:9".into()], layout: layout(r#"{"panel": "3d", "fixed_frame": "world"}"#) };
+        let post: Post = Arc::new(|_, _| {});
+        let mut s = State::new(settings, Overrides::default(), post);
+        s.sync_connections();
+        let id = s.conns[0].id;
+        let channel = |topic: &str, kind| crate::source::Channel { topic: topic.into(), schema: String::new(), encoding: String::new(), kind: Some(kind) };
+        let sec = 1_000_000_000;
+        let gripper = |stamp: i64, x: f64| {
+            let pose = Pose { translation: DVec3::new(x, 0.0, 0.0), ..Pose::IDENTITY };
+            (id, Event::Data { topic: "/tf".into(), data: Decoded::Transforms(vec![Transform { parent: "world".into(), child: "gripper".into(), stamp, pose }]) })
+        };
+        let cube = Shape { pose: Pose::IDENTITY, color: [1.0; 4], geometry: Geometry::Cube { size: DVec3::splat(0.1) } };
+        let entity = |id: &str, placed_at| Entity { id: id.into(), frame_id: "gripper".into(), placed_at, lifetime: None, shapes: vec![cube.clone()] };
+        let scene = Decoded::Objects(SceneUpdate { deletions: vec![], entities: vec![entity("dropped", Some(sec)), entity("held", None)] });
+        s.apply(vec![
+            (id, Event::Channels(vec![channel("/tf", Kind::Transforms), channel("/scene", Kind::Objects)])),
+            gripper(sec, 1.0),
+            (id, Event::Data { topic: "/scene".into(), data: scene }),
+            gripper(2 * sec, 3.0),
+        ], 0.0);
+        s.sync(0.0, &mut Tx::default());
+        let x: Vec<f32> = s.display.objects.draws.iter().map(|d| d.model.transform_point3(Vec3::ZERO).x).collect();
+        assert_eq!(x, [1.0, 3.0], "dropped, then held");
+    }
+
+    // Objects hidden with Show unsubscribe their topic, so they would miss its deletions: they
+    // go then, and showing them again doesn't bring back an object the server has since deleted.
+    #[test]
+    fn hidden_objects_do_not_come_back_stale() {
+        use crate::decode::Decoded;
+        use crate::scene::{Entity, SceneUpdate};
+        let settings = Settings { connections: vec!["ws://127.0.0.1:9".into()], layout: layout(r#"{"panel": "3d"}"#) };
+        let post: Post = Arc::new(|_, _| {});
+        let mut s = State::new(settings, Overrides::default(), post);
+        s.sync_connections();
+        let id = s.conns[0].id;
+        let channel = crate::source::Channel { topic: "/scene".into(), schema: String::new(), encoding: String::new(), kind: Some(Kind::Objects) };
+        let cup = Entity { id: "cup".into(), frame_id: "gripper".into(), placed_at: None, lifetime: None, shapes: vec![] };
+        let update = Decoded::Objects(SceneUpdate { deletions: vec![], entities: vec![cup] });
+        s.apply(vec![(id, Event::Channels(vec![channel])), (id, Event::Data { topic: "/scene".into(), data: update })], 0.0);
+        let objects = |s: &State| s.received().map(|r| r.objects.len()).sum::<usize>();
+        s.sync(0.0, &mut Tx::default());
+        assert_eq!(objects(&s), 1);
+        s.set_unsaved(|v| v.objects.show = false);
+        s.sync(0.1, &mut Tx::default());
+        assert!(!s.wanted().topics.contains("/scene"));
+        s.set_unsaved(|v| v.objects.show = true);
+        s.sync(0.2, &mut Tx::default());
+        assert_eq!(objects(&s), 0, "the cup the server deleted while hidden isn't drawn");
     }
 
     // The Med 7's root is `world`; a stack that publishes TF under `map` must keep its TF tree

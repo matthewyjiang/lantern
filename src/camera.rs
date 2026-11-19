@@ -35,6 +35,12 @@ impl Default for OrbitCamera {
 }
 
 impl OrbitCamera {
+    /// How many units (points or pixels) one metre spans at unit depth in a viewport
+    /// `viewport_h` of those units tall; divide by the depth for a metre there.
+    pub fn focal(&self, viewport_h: f32) -> f32 {
+        viewport_h * 0.5 / (self.fov_y * 0.5).tan()
+    }
+
     pub fn eye(&self) -> Vec3 {
         let (sy, cy) = self.yaw.sin_cos();
         let (sp, cp) = self.pitch.sin_cos();

@@ -1,0 +1,140 @@
+---
+title: Objects
+description: Draw shapes, text and meshes at TF frames in the 3D view, such as a grasped object in the gripper, from foxglove.SceneUpdate topics.
+---
+
+The 3D view draws Foxglove `SceneUpdate` messages: entities made of cubes, spheres, cylinders,
+arrows, lines, triangles, text and meshes, each placed in a TF frame. An object in a gripper is a
+frame-locked entity in the gripper's frame, so it moves with the arm.
+
+![The KUKA Med 7 holding a blue can with an orange lid, labelled held, with an arrow, cylinder, drop zone, cone and cube beyond it.](../../../../screenshots/objects-held.png)
+
+To try it, run the [replay server](/lantern/reference/replay-server/) with
+`--robot-pose reach --objects` and load the Med 7
+([Robot model](/lantern/guides/robot-model/#try-it-with-the-med-7)).
+
+## Publish a scene
+
+With the [Python SDK](/lantern/guides/publishing/):
+
+```python title="grasp.py"
+import time
+
+import foxglove
+from foxglove import messages as fm
+from foxglove.channels import SceneUpdateChannel
+
+foxglove.start_server(name="my-app", port=8765)
+scene = SceneUpdateChannel("/scene")
+cup = open("cup.glb", "rb").read()
+
+def pose(x, y, z):
+    return fm.Pose(position=fm.Vector3(x=x, y=y, z=z), orientation=fm.Quaternion(x=0, y=0, z=0, w=1))
+
+def cup_in_gripper(**placement):
+    # 7 cm along the gripper frame's z.
+    model = fm.ModelPrimitive(pose=pose(0, 0, 0.07), scale=fm.Vector3(x=1, y=1, z=1), media_type="model/gltf-binary", data=cup)
+    return fm.SceneEntity(id="cup", frame_id="gripper_link", models=[model], **placement)
+
+# Held: it moves with the gripper.
+scene.log(fm.SceneUpdate(entities=[
+    cup_in_gripper(frame_locked=True),
+    fm.SceneEntity(id="target", frame_id="world", cubes=[
+        fm.CubePrimitive(pose=pose(0.5, 0.2, 0.05), size=fm.Vector3(x=0.1, y=0.1, z=0.1), color=fm.Color(r=0.3, g=0.8, b=0.4, a=1)),
+    ]),
+]))
+```
+
+When the gripper lets go, send the cup unlocked, stamped now: it stays where the gripper is at that
+time. Or delete it:
+
+```python
+now = time.time_ns()
+scene.log(fm.SceneUpdate(entities=[cup_in_gripper(timestamp=fm.Timestamp(sec=now // 10**9, nsec=now % 10**9))]))
+
+scene.log(fm.SceneUpdate(deletions=[fm.SceneEntityDeletion(type=fm.SceneEntityDeletionType.MatchingId, id="cup")]))
+```
+
+On ROS 2, publish `foxglove_msgs/msg/SceneUpdate` (`ros-humble-foxglove-msgs`) and
+[foxglove_bridge](/lantern/connect/#ros-2-foxglove_bridge) forwards it.
+
+The frame must be in TF. Lantern poses its robot model from joint states but doesn't publish the
+links as TF frames, so run `robot_state_publisher` (or send the transform yourself) for an entity
+in a link's frame.
+
+## Entities
+
+- Entities are kept per topic, by `id`. An entity with the same `id` replaces the old one.
+- Deletions (by `id`, or all of the topic's) apply before the update's entities.
+- An entity with a `lifetime` goes that long after it arrives; without one it stays until replaced
+  or deleted. Its topic going away or being switched off, or **Show** off, removes its entities too.
+- An entity whose frame has no transform to the fixed frame isn't drawn, and the status chip says so.
+
+## Placement
+
+Each entity is placed by its `frame_id` and the primitives' poses, as Foxglove places it:
+
+- **`frame_locked: true`** follows the frame as TF moves it.
+- **`frame_locked: false`**, the default, stays where the frame was at the entity's `timestamp`. Its
+  pose goes into the root of the fixed frame's TF tree with the transforms at that time, and stays
+  there as the frame moves.
+
+For the second, a `timestamp` between two of the frame's transforms is interpolated, and one
+outside them takes the nearest. The timestamp is compared with the transforms' header stamps, so
+both must come from the same clock. An unset `timestamp` is 0, which takes the oldest transform
+kept. Each connection's transforms start over when it reconnects.
+
+## Shapes
+
+| Primitive | Drawn |
+| --- | --- |
+| Cubes, spheres | `size` across, along the pose's x, y and z |
+| Cylinders | Along z; `bottom_scale` and `top_scale` scale each end, and 0 makes a cone |
+| Arrows | From the pose along its +x: the shaft, then the head |
+| Lines | Strip, loop or list, `thickness` in metres (in pixels with `scale_invariant`). With `colors`, each segment takes its first point's colour. `indices` are used when set. |
+| Triangles | In one colour: `color`, or the first of `colors` |
+| Texts | Facing the camera, centred on the pose. `font_size` is in points with `scale_invariant`, else metres (shown 6 to 72 pt). |
+| Models | Meshes, below |
+
+![The table scan with a cube, sphere, cylinder, cone, arrow and a translucent drop zone outlined by a line loop and labelled in text.](../../../../screenshots/objects-table.png)
+
+A primitive without a colour is transparent, as in Foxglove, and isn't drawn. Colours with alpha
+below 1 are drawn translucent.
+
+## Meshes
+
+A `ModelPrimitive` sends the mesh in `data`, with its `media_type`, or names a file in `url`.
+
+| Format | `media_type` | File |
+| --- | --- | --- |
+| GLB, glTF | `model/gltf-binary`, `model/gltf+json` | `.glb`, `.gltf` |
+| STL, binary or ASCII | `model/stl` | `.stl` |
+
+- Both formats are read as Y-up and turned to Z-up, as Foxglove does. (URDF meshes aren't turned.)
+- A `url` is an absolute path, `file://` or `package://`, found like
+  [URDF mesh paths](/lantern/guides/robot-model/#meshes), on Lantern's machine. HTTP URLs aren't
+  fetched.
+- glTF draws the default scene's triangles, placed by their nodes, each in its material's base
+  colour. Textures and vertex colours aren't drawn. Buffers can be in the GLB, in `data:` URIs, or
+  files beside a `.gltf` named by `url`.
+- `override_color` draws the whole mesh in `color`. `scale` stretches it along each axis.
+- Each file or distinct `data` is loaded once, when an entity first names it. A mesh that fails to
+  load is reported in the status chip.
+
+## Settings
+
+The 3D view's **Objects** tab has **Show** and a switch per scene topic. Only topics switched on
+are subscribed to.
+
+## Limits
+
+- All objects share one mesh of up to 5,592,405 vertices
+  ([limits](/lantern/reference/topics/#limits)). Shapes past it aren't drawn, and the status chip
+  gives the vertices they need, the limit and how many aren't drawn. A model over it on its own
+  doesn't load.
+- Mesh files are read up to 256 MiB, and only regular files.
+- Each connection keeps the newest 10,000 transforms of each frame. An unlocked entity stamped
+  before them takes the oldest kept.
+- A clock that jumps back while connected, such as a simulator reset, mixes the old run's
+  transforms with the new run's until the connection restarts.
+- Not supported: OBJ and DAE meshes, textures and HTTP URLs.

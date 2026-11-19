@@ -47,6 +47,7 @@ pub struct View3dSettings {
     pub points: PointsSettings,
     pub poses: PosesSettings,
     pub robot: RobotSettings,
+    pub objects: ObjectsSettings,
     /// The camera image as a card in the view's corner, when the layout has no Image panel.
     pub image_card: bool,
     /// What that card shows.
@@ -67,6 +68,7 @@ impl Default for View3dSettings {
             points: PointsSettings::default(),
             poses: PosesSettings::default(),
             robot: RobotSettings::default(),
+            objects: ObjectsSettings::default(),
             image_card: true,
             image: ImageSettings::default(),
             data: DataSettings::default(),
@@ -132,6 +134,21 @@ impl Default for RobotSettings {
     }
 }
 
+/// Objects: the shapes and meshes `SceneUpdate` topics send.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ObjectsSettings {
+    pub show: bool,
+    /// Scene topics switched off (new topics show by default).
+    pub hidden: BTreeSet<String>,
+}
+
+impl Default for ObjectsSettings {
+    fn default() -> Self {
+        ObjectsSettings { show: true, hidden: BTreeSet::new() }
+    }
+}
+
 /// An Image panel's settings (and the 3D view's image card's).
 #[derive(Clone, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -173,6 +190,7 @@ impl View3dSettings {
             points: PointsSettings { show: false, ..d.points },
             poses: PosesSettings { show: false, ..d.poses },
             robot: RobotSettings { show: false, ..d.robot },
+            objects: ObjectsSettings { show: false, ..d.objects },
             ..d
         }
     }

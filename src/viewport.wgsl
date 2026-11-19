@@ -1,7 +1,8 @@
 // Lantern's 3D viewport. These pipelines draw into the offscreen target in one pass, in order:
 // `sky` (backdrop + ground grid, no depth), `points` (the cloud, depth-tested and written),
-// `robot` twice (depth only, then colour where depth matches, blended), then `seg` (TF axes and
-// tree, poses, velocities; depth-tested, blended). `blit` then copies the target into
+// `mesh` for the opaque parts of the robot and objects (depth only, then colour where depth
+// matches), `seg` (TF axes and tree, poses, velocities, object lines; depth-tested, blended),
+// then `mesh` again for the translucent parts (blended). `blit` then copies the target into
 // Rune's effect slot inside the UI pass. Rune's CLIP_WGSL is prepended (clip_alpha).
 //
 // Colours are linear: the offscreen target is *Srgb, and `blit` re-encodes when the UI pass
@@ -20,14 +21,14 @@ struct Frame {
     // The colour ramp's range (height in metres, or field value): low, high.
     shade: vec4f,
     // Minor grid cell, metres (majors are ten; the grid fades out with it), scene radius
-    // (the depth cue scales with it), unused, unused.
+    // (the depth cue scales with it), pixels per metre at unit depth (lines in metres), unused.
     grid: vec4f,
 }
 
 @group(0) @binding(0) var<uniform> F: Frame;
 // x, y, z as f32 bits, then the colour value: an f32 field value, or rgb packed 0xAARRGGBB.
 @group(0) @binding(1) var<storage, read> points: array<vec4<u32>>;
-// Three vec4s per segment: a (xyz, width px), b (xyz), colour (rgb, alpha).
+// Three vec4s per segment: a (xyz, width: px, or metres when negative), b (xyz), colour (rgb, alpha).
 @group(0) @binding(2) var<storage, read> segs: array<vec4f>;
 
 const BG_LOW: vec3f = vec3f(0.0080, 0.0092, 0.0118);
@@ -135,35 +136,35 @@ const QUAD: array<u32, 6> = array<u32, 6>(0u, 1u, 2u, 2u, 1u, 3u);
     return vec4f(in.color, 1.0);
 }
 
-// ---- robot: mesh parts, each placed by its link's pose ----
+// ---- mesh: parts of the robot or the objects, each placed by its own pose ----
 
-// Position and normal per vertex (in the link's frame), three vertices per triangle.
-@group(1) @binding(0) var<storage, read> robot_verts: array<f32>;
+// Position and normal per vertex (in the part's frame), three vertices per triangle.
+@group(1) @binding(0) var<storage, read> mesh_verts: array<f32>;
 struct Part { model: mat4x4f, color: vec4f }
-// One per part, picked by the instance index: link pose in the display frame, then linear colour
-// and alpha (opacity applied).
+// One per part, picked by the instance index: pose in the display frame, then linear colour
+// and alpha.
 @group(1) @binding(1) var<storage, read> parts: array<Part>;
 
 // `@invariant`: the depth and colour passes must compute bit-identical depths for `Equal`.
-struct RobotOut {
+struct MeshOut {
     @invariant @builtin(position) pos: vec4f,
     @location(0) world: vec3f,
     @location(1) normal: vec3f,
     @location(2) @interpolate(flat) part: u32,
 }
 
-@vertex fn robot_vs(@builtin(vertex_index) v: u32, @builtin(instance_index) i: u32) -> RobotOut {
+@vertex fn mesh_vs(@builtin(vertex_index) v: u32, @builtin(instance_index) i: u32) -> MeshOut {
     let b = v * 6u;
     let m = parts[i].model;
-    let world = m * vec4f(robot_verts[b], robot_verts[b + 1u], robot_verts[b + 2u], 1.0);
-    // Link poses are rigid (scale is baked into the vertices), so the model matrix turns normals.
-    let n = (m * vec4f(robot_verts[b + 3u], robot_verts[b + 4u], robot_verts[b + 5u], 0.0)).xyz;
-    return RobotOut(F.view_proj * world, world.xyz, n, i);
+    let world = m * vec4f(mesh_verts[b], mesh_verts[b + 1u], mesh_verts[b + 2u], 1.0);
+    // Part poses are rigid (scale is baked into the vertices), so the model matrix turns normals.
+    let n = (m * vec4f(mesh_verts[b + 3u], mesh_verts[b + 4u], mesh_verts[b + 5u], 0.0)).xyz;
+    return MeshOut(F.view_proj * world, world.xyz, n, i);
 }
 
 // Two-sided (meshes aren't reliably wound): a headlight from the eye so nothing faces into
 // darkness, a key light from above for form, ambient, and a soft highlight.
-@fragment fn robot_fs(in: RobotOut) -> @location(0) vec4f {
+@fragment fn mesh_fs(in: MeshOut) -> @location(0) vec4f {
     let c = parts[in.part].color;
     let to_eye = normalize(F.eye.xyz - in.world);
     var n = normalize(in.normal);
@@ -187,14 +188,16 @@ struct SegOut { @builtin(position) pos: vec4f, @location(0) color: vec4f, @locat
     if (ca.w <= 0.0 || cb.w <= 0.0) {
         return SegOut(vec4f(2.0, 2.0, 2.0, 1.0), vec4f(0.0), 0.0, 1.0);
     }
-    let half_px = a.w * 0.5 + 1.0; // one pixel of feather on each side
+    let end = vi >> 1u;
+    let c = select(ca, cb, end == 1u);
+    // A width in metres is as many pixels as it spans at this end's depth, at least one.
+    let width = select(a.w, max(-a.w * F.grid.z / c.w, 1.0), a.w < 0.0);
+    let half_px = width * 0.5 + 1.0; // one pixel of feather on each side
     let pa = ca.xy / ca.w * F.viewport.xy * 0.5;
     let pb = cb.xy / cb.w * F.viewport.xy * 0.5;
     let along = normalize(pb - pa + vec2f(1e-6, 0.0));
     let normal = vec2f(-along.y, along.x);
-    let end = vi >> 1u;
     let side = f32(vi & 1u) * 2.0 - 1.0;
-    let c = select(ca, cb, end == 1u);
     let cap = select(-along, along, end == 1u) * half_px;
     let px = normal * side * half_px + cap;
     let clip = vec4f(c.xy + px / (F.viewport.xy * 0.5) * c.w, c.zw);

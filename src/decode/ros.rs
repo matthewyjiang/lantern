@@ -1,20 +1,29 @@
 //! ROS 2 messages in CDR, field order as in the `.msg` definitions (sensor_msgs, tf2_msgs,
-//! geometry_msgs, std_msgs, diagnostic_msgs; identical in Humble and Jazzy).
+//! geometry_msgs, std_msgs, diagnostic_msgs, foxglove_msgs; identical in Humble and Jazzy).
 
 use glam::{DQuat, DVec3};
 
 use super::cdr::Cdr;
-use super::image;
+use super::{entities, image};
 use super::points::{ColorChoice, Field, Num, Packed};
-use super::{DecodeError, Decoded};
-use crate::scene::{Diagnostic, Level, Pose, Poses, Tracked, Transform};
+use super::{nanos, DecodeError, Decoded};
+use crate::scene::{Diagnostic, Entity, Geometry, Level, Pose, Poses, SceneUpdate, Shape, Tracked, Transform};
 
-/// `std_msgs/Header`: stamp (int32 sec, uint32 nanosec), then the frame_id it returns. Lantern
-/// draws the newest message of each topic, so it doesn't use stamps.
+/// `std_msgs/Header`: stamp (int32 sec, uint32 nanosec), then the frame_id it returns. For
+/// messages drawn as the newest of their topic, which don't need the stamp.
 fn header(r: &mut Cdr) -> Result<String, DecodeError> {
-    r.i32()?;
-    r.u32()?;
-    r.string()
+    Ok(stamped_header(r)?.1)
+}
+
+/// A `std_msgs/Header`: its stamp in nanoseconds, and its frame.
+fn stamped_header(r: &mut Cdr) -> Result<(i64, String), DecodeError> {
+    let stamp = time(r)?;
+    Ok((stamp, r.string()?))
+}
+
+/// A `builtin_interfaces/Time`, in nanoseconds.
+fn time(r: &mut Cdr) -> Result<i64, DecodeError> {
+    Ok(nanos(r.i32()?.into(), r.u32()?.into()))
 }
 
 fn vector3(r: &mut Cdr) -> Result<DVec3, DecodeError> {
@@ -38,9 +47,9 @@ fn pose(r: &mut Cdr) -> Result<Pose, DecodeError> {
 
 /// `geometry_msgs/TransformStamped` without the encapsulation header.
 fn transform(r: &mut Cdr) -> Result<Transform, DecodeError> {
-    let parent = header(r)?;
+    let (stamp, parent) = stamped_header(r)?;
     let child = r.string()?;
-    Ok(Transform { parent, child, pose: Pose { translation: vector3(r)?, rotation: quaternion(r)? } })
+    Ok(Transform { parent, child, stamp, pose: Pose { translation: vector3(r)?, rotation: quaternion(r)? } })
 }
 
 pub fn point_cloud2(bytes: &[u8], color: &ColorChoice) -> Result<Decoded, DecodeError> {
@@ -187,4 +196,84 @@ pub fn diagnostic_array(bytes: &[u8], _: &ColorChoice) -> Result<Decoded, Decode
         out.push(Diagnostic { level: Level::from_byte(level), name, message, values });
     }
     Ok(Decoded::Diagnostics(out))
+}
+
+/// `foxglove_msgs/Color`: r, g, b, a as float64.
+fn color(r: &mut Cdr) -> Result<[f32; 4], DecodeError> {
+    Ok([r.f64()? as f32, r.f64()? as f32, r.f64()? as f32, r.f64()? as f32])
+}
+
+/// A sequence of `item`s, each at least `min` bytes.
+fn seq<T>(r: &mut Cdr, min: usize, mut item: impl FnMut(&mut Cdr) -> Result<T, DecodeError>) -> Result<Vec<T>, DecodeError> {
+    let n = r.seq_len(min)?;
+    (0..n).map(|_| item(r)).collect()
+}
+
+/// One `foxglove_msgs/SceneEntity`, fields in the `.msg`'s order.
+fn scene_entity(r: &mut Cdr) -> Result<Entity, DecodeError> {
+    let timestamp = time(r)?;
+    let frame_id = r.string()?;
+    let id = r.string()?;
+    let lifetime = entities::lifetime(r.i32()?.into(), r.u32()?.into());
+    let frame_locked = r.bool()?;
+    seq(r, 8, |r| Ok((r.string()?, r.string()?)))?; // metadata
+    let mut shapes = Vec::new();
+    // Every primitive starts with a 56-byte pose.
+    for a in seq(r, 56, |r| Ok((pose(r)?, [r.f64()?, r.f64()?, r.f64()?, r.f64()?], color(r)?)))? {
+        let (pose, [shaft_length, shaft_diameter, head_length, head_diameter], color) = a;
+        shapes.push(Shape { pose, color, geometry: Geometry::Arrow { shaft_length, shaft_diameter, head_length, head_diameter } });
+    }
+    for (pose, size, color) in seq(r, 56, |r| Ok((pose(r)?, vector3(r)?, color(r)?)))? {
+        shapes.push(Shape { pose, color, geometry: Geometry::Cube { size } });
+    }
+    for (pose, size, color) in seq(r, 56, |r| Ok((pose(r)?, vector3(r)?, color(r)?)))? {
+        shapes.push(Shape { pose, color, geometry: Geometry::Sphere { size } });
+    }
+    for (pose, size, bottom, top, color) in seq(r, 56, |r| Ok((pose(r)?, vector3(r)?, r.f64()?, r.f64()?, color(r)?)))? {
+        shapes.push(Shape { pose, color, geometry: Geometry::Cylinder { size, bottom, top } });
+    }
+    let n = r.seq_len(56)?;
+    for _ in 0..n {
+        let kind = r.u8()?;
+        let (pose, thickness, scale_invariant) = (pose(r)?, r.f64()?, r.bool()?);
+        let points = seq(r, 24, vector3)?;
+        let base = color(r)?;
+        let colors = seq(r, 32, color)?;
+        let indices = seq(r, 4, |r| r.u32())?;
+        shapes.extend(entities::line(kind.into(), pose, thickness, scale_invariant, points, base, colors, &indices)?);
+    }
+    let n = r.seq_len(56)?;
+    for _ in 0..n {
+        let pose = pose(r)?;
+        let points = seq(r, 24, vector3)?;
+        let base = color(r)?;
+        let colors = seq(r, 32, color)?;
+        let indices = seq(r, 4, |r| r.u32())?;
+        shapes.push(entities::triangles(pose, points, base, colors, &indices)?);
+    }
+    let n = r.seq_len(56)?;
+    for _ in 0..n {
+        let (pose, _billboard, font_size, scale_invariant, color) = (pose(r)?, r.bool()?, r.f64()?, r.bool()?, color(r)?);
+        shapes.push(entities::text(pose, r.string()?, font_size, scale_invariant, color));
+    }
+    let n = r.seq_len(56)?;
+    for _ in 0..n {
+        let (pose, scale, color, override_color) = (pose(r)?, vector3(r)?, color(r)?, r.bool()?);
+        let (url, media_type, data) = (r.string()?, r.string()?, r.bytes()?.to_vec());
+        shapes.push(entities::model(pose, scale, color, override_color, url, media_type, data)?);
+    }
+    Ok(Entity { id, frame_id, placed_at: (!frame_locked).then_some(timestamp), lifetime, shapes })
+}
+
+/// `foxglove_msgs/SceneUpdate`, as a ROS node publishes it through foxglove_bridge.
+pub fn scene_update(bytes: &[u8], _: &ColorChoice) -> Result<Decoded, DecodeError> {
+    let mut r = Cdr::new(bytes)?;
+    // A deletion: time (8), type (1, padded to 4), id (4 or more).
+    let deletions = seq(&mut r, 16, |r| {
+        let (_sec, _nanosec, kind, id) = (r.i32()?, r.u32()?, r.u8()?, r.string()?);
+        entities::deletion(kind.into(), id)
+    })?;
+    // An entity: two times, two strings, a bool, nine sequences: well over 40 bytes.
+    let entities = seq(&mut r, 40, scene_entity)?;
+    Ok(Decoded::Objects(SceneUpdate { deletions, entities }))
 }

@@ -20,7 +20,7 @@ use crate::connection::Connection;
 use crate::decode::{ColorChoice, Kind};
 use crate::layout::{Layout, Panel, PanelKind, Preset, PRESETS};
 use crate::panels;
-use crate::scene::{Annotation, Diagnostic, Image, Level, PointColor};
+use crate::scene::{Annotation, Diagnostic, Image, Level, PointColor, Thickness};
 use crate::settings::{DataSettings, ImageSettings, View3dSettings};
 use crate::source::Status;
 use crate::viewport::{self, Shade};
@@ -142,12 +142,15 @@ fn drag_camera(s: &mut State, d: &mut Drag, tx: &mut Tx) {
     }
 }
 
-/// Frame and object names, placed where their origins project into the viewport.
+/// Frame and pose names, placed beside where their origins project into the viewport, and
+/// objects' text centred on theirs, in its colour and size.
 fn frame_labels(s: &State, [w, h]: [f32; 2]) -> Vec<El> {
     let t = tok::theme(true);
     let vp = s.camera.view_proj(w / h.max(1.0));
-    s.display.labels.iter().filter_map(|(name, p)| {
-        let clip = vp * p.extend(1.0);
+    // Points per metre at unit depth, for text sized in metres.
+    let focal = s.camera.focal(h);
+    s.display.labels.iter().filter_map(|label| {
+        let clip = vp * label.at.extend(1.0);
         if clip.w <= 0.0 {
             return None;
         }
@@ -155,10 +158,23 @@ fn frame_labels(s: &State, [w, h]: [f32; 2]) -> Vec<El> {
         if !(0.0..w - 40.0).contains(&x) || !(10.0..h - 10.0).contains(&y) {
             return None;
         }
-        Some(
-            el().absolute(x + 6.0, y - 18.0).px(5.0).py(1.0).radius(4.0).fill(oklcha(0.16, 0.006, 265.0, 0.7))
-                .child(text(name.clone()).font(MONO_SMALL).color(t.text_secondary)),
-        )
+        let chip = el().px(5.0).py(1.0).radius(4.0).fill(oklcha(0.16, 0.006, 265.0, 0.7));
+        Some(match label.style {
+            None => chip.absolute(x + 6.0, y - 18.0).child(text(label.text.clone()).font(MONO_SMALL).color(t.text_secondary)),
+            Some(style) => {
+                let size = match style.size {
+                    Thickness::Points(pt) => pt as f32,
+                    Thickness::Metres(m) => m as f32 * focal / clip.w,
+                };
+                // Readable, and no bigger than a heading, however near the camera is.
+                let size = size.clamp(6.0, 72.0);
+                let [r, g, b, a] = style.color;
+                let color = Color { r: srgb_decode(r), g: srgb_decode(g), b: srgb_decode(b), a };
+                // Centred on its origin: about half a line up, and half its width left.
+                let half_w = label.text.chars().count() as f32 * size * 0.3;
+                chip.absolute(x - half_w - 5.0, y - size * 0.7).child(text(label.text.clone()).font(TextStyle::new(size, 500.0)).color(color))
+            }
+        })
     }).collect()
 }
 
@@ -537,6 +553,7 @@ fn kind_badge(kind: Kind) -> El {
         Kind::PointCloud => 250.0,
         Kind::Transforms => 150.0,
         Kind::Poses => 70.0,
+        Kind::Objects => 100.0,
         Kind::JointStates => 310.0,
         Kind::Image => 200.0,
         Kind::Annotations => 230.0,
@@ -680,8 +697,8 @@ fn view3d_settings(s: &State, k: &Kit, layer: &mut Vec<El>, v: &View3dSettings, 
     let body = col().w_full().gap(10.0);
     match tab {
         Tab3d::Scene => {
-            let frames = s.display.tf.frames();
-            body.child(picker(s, k, layer, "fixed-frame", "Fixed frame", &v.fixed_frame, s.display.fixed.as_deref(), &frames, "not seen yet", |s, f| s.edit3d(|v| v.fixed_frame = f)))
+            let frames = &s.display.frames;
+            body.child(picker(s, k, layer, "fixed-frame", "Fixed frame", &v.fixed_frame, s.display.fixed.as_deref(), frames, "not seen yet", |s, f| s.edit3d(|v| v.fixed_frame = f)))
                 .child(toggle_row("grid", "Grid", v.grid, |s| s.edit3d(|v| v.grid ^= true)))
                 .child(toggle_row("frames", "TF frames", v.frames, |s| s.edit3d(|v| v.frames ^= true)))
                 .child(toggle_row("labels", "Labels", v.labels, |s| s.edit3d(|v| v.labels ^= true)))
@@ -701,6 +718,7 @@ fn view3d_settings(s: &State, k: &Kit, layer: &mut Vec<El>, v: &View3dSettings, 
             .child(field("Expire after", segmented("pose-timeout", &[(0.0, "Never"), (0.5, "0.5 s"), (2.0, "2 s"), (10.0, "10 s")], v.poses.timeout, |s, x| s.edit3d(|v| v.poses.timeout = x))))
             .child(field("Trail", segmented("trail", &[(0.0, "Off"), (5.0, "5 s"), (15.0, "15 s"), (60.0, "60 s")], v.poses.trail, |s, x| s.edit3d(|v| v.poses.trail = x)))),
         Tab3d::Robot => robot_settings(s, k, layer, v),
+        Tab3d::Objects => objects_settings(s, v),
         Tab3d::Cards => {
             let body = if cards.image {
                 body.child(toggle_row("show-image-card", "Camera image", v.image_card, |s| s.edit3d(|v| v.image_card ^= true)))
@@ -840,6 +858,13 @@ fn robot_settings(s: &State, k: &Kit, layer: &mut Vec<El>, v: &View3dSettings) -
     sec.child(picker(s, k, layer, "joint-topic", "Joint states", &v.robot.joint_topic, topics.first().map(String::as_str), &topics, "not advertised", |s, j| s.edit3d(|v| v.robot.joint_topic = j)))
         .child(note(received).key("joints-received"))
         .child(field("Opacity", segmented("robot-opacity", &[(1.0, "100%"), (0.75, "75%"), (0.5, "50%"), (0.25, "25%")], v.robot.opacity, |s, x| s.edit3d(|v| v.robot.opacity = x))))
+}
+
+/// The 3D view's objects: which scene topics are drawn.
+fn objects_settings(s: &State, v: &View3dSettings) -> El {
+    col().w_full().gap(10.0)
+        .child(toggle_row("objects", "Show", v.objects.show, |s| s.edit3d(|v| v.objects.show ^= true)))
+        .child(field("Topics", topic_switches(s, "object", Kind::Objects, &v.objects.hidden, &view3d_lens(|v| &mut v.objects.hidden))))
 }
 
 /// A setting that takes one of a list of values, Auto first: its label, and a select (its field

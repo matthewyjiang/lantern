@@ -8,7 +8,7 @@ use std::sync::Arc;
 use glam::DVec3;
 
 use crate::decode::Decoded;
-use crate::scene::{Annotation, Diagnostic, Image, PointCloud, Poses, TfTree};
+use crate::scene::{Annotation, Deletion, Diagnostic, Entity, Image, PointCloud, Poses, TfTree};
 use crate::source::{self, Channel, Event, Source, Status, Wanted};
 use crate::ui::thousands;
 use crate::viewport;
@@ -60,6 +60,10 @@ pub struct Received {
     /// several bodies. Kept until `pose_timeout` passes without a new one, or the topic is
     /// unadvertised or hidden.
     pub poses: BTreeMap<(String, String), (f64, Poses)>,
+    /// Scene entities per (topic, id), with when each expires (UI clock), if it does. An
+    /// entity stays until its topic sends one of the same id or deletes it, its lifetime
+    /// passes, or the topic is unsubscribed (`State::sync`).
+    pub objects: BTreeMap<(String, String), (Option<f64>, Entity)>,
     /// Where each single-pose (topic, label) has been, newest last.
     pub trails: BTreeMap<(String, String), Trail>,
     /// The newest image of each image topic some view shows.
@@ -109,6 +113,11 @@ impl Received {
         let mut changed = Changed::default();
         let display = match e {
             Event::Status(s) => {
+                // A new session may be on a restarted clock: its transforms start over, as a new
+                // data source does in Foxglove.
+                if matches!(s, Status::Connected { .. }) {
+                    self.tf = TfTree::default();
+                }
                 self.status = s;
                 true
             }
@@ -117,6 +126,7 @@ impl Received {
                 let advertised: HashSet<String> = self.channels.iter().map(|c| c.topic.clone()).collect();
                 let gone = |topic: &String| !advertised.contains(topic);
                 self.poses.retain(|(topic, _), _| !gone(topic));
+                self.objects.retain(|(topic, _), _| !gone(topic));
                 self.trails.retain(|(topic, _), _| !gone(topic));
                 self.errors.retain(|topic, _| !gone(topic));
                 self.annotations.retain(|topic, _| !gone(topic));
@@ -163,6 +173,20 @@ impl Received {
                             t.points.push_back((clock, item.pose.translation));
                         }
                         self.poses.insert(key, (clock, p));
+                        true
+                    }
+                    // Deletions first: an update can clear its topic and send the new scene.
+                    Decoded::Objects(u) => {
+                        for d in u.deletions {
+                            match d {
+                                Deletion::All => self.objects.retain(|(t, _), _| *t != topic),
+                                Deletion::Id(id) => _ = self.objects.remove(&(topic.clone(), id)),
+                            }
+                        }
+                        for e in u.entities {
+                            let until = e.lifetime.map(|l| clock + l);
+                            self.objects.insert((topic.clone(), e.id.clone()), (until, e));
+                        }
                         true
                     }
                     // These arrive at the robot's control rate (often 100 Hz or more).
@@ -224,8 +248,9 @@ impl Received {
         changed
     }
 
-    /// Drops poses older than `timeout` seconds (0: never) and trail points older than `trail`
-    /// (0: no trails). Returns whether anything went, and when the next is due.
+    /// Drops poses older than `timeout` seconds (0: never), trail points older than `trail`
+    /// (0: no trails), and objects past their lifetime. Returns whether anything went, and when
+    /// the next is due.
     pub fn expire(&mut self, now: f64, timeout: f64, trail: f64) -> (bool, Option<f64>) {
         let mut due: Option<f64> = None;
         let mut soonest = |t: f64| due = Some(due.map_or(t, |d| d.min(t)));
@@ -236,6 +261,10 @@ impl Received {
             dropped |= self.poses.len() != before;
             self.poses.values().for_each(|(at, _)| soonest(at + timeout));
         }
+        let before = self.objects.len();
+        self.objects.retain(|_, (until, _)| until.is_none_or(|t| now < t));
+        dropped |= self.objects.len() != before;
+        self.objects.values().filter_map(|(until, _)| *until).for_each(&mut soonest);
         let poses = &self.poses;
         self.trails.retain(|key, t| {
             while t.points.front().is_some_and(|(at, _)| trail <= 0.0 || now - at >= trail) {
@@ -252,7 +281,7 @@ impl Received {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::scene::{Pose, Tracked};
+    use crate::scene::{Pose, Tf, Tracked, Transform};
 
     /// An unlabelled pose message on /tracked with a pose at each x.
     fn poses_at(xs: &[f64]) -> Event {
@@ -262,6 +291,20 @@ mod tests {
 
     fn pose_at(x: f64) -> Event {
         poses_at(&[x])
+    }
+
+    // A server restarted at 1 s on its clock, after sending the gripper at 5 s: the old run's
+    // transform no longer places anything, so the gripper at 5 s is the new run's latest.
+    #[test]
+    fn a_new_session_starts_the_transforms_over() {
+        let picked = Picked::default();
+        let mut r = Received::default();
+        let gripper = |stamp: i64, x: f64| Event::Data { topic: "/tf".into(), data: Decoded::Transforms(vec![Transform { parent: "world".into(), child: "gripper".into(), stamp, pose: Pose { translation: DVec3::new(x, 0.0, 0.0), ..Pose::IDENTITY } }]) };
+        let sec = 1_000_000_000;
+        r.apply(gripper(5 * sec, 1.0), 0.0, &picked, false);
+        r.apply(Event::Status(Status::Connected { server: String::new() }), 0.0, &picked, false);
+        r.apply(gripper(sec, 2.0), 0.0, &picked, false);
+        assert_eq!(Tf(vec![&r.tf]).lookup("world", "gripper", Some(5 * sec)).unwrap().translation.x, 2.0);
     }
 
     // An array (PoseArray, PosesInFrame) whose length goes 2, 1, 0 replaces itself each time:
@@ -294,5 +337,27 @@ mod tests {
         assert!(r.poses.contains_key(&key), "labelled by its topic, and still fresh");
         let (dropped, _) = r.expire(4.0, 2.0, 1.5);
         assert!(dropped && r.poses.is_empty() && r.trails.is_empty());
+    }
+
+    fn scene(deletions: Vec<Deletion>, entities: &[(&str, Option<f64>)]) -> Event {
+        let entity = |&(id, lifetime): &(&str, Option<f64>)| Entity { id: id.into(), frame_id: "world".into(), placed_at: None, lifetime, shapes: vec![] };
+        Event::Data { topic: "/scene".into(), data: Decoded::Objects(crate::scene::SceneUpdate { deletions, entities: entities.iter().map(entity).collect() }) }
+    }
+
+    // An update deletes before it adds, so "delete all, then this scene" replaces the scene; an
+    // id sent again replaces its entity; a lifetime counts from arrival on the UI clock.
+    #[test]
+    fn scene_updates_delete_replace_and_expire() {
+        let picked = Picked::default();
+        let mut r = Received::default();
+        let ids = |r: &Received| r.objects.keys().map(|(_, id)| id.clone()).collect::<Vec<_>>();
+        r.apply(scene(vec![], &[("table", None), ("cup", Some(1.0)), ("old", None)]), 0.0, &picked, false);
+        r.apply(scene(vec![Deletion::Id("old".into())], &[("cup", Some(1.0))]), 0.5, &picked, false);
+        assert_eq!(ids(&r), ["cup", "table"]);
+        assert_eq!(r.expire(1.2, 0.0, 0.0), (false, Some(1.5)), "the resent cup lives to 0.5 + 1");
+        assert_eq!(r.expire(1.5, 0.0, 0.0), (true, None));
+        assert_eq!(ids(&r), ["table"]);
+        r.apply(scene(vec![Deletion::All], &[("bin", None)]), 2.0, &picked, false);
+        assert_eq!(ids(&r), ["bin"]);
     }
 }

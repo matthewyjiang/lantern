@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Headless proofs for the displays beyond the cloud: joint states from either encoding, two
 # servers at once, the robot from --urdf and from a robot_description topic (and a file that
-# isn't the described robot), pose trails and expiry, the camera image with annotations, text
-# and stats. Starts scripts/serve.py servers, snaps Lantern against them into out/displays/, and
+# isn't the described robot), pose trails and expiry, objects from a scene topic and the layout,
+# the camera image with annotations, text and stats. Starts scripts/serve.py servers, snaps Lantern against them into out/displays/, and
 # compares the frames a claim says must match.
 # Usage: scripts/snap-displays.sh   (release build, ImageMagick `compare`, fixtures from
 #        scripts/robot_fixture.py; PY as snap-live.sh)
@@ -35,7 +35,7 @@ shot() { # name, settings JSON, seconds, [Lantern flags...]
   rm -rf "$cfg/lantern" && mkdir -p "$cfg/lantern" && printf '%s\n' "$settings" > "$cfg/lantern/settings.json"
   XDG_CONFIG_HOME=$cfg "$bin" --realtime "$@" --snap "$dir/$name.png" --at "$at" > "$dir/$name.log" 2>&1 \
     || { echo "$name: run failed, see $dir/$name.log"; exit 1; }
-  echo "$dir/$name.png: $(grep -o '[0-9]* points and [0-9]* robot vertices drawn' "$dir/$name.log")"
+  echo "$dir/$name.png: $(grep -o '[0-9]* points and [0-9]* robot vertices drawn.*' "$dir/$name.log")"
 }
 fail=0
 same() { # a, b: the viewport under the top bar must match
@@ -90,6 +90,24 @@ stop
 serve poses 8765 "--cloud table --motion"
 shot poses-never "{$local8765, \"layout\": {\"panel\": \"3d\", \"poses\": {\"timeout\": 0}}}" 4 --scene top
 shot poses-expire "{$local8765, \"layout\": {\"panel\": \"3d\", \"poses\": {\"timeout\": 2}}}" 4 --scene top
+stop
+
+# Objects: /scene sends a two-part GLB held in the gripper and shapes, a line loop, triangles
+# and text on the table. Hiding the topic draws what switching objects off does.
+serve objects 8765 "--cloud table --robot-pose reach --objects"
+objects() { echo "{$local8765, \"layout\": {\"panel\": \"3d\", \"robot\": {\"urdf\": \"$med7\"}, \"objects\": {$1}}}"; }
+printf '[{"t": 0.5, "type": "wheel", "x": 640, "y": 400, "dx": 0, "dy": 150}]\n' > "$dir/zoom.json"
+shot objects "$(objects '')" 3 --script "$dir/zoom.json"
+shot objects-hidden "$(objects '"hidden": ["/scene"]')" 3 --script "$dir/zoom.json"
+shot objects-off "$(objects '"show": false')" 3 --script "$dir/zoom.json"
+stop
+same objects-hidden objects-off
+# Close up, without the scan: the object in the gripper, the table's shapes beyond.
+serve objects-held 8765 "--cloud none --robot-pose reach --objects"
+printf '%s\n' '[{"t": 0.5, "type": "drag", "x": 400, "y": 330, "dx": -200, "dy": -60, "dur": 0.3},
+  {"t": 1.0, "type": "wheel", "x": 640, "y": 400, "dx": 0, "dy": 200},
+  {"t": 1.3, "type": "drag", "button": "middle", "x": 400, "y": 330, "dx": -150, "dy": -170, "dur": 0.3}]' > "$dir/close-up.json"
+shot objects-held "$(robot "$med7")" 3 --script "$dir/close-up.json"
 stop
 
 # Everything over the table scan: camera image and annotations, text and stats, a trail.

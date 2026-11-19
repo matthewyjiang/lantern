@@ -3,7 +3,7 @@
 //! any other element.
 //!
 //! Per frame: find the slot's rect in the instance stream, record one timestamped 3D pass
-//! (sky + grid, points, robot, TF and pose lines) into a target the slot's size, then draw the UI with a hook
+//! (sky + grid, points, robot and object meshes, TF and pose lines) into a target the slot's size, then draw the UI with a hook
 //! that blits that target at the slot. GPU timestamps bracket the 3D pass alone, so they never
 //! include the UI pass or a headless readback; `summary` reports them after a headless run.
 
@@ -18,7 +18,7 @@ use rune::render::{CLIP_WGSL, EffectSite, Instance, KIND_EFFECT};
 use wgpu::util::DeviceExt;
 
 use crate::camera::OrbitCamera;
-use crate::robot::RobotMesh;
+use crate::mesh::Mesh;
 use crate::scene::PointCloud;
 
 /// The effect-slot tag the viewport paints.
@@ -29,10 +29,11 @@ pub const MARK: u32 = 1;
 /// refuses larger clouds with a per-topic error (`State::apply`).
 pub const MAX_POINTS: usize = (128 << 20) / 16;
 
-/// The most robot vertices (three per triangle, 24 bytes each), for the same reason: 5.6 M, or
-/// 1.86 M triangles. The KUKA Med 7's visual meshes are 0.50 M. A bigger model fails to load
-/// with the count (`robot::load`).
-pub const MAX_ROBOT_VERTICES: usize = (128 << 20) / 24;
+/// The most vertices in one mesh (three per triangle, 24 bytes each), for the same reason: 5.6 M,
+/// or 1.86 M triangles. The KUKA Med 7's visual meshes are 0.50 M. A bigger robot fails to load
+/// with the count (`robot::load`); objects past it aren't drawn, with a problem saying how many
+/// vertices they needed (`objects::build`).
+pub const MAX_MESH_VERTICES: usize = (128 << 20) / 24;
 
 const COLOR_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8UnormSrgb;
 const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
@@ -63,18 +64,29 @@ pub struct View<'a> {
     pub radius: f32,
     /// TF axes, the TF tree, poses and velocities, already in the display frame.
     pub lines: &'a Arc<Lines>,
-    pub robot: Option<RobotView<'a>>,
+    pub robot: Option<MeshView<'a>>,
+    /// Scene objects.
+    pub objects: Option<MeshView<'a>>,
 }
 
-/// A robot to draw: its mesh, and `display_T_link` for each link its parts name.
-pub struct RobotView<'a> {
-    pub mesh: &'a Arc<RobotMesh>,
-    pub links: &'a [Mat4],
-    /// 0–1, multiplying each part's own alpha.
-    pub opacity: f32,
+/// A mesh to draw, and where and in what colour each of its parts goes (one per part). The mesh
+/// uploads once; the placements are written every frame.
+pub struct MeshView<'a> {
+    pub mesh: &'a Arc<Mesh>,
+    pub parts: Vec<PartDraw>,
 }
 
-/// Thick screen-space line segments: three `vec4`s each, as `seg_vs` reads them.
+/// One mesh part's placement and colour.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PartDraw {
+    /// `display_T_part`: rigid (any scale is in the vertices).
+    pub model: Mat4,
+    /// sRGB and alpha; alpha 0 isn't drawn.
+    pub color: [f32; 4],
+}
+
+/// Thick line segments: three `vec4`s each, as `seg_vs` reads them. A width is in pixels, or
+/// in metres when negative (`segment_metres`).
 #[derive(Default)]
 pub struct Lines(Vec<[f32; 4]>);
 
@@ -86,6 +98,11 @@ impl Lines {
     /// A segment `width` points wide; `color` is sRGB and alpha.
     pub fn segment(&mut self, a: Vec3, b: Vec3, width: f32, color: [f32; 4]) {
         self.0.extend([[a.x, a.y, a.z, width], [b.x, b.y, b.z, 0.0], color]);
+    }
+
+    /// A segment `width` metres wide, thinning with distance like the scene around it.
+    pub fn segment_metres(&mut self, a: Vec3, b: Vec3, width: f32, color: [f32; 4]) {
+        self.0.extend([[a.x, a.y, a.z, -width.abs()], [b.x, b.y, b.z, 0.0], color]);
     }
 
     /// RGB axes of the frame `m` places, each `len` metres.
@@ -127,13 +144,13 @@ pub struct Viewport<S> {
     starts: Vec<Instant>,
     /// Points drawn on the last frame, and the target size.
     last: (u32, (u32, u32)),
-    /// Robot vertices drawn on the last frame.
-    last_robot: usize,
+    /// Robot and object vertices drawn on the last frame.
+    last_meshes: [usize; 2],
 }
 
 impl<S> Viewport<S> {
     pub fn new(view_of: fn(&S) -> View<'_>) -> Self {
-        Viewport { view_of, gpu: None, encode_ms: Vec::new(), upload_ms: Vec::new(), starts: Vec::new(), last: (0, (0, 0)), last_robot: 0 }
+        Viewport { view_of, gpu: None, encode_ms: Vec::new(), upload_ms: Vec::new(), starts: Vec::new(), last: (0, (0, 0)), last_meshes: [0; 2] }
     }
 }
 
@@ -169,16 +186,17 @@ impl<S: 'static> Compositor<S> for Viewport<S> {
             }
             let drawn = view.cloud.map_or(0, |(c, _)| c.points.len().div_ceil(view.decimate.max(1) as usize) as u32);
             let uniform = frame_uniform(&view, (w, h), inst.params[3]);
-            let robot = view.robot.as_ref().map(|r| (Arc::clone(r.mesh), part_data(r)));
-            let translucent = view.robot.as_ref().map(|r| r.opacity < 1.0 || r.mesh.parts.iter().any(|p| p.color[3] < 1.0));
+            let sets = [view.robot, view.objects].map(|v| v.map(|v| (Arc::clone(v.mesh), v.parts)));
             f.write_buffer(&gpu.frame_buf, 0, bytemuck::bytes_of(&uniform));
-            if let Some((mesh, parts)) = &robot {
-                let uploaded = gpu.ensure_robot(device, queue, mesh);
-                f.write_buffer(&uploaded.parts, 0, bytemuck::cast_slice(parts));
+            for (k, set) in sets.iter().enumerate() {
+                if let Some((mesh, parts)) = set {
+                    let uploaded = gpu.ensure_mesh(device, queue, k, mesh, parts);
+                    f.write_buffer(&uploaded.parts, 0, bytemuck::cast_slice(&part_data(parts)));
+                }
+                self.last_meshes[k] = set.as_ref().map_or(0, |(m, _)| m.vertices.len());
             }
-            gpu.encode_3d(f.encoder, drawn, translucent);
+            gpu.encode_3d(f.encoder, drawn, sets.each_ref().map(|s| s.as_ref().map_or(&[][..], |(_, p)| p.as_slice())));
             self.last = (drawn, (w, h));
-            self.last_robot = robot.map_or(0, |(m, _)| m.vertices.len());
         }
 
         let clear = f.rt.clear_color();
@@ -194,7 +212,8 @@ impl<S: 'static> Compositor<S> for Viewport<S> {
 
     fn summary(&mut self, device: &wgpu::Device) -> Option<String> {
         let (drawn, (w, h)) = self.last;
-        let mut out = format!("lantern: viewport {w}x{h} px, {drawn} points and {} robot vertices drawn on the last frame\n", self.last_robot);
+        let [robot, objects] = self.last_meshes;
+        let mut out = format!("lantern: viewport {w}x{h} px, {drawn} points and {robot} robot vertices drawn on the last frame, and {objects} object vertices\n");
         let steady: Vec<f64> = self.encode_ms.iter().filter(|(u, _)| !u).map(|(_, ms)| *ms).collect();
         out += &format!("lantern: compositor encode cpu, frames without a new cloud: {}\n", Stats::of(&steady).line());
         out += &format!("lantern: new clouds uploaded to the GPU: {} ({})\n", self.upload_ms.len(), Stats::all(&self.upload_ms).line());
@@ -237,14 +256,14 @@ struct FrameUniform {
     grid: [f32; 4],
 }
 
-/// Each robot part's model matrix and colour (linear, alpha times opacity), as `robot_vs` reads
-/// them: one entry per part, indexed by instance.
-fn part_data(r: &RobotView<'_>) -> Vec<[f32; 20]> {
+/// Each part's model matrix and colour (linear, and alpha), as `mesh_vs` reads them: one entry
+/// per part, indexed by instance.
+fn part_data(parts: &[PartDraw]) -> Vec<[f32; 20]> {
     let linear = |c: f32| if c <= 0.04045 { c / 12.92 } else { ((c + 0.055) / 1.055).powf(2.4) };
-    r.mesh.parts.iter().map(|p| {
+    parts.iter().map(|p| {
         let mut d = [0.0; 20];
-        d[..16].copy_from_slice(&r.links[p.link].to_cols_array());
-        d[16..].copy_from_slice(&[linear(p.color[0]), linear(p.color[1]), linear(p.color[2]), p.color[3] * r.opacity]);
+        d[..16].copy_from_slice(&p.model.to_cols_array());
+        d[16..].copy_from_slice(&[linear(p.color[0]), linear(p.color[1]), linear(p.color[2]), p.color[3]]);
         d
     }).collect()
 }
@@ -264,7 +283,8 @@ fn frame_uniform(v: &View<'_>, (w, h): (u32, u32), scale: f32) -> FrameUniform {
         viewport: [w as f32, h as f32, v.point_size * scale, scale],
         style: [mode, v.decimate.max(1), v.grid.is_some() as u32, 0],
         shade: [lo, hi, 0.0, 0.0],
-        grid: [v.grid.unwrap_or(1.0), v.radius, 0.0, 0.0],
+        // Pixels per metre at unit depth, for lines in metres.
+        grid: [v.grid.unwrap_or(1.0), v.radius, v.camera.focal(h as f32), 0.0],
     }
 }
 
@@ -279,12 +299,13 @@ struct Gpu {
     sky: wgpu::RenderPipeline,
     points: wgpu::RenderPipeline,
     segs: wgpu::RenderPipeline,
-    robot_bgl: wgpu::BindGroupLayout,
-    /// The robot in two passes over the same vertices: depth only, then colour where the depth
-    /// matches. A translucent robot then shows what's behind it, not its own hidden faces.
-    robot_depth: wgpu::RenderPipeline,
-    robot_color: wgpu::RenderPipeline,
-    robot: Option<RobotGpu>,
+    mesh_bgl: wgpu::BindGroupLayout,
+    /// A mesh in two passes over the same vertices: depth only, then colour where the depth
+    /// matches. Translucent parts then show what's behind them, not their own hidden faces.
+    mesh_depth: wgpu::RenderPipeline,
+    mesh_color: wgpu::RenderPipeline,
+    /// The robot's and the objects' meshes.
+    meshes: [Option<MeshGpu>; 2],
     /// One blit pipeline per format Rune hands the hook (frame target, or a layer's).
     blits: std::cell::RefCell<Vec<(wgpu::TextureFormat, wgpu::RenderPipeline)>>,
     target: Option<Target>,
@@ -308,10 +329,11 @@ struct Uploaded {
     group: wgpu::BindGroup,
 }
 
-/// One robot mesh's vertices (re-uploaded when the mesh changes) and its per-part matrices and
-/// colours (written every frame it's drawn).
-struct RobotGpu {
-    mesh: Arc<RobotMesh>,
+/// One mesh's vertices (re-uploaded when the mesh changes) and its per-part matrices and
+/// colours (written every frame it's drawn). A mesh not drawn keeps its buffers, so drawing it
+/// again costs nothing.
+struct MeshGpu {
+    mesh: Arc<Mesh>,
     parts: wgpu::Buffer,
     group: wgpu::BindGroup,
 }
@@ -320,7 +342,7 @@ impl Gpu {
     fn new(device: &wgpu::Device, queue: &wgpu::Queue, key: DeviceKey) -> Gpu {
         let limit = device.limits().max_storage_buffer_binding_size;
         assert!(limit >= (MAX_POINTS * 16) as u64, "this device binds {limit} B of storage, under MAX_POINTS × 16 B");
-        assert!(limit >= (MAX_ROBOT_VERTICES * 24) as u64, "this device binds {limit} B of storage, under MAX_ROBOT_VERTICES × 24 B");
+        assert!(limit >= (MAX_MESH_VERTICES * 24) as u64, "this device binds {limit} B of storage, under MAX_MESH_VERTICES × 24 B");
         let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("viewport"),
             source: wgpu::ShaderSource::Wgsl(format!("{CLIP_WGSL}\n{}", include_str!("viewport.wgsl")).into()),
@@ -343,15 +365,15 @@ impl Gpu {
         let frame_buf = buffer("viewport frame", size_of::<FrameUniform>() as u64);
         let blit_buf = buffer("viewport blit", 80);
 
-        let robot_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("viewport robot"),
+        let mesh_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("viewport mesh"),
             entries: &[entry(0, storage), entry(1, storage)],
         });
         let layout_of = |groups: &[Option<&wgpu::BindGroupLayout>]| device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: None, bind_group_layouts: groups, immediate_size: 0,
         });
         let scene_layout = layout_of(&[Some(&scene_bgl)]);
-        let robot_layout = layout_of(&[Some(&scene_bgl), Some(&robot_bgl)]);
+        let mesh_layout = layout_of(&[Some(&scene_bgl), Some(&mesh_bgl)]);
         // `compare` None draws over everything (no depth test).
         let pipeline = |layout: &wgpu::PipelineLayout, vs: &str, fs: &str, topology, depth_write: bool, compare: Option<wgpu::CompareFunction>, blend, write_mask| {
             device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -383,13 +405,13 @@ impl Gpu {
         let sky = pipeline(&scene_layout, "sky_vs", "sky_fs", TriangleList, false, None, None, all);
         let points = pipeline(&scene_layout, "points_vs", "points_fs", TriangleList, true, Some(Greater), None, all);
         let segs = pipeline(&scene_layout, "seg_vs", "seg_fs", TriangleStrip, false, Some(Greater), blend, all);
-        let robot_depth = pipeline(&robot_layout, "robot_vs", "robot_fs", TriangleList, true, Some(Greater), blend, wgpu::ColorWrites::empty());
-        let robot_color = pipeline(&robot_layout, "robot_vs", "robot_fs", TriangleList, false, Some(Equal), blend, all);
+        let mesh_depth = pipeline(&mesh_layout, "mesh_vs", "mesh_fs", TriangleList, true, Some(Greater), blend, wgpu::ColorWrites::empty());
+        let mesh_color = pipeline(&mesh_layout, "mesh_vs", "mesh_fs", TriangleList, false, Some(Equal), blend, all);
 
         let timer = device.features().contains(wgpu::Features::TIMESTAMP_QUERY).then(|| GpuTimer::new(device, queue));
         Gpu {
             key, frame_buf, scene_bgl, blit_bgl, blit_buf, module, sky, points, segs,
-            robot_bgl, robot_depth, robot_color, robot: None,
+            mesh_bgl, mesh_depth, mesh_color, meshes: [None, None],
             blits: Default::default(), target: None, scene: None, timer,
         }
     }
@@ -458,34 +480,35 @@ impl Gpu {
         !same_cloud && cloud.is_some()
     }
 
-    /// Uploads `mesh` unless it's the one already uploaded. A hidden robot keeps its buffers, so
-    /// showing it again costs nothing. `State::view` only passes meshes with parts.
-    fn ensure_robot(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, mesh: &Arc<RobotMesh>) -> &RobotGpu {
-        if !self.robot.as_ref().is_some_and(|r| Arc::ptr_eq(&r.mesh, mesh)) {
-            self.robot = Some(self.upload_robot(device, queue, mesh));
+    /// Slot `k`'s buffers for `mesh`, uploading it unless it's the one already there.
+    /// `State::view` passes a placement for each of the mesh's parts.
+    fn ensure_mesh(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, k: usize, mesh: &Arc<Mesh>, parts: &[PartDraw]) -> &MeshGpu {
+        debug_assert_eq!(parts.len(), mesh.parts.len());
+        if !self.meshes[k].as_ref().is_some_and(|m| Arc::ptr_eq(&m.mesh, mesh)) {
+            self.meshes[k] = Some(self.upload_mesh(device, queue, mesh));
         }
-        self.robot.as_ref().unwrap()
+        self.meshes[k].as_ref().unwrap()
     }
 
-    fn upload_robot(&self, device: &wgpu::Device, queue: &wgpu::Queue, mesh: &Arc<RobotMesh>) -> RobotGpu {
-        let vertices = storage(device, queue, "viewport robot vertices", None, bytemuck::cast_slice(&mesh.vertices));
-        let parts = storage(device, queue, "viewport robot parts", None, &vec![0u8; size_of::<[f32; 20]>() * mesh.parts.len()]);
+    fn upload_mesh(&self, device: &wgpu::Device, queue: &wgpu::Queue, mesh: &Arc<Mesh>) -> MeshGpu {
+        let vertices = storage(device, queue, "viewport mesh vertices", None, bytemuck::cast_slice(&mesh.vertices));
+        let parts = storage(device, queue, "viewport mesh parts", None, &vec![0u8; size_of::<[f32; 20]>() * mesh.parts.len()]);
         let group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("viewport robot"),
-            layout: &self.robot_bgl,
+            label: Some("viewport mesh"),
+            layout: &self.mesh_bgl,
             entries: &[
                 wgpu::BindGroupEntry { binding: 0, resource: vertices.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 1, resource: parts.as_entire_binding() },
             ],
         });
-        RobotGpu { mesh: Arc::clone(mesh), parts, group }
+        MeshGpu { mesh: Arc::clone(mesh), parts, group }
     }
 
-    /// Records the timestamped 3D pass into the offscreen target. `robot_translucent` is `None`
-    /// for no robot, else whether any part shows through: a translucent robot draws after the
-    /// lines, so its depth doesn't hide the TF axes inside its links (lines in front of it take a
-    /// faint tint instead); an opaque one draws before them, so they stay crisp.
-    fn encode_3d(&mut self, encoder: &mut wgpu::CommandEncoder, drawn: u32, robot_translucent: Option<bool>) {
+    /// Records the timestamped 3D pass into the offscreen target, with `parts[k]` placing slot
+    /// `k`'s mesh this frame (empty: not drawn). Opaque parts draw before the lines, so lines
+    /// stay crisp; translucent parts draw after them, so their depth doesn't hide the TF axes
+    /// inside them (lines in front take a faint tint instead). Alpha-0 parts aren't drawn.
+    fn encode_3d(&mut self, encoder: &mut wgpu::CommandEncoder, drawn: u32, parts: [&[PartDraw]; 2]) {
         let (Some(target), Some(scene)) = (&self.target, &self.scene) else { return };
         let slot = self.timer.as_mut().and_then(|t| t.begin());
         let timestamp_writes = slot.map(|k| wgpu::RenderPassTimestampWrites {
@@ -518,29 +541,26 @@ impl Gpu {
                 pass.set_pipeline(&self.points);
                 pass.draw(0..6 * drawn, 0..1);
             }
-            let robot = robot_translucent.zip(self.robot.as_ref());
-            let draw_robot = |pass: &mut wgpu::RenderPass<'_>| {
-                let Some((_, r)) = robot else { return };
-                pass.set_bind_group(1, &r.group, &[]);
-                for pipeline in [&self.robot_depth, &self.robot_color] {
+            // Each phase draws its parts of both meshes depth-only, then in colour.
+            let draw_meshes = |pass: &mut wgpu::RenderPass<'_>, phase: fn(f32) -> bool| {
+                for pipeline in [&self.mesh_depth, &self.mesh_color] {
                     pass.set_pipeline(pipeline);
-                    // The instance index picks the part's matrix and colour.
-                    for (k, part) in r.mesh.parts.iter().enumerate() {
-                        pass.draw(part.range.clone(), k as u32..k as u32 + 1);
+                    // A slot not drawn this frame keeps its buffers but has no placements.
+                    for (m, parts) in self.meshes.iter().zip(parts).filter_map(|(m, p)| Some((m.as_ref()?, p)).filter(|_| !p.is_empty())) {
+                        pass.set_bind_group(1, &m.group, &[]);
+                        // The instance index picks the part's matrix and colour.
+                        for (k, range) in m.mesh.parts.iter().enumerate().filter(|(k, r)| phase(parts[*k].color[3]) && !r.is_empty()) {
+                            pass.draw(range.clone(), k as u32..k as u32 + 1);
+                        }
                     }
                 }
             };
-            let translucent = robot.is_some_and(|(t, _)| t);
-            if !translucent {
-                draw_robot(&mut pass);
-            }
+            draw_meshes(&mut pass, |a| a >= 1.0);
             if scene.lines.len() > 0 {
                 pass.set_pipeline(&self.segs);
                 pass.draw(0..4, 0..scene.lines.len() as u32);
             }
-            if translucent {
-                draw_robot(&mut pass);
-            }
+            draw_meshes(&mut pass, |a| a > 0.0 && a < 1.0);
         }
         if let Some(k) = slot {
             self.timer.as_mut().unwrap().end(encoder, k, drawn);

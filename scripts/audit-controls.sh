@@ -12,7 +12,7 @@ py=${PY:-/tmp/fxenv/bin/python}
 dir=out/audit
 rm -rf "$dir" && mkdir -p "$dir"
 cfg=$(mktemp -d)
-"$py" -u scripts/serve.py --cloud table --robot-pose reach --camera --status > "$dir/serve.log" 2>&1 &
+"$py" -u scripts/serve.py --cloud table --robot-pose reach --objects --camera --status > "$dir/serve.log" 2>&1 &
 server=$!
 trap 'kill $server 2>/dev/null; wait $server 2>/dev/null || true; rm -rf "$cfg"' EXIT
 for _ in $(seq 100); do grep -q "^serving" "$dir/serve.log" && break; sleep 0.1; done
@@ -53,7 +53,7 @@ send() { echo "[$open, {\"t\": 1.0, \"type\": \"wheel\", \"x\": 1060, \"y\": 400
 # The 3D view's settings, open over the viewport's right part (from x 1775 px, under its
 # settings button): checks compare the viewport left of them. `ptab TAB KEY [KEY]` opens them
 # (after the events in $PRE if set), picks tab TAB (0 Scene, 1 Points, 2 Poses, 3 Robot,
-# 4 Cards) and taps the keys in turn (a picker's field, then its option); `pclose` then closes
+# 4 Objects, 5 Cards) and taps the keys in turn (a picker's field, then its option); `pclose` then closes
 # them with Escape, for controls of what they cover.
 popen='{"t": 0.5, "type": "tap", "key": "panel-settings"}'
 crop_pop=1740x1476+20+104
@@ -96,10 +96,14 @@ done
 for k in poses pose-0 pose-1; do
   pset "$k"           changes "$(ptab 2 $k)"
 done
+# Objects (serve.py --objects: /scene, the only scene topic), on and off as a whole and by topic.
+for k in objects object-0; do
+  pset "$k"           changes "$(ptab 4 $k)"
+done
 # The cards (no Image or Data panel in the layout) are under the settings: each is checked once
 # they're closed.
 for k in show-image-card card-annotation-0 card-text card-text-topic-0 card-stats card-stats-topic-0; do
-  view "$k"           changes "$(pclose 4 $k)"
+  view "$k"           changes "$(pclose 5 $k)"
 done
 # Its button again, Escape and a press outside close them, landing back on the baseline.
 view panel-toggle     same    "$(with_away "[$popen, $(ev 1.5 panel-settings)]")"

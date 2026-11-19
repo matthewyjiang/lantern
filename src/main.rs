@@ -15,6 +15,8 @@ mod connection;
 mod camera;
 mod decode;
 mod layout;
+mod mesh;
+mod objects;
 mod panels;
 mod robot;
 mod scene;
