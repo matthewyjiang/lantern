@@ -33,7 +33,6 @@ pub(crate) const HEADER_H: f32 = 44.0;
 type Rect = [f32; 4];
 
 /// A panel's place.
-#[derive(Debug, PartialEq)]
 struct Tile {
     id: PaneId,
     path: Vec<usize>,
@@ -41,7 +40,6 @@ struct Tile {
 }
 
 /// The gap after child `i` of the branch at `path`.
-#[derive(Debug, PartialEq)]
 struct Gap {
     path: Vec<usize>,
     i: usize,
@@ -87,9 +85,9 @@ pub fn layout(s: &State, cx: &mut Cx<State>, k: &Kit, layer: &mut Vec<El>) -> El
     let mut panels = el().key("panels").grow(1.0).h_full().min_w(0.0).min_h(0.0);
     // Placed once the area is laid out: its place in the window, and its size.
     if let Some([ox, oy, w, h]) = cx.window_layout("panels") {
-        let (mut tiles, gaps) = tile(&s.settings.layout, [0.0, 0.0, w, h]);
-        // In the order the panes were made, whatever their places, so a swap only moves them.
-        tiles.sort_by_key(|t| t.id);
+        // In their places' order (left to right, top to bottom), which is the Tab order; keyed by
+        // pane, a card that changes place moves rather than remounting.
+        let (tiles, gaps) = tile(&s.settings.layout, [0.0, 0.0, w, h]);
         for t in &tiles {
             let p = s.settings.layout.panel(&t.path).expect("tiled from the layout");
             panels = panels.child(card(s, cx, k, layer, p, t, [ox, oy, w, h]));

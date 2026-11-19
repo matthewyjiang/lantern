@@ -638,15 +638,15 @@ fn panel_settings(s: &State, k: &Kit, layer: &mut Vec<El>, path: &[usize], p: &P
     let t = tok::theme(true);
     let (tabs, body) = match p {
         Panel::View3d(v) => {
-            // Cards only while the layout lacks an Image or a Data panel.
-            let cards = s.card_for(PanelKind::Image).is_some() || s.card_for(PanelKind::Data).is_some();
-            let tabs: Vec<_> = Tab3d::ALL.into_iter().filter(|t| cards || *t != Tab3d::Cards).map(|tab| (tab, tab.label())).collect();
+            // The cards stand in for the panels the layout lacks: no Cards tab with both.
+            let cards = Cards { image: s.card_for(PanelKind::Image).is_some(), data: s.card_for(PanelKind::Data).is_some() };
+            let tabs: Vec<_> = Tab3d::ALL.into_iter().filter(|t| cards.image || cards.data || *t != Tab3d::Cards).map(|tab| (tab, tab.label())).collect();
             let tab = if tabs.iter().any(|(t, _)| *t == s.tab_3d) { s.tab_3d } else { Tab3d::Scene };
             let bar = segmented("tab", &tabs, tab, |s, tab| {
                 s.tab_3d = tab;
                 s.close_picker();
             });
-            (Some(bar.w_full()), view3d_settings(s, k, layer, v, tab))
+            (Some(bar.w_full()), view3d_settings(s, k, layer, v, tab, cards))
         }
         Panel::Image(view) => (None, image_settings(s, k, layer, view, "image-panel", &panel_lens(path, |p| match p {
             Panel::Image(i) => Some(i),
@@ -669,7 +669,14 @@ fn panel_settings(s: &State, k: &Kit, layer: &mut Vec<El>, path: &[usize], p: &P
 }
 
 /// The tab of the 3D view's settings on show.
-fn view3d_settings(s: &State, k: &Kit, layer: &mut Vec<El>, v: &View3dSettings, tab: Tab3d) -> El {
+/// Which of the 3D view's cards it draws: those for the panels the layout lacks.
+#[derive(Clone, Copy)]
+struct Cards {
+    image: bool,
+    data: bool,
+}
+
+fn view3d_settings(s: &State, k: &Kit, layer: &mut Vec<El>, v: &View3dSettings, tab: Tab3d, cards: Cards) -> El {
     let body = col().w_full().gap(10.0);
     match tab {
         Tab3d::Scene => {
@@ -694,15 +701,14 @@ fn view3d_settings(s: &State, k: &Kit, layer: &mut Vec<El>, v: &View3dSettings, 
             .child(field("Expire after", segmented("pose-timeout", &[(0.0, "Never"), (0.5, "0.5 s"), (2.0, "2 s"), (10.0, "10 s")], v.poses.timeout, |s, x| s.edit3d(|v| v.poses.timeout = x))))
             .child(field("Trail", segmented("trail", &[(0.0, "Off"), (5.0, "5 s"), (15.0, "15 s"), (60.0, "60 s")], v.poses.trail, |s, x| s.edit3d(|v| v.poses.trail = x)))),
         Tab3d::Robot => robot_settings(s, k, layer, v),
-        // The cards stand in for the panels: with an Image or Data panel in the layout, it shows them.
         Tab3d::Cards => {
-            let body = if s.card_for(PanelKind::Image).is_some() {
+            let body = if cards.image {
                 body.child(toggle_row("show-image-card", "Camera image", v.image_card, |s| s.edit3d(|v| v.image_card ^= true)))
                     .children(v.image_card.then(|| image_settings(s, k, layer, &v.image, "card", &view3d_lens(|v| &mut v.image))))
             } else {
                 body
             };
-            if s.card_for(PanelKind::Data).is_some() { body.child(data_settings(s, &v.data, "card", &view3d_lens(|v| &mut v.data))) } else { body }
+            if cards.data { body.child(data_settings(s, &v.data, "card", &view3d_lens(|v| &mut v.data))) } else { body }
         }
     }
 }

@@ -187,6 +187,12 @@ impl Overrides {
     }
 }
 
+/// Whether `a` and `b` hold the same panels, in any order.
+fn same_panels(a: &[&Panel], b: &[&Panel]) -> bool {
+    let count = |of: &[&Panel], p: &Panel| of.iter().filter(|q| **q == p).count();
+    a.len() == b.len() && a.iter().all(|p| count(a, p) == count(b, p))
+}
+
 /// What the camera was last framed on. A robot alone frames the view; a cloud arriving later
 /// frames it again, unless the user has moved the camera since.
 #[derive(Clone, Copy, PartialEq)]
@@ -669,10 +675,11 @@ impl State {
         self.conns.iter_mut().for_each(|c| c.want(&wanted));
         if self.settings != self.applied {
             self.overrides.to_save(&self.settings, &self.from_file).save();
-            // Only the tiling changed (a divider mid-drag moves it every frame): the servers and
-            // panels, which the display and the images are derived from, are the same.
+            // Only the tiling changed (a divider mid-drag moves it every frame, a dragged panel
+            // swaps places): the servers and panels, which the display and the images are
+            // derived from, are the same, in whatever order.
             let moved_only = self.settings.connections == self.applied.connections
-                && self.settings.layout.panels() == self.applied.layout.panels();
+                && same_panels(&self.settings.layout.panels(), &self.applied.layout.panels());
             self.applied = self.settings.clone();
             if !moved_only {
                 self.dirty = true;

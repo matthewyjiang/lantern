@@ -80,10 +80,9 @@ The chip over the viewport says why the view is empty or incomplete:
 
 | Chip | Meaning |
 | --- | --- |
-| `No servers: add one in Settings` | The server list is empty. |
 | `Connecting to ws://…` | Nothing has answered yet. An unreachable host shows this for 3 s. |
 | `Can't reach ws://…: …` | The connection failed or dropped. Lantern retries every second. |
-| `Connected; the server offers no topics yet` | The server is up but hasn't advertised anything. |
+| `No topics` | The server is up but hasn't advertised anything. |
 | `/points: no transform from lidar to world` | TF doesn't connect the data's frame to the fixed frame yet. |
 | `Server: …` | A warning from the server, such as a failed subscription. |
 | `/camera/image: …` | The image didn't decode or is over the size limit. |

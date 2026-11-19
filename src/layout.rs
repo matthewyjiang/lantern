@@ -102,7 +102,7 @@ pub enum Dir {
 
 /// A panel's identity while the app runs, so it can be followed as it moves around the layout
 /// (and animate as itself). Not saved: every layout read from a file gets new ones.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PaneId(u64);
 
 impl PaneId {
@@ -176,7 +176,8 @@ impl Layout {
         PRESETS.iter().find(|p| p.name == name).map(|p| (p.layout)())
     }
 
-    /// The preset `name`, its panels with the settings of `current`'s same-kind panels.
+    /// The preset `name`, its panels taking the identities and settings of `current`'s same-kind
+    /// panels (`adopt`).
     pub fn preset_keeping(name: &str, current: &Layout) -> Option<Layout> {
         let mut preset = Layout::preset(name)?;
         preset.adopt(current);
@@ -184,11 +185,15 @@ impl Layout {
     }
 
     /// A preset by name, its panels taking the settings of `current`'s (`adopt`), else the
-    /// layout file at that path as it is.
+    /// layout file at that path as it is, its panels taking only their identities. A panel that
+    /// keeps its identity moves to its new place rather than being replaced.
     pub fn named_or_file(value: &str, current: &Layout) -> Result<Layout, String> {
         match Layout::preset_keeping(value, current) {
             Some(preset) => Ok(preset),
-            None => Layout::load(Path::new(value)),
+            None => Layout::load(Path::new(value)).map(|mut file| {
+                file.pair_with(current, |(id, _), (old, _)| *id = old);
+                file
+            }),
         }
     }
 
@@ -215,9 +220,31 @@ impl Layout {
     }
 
     pub fn panels_mut(&mut self) -> Vec<&mut Panel> {
+        self.panes_mut().into_iter().map(|(_, p)| p).collect()
+    }
+
+    fn panes(&self) -> Vec<(PaneId, &Panel)> {
         match self {
-            Layout::Panel(_, p) => vec![p],
-            Layout::Split { children, .. } => children.iter_mut().flat_map(|(_, c)| c.panels_mut()).collect(),
+            Layout::Panel(id, p) => vec![(*id, p)],
+            Layout::Split { children, .. } => children.iter().flat_map(|(_, c)| c.panes()).collect(),
+        }
+    }
+
+    fn panes_mut(&mut self) -> Vec<(&mut PaneId, &mut Panel)> {
+        match self {
+            Layout::Panel(id, p) => vec![(id, p)],
+            Layout::Split { children, .. } => children.iter_mut().flat_map(|(_, c)| c.panes_mut()).collect(),
+        }
+    }
+
+    /// Calls `f` with each of this layout's panes and `from`'s pane of the same kind, in order.
+    /// Panes `from` has no match for are left out.
+    fn pair_with(&mut self, from: &Layout, mut f: impl FnMut((&mut PaneId, &mut Panel), (PaneId, &Panel))) {
+        for kind in PanelKind::ALL {
+            let old = from.panes().into_iter().filter(|(_, p)| p.kind() == kind);
+            for (new, old) in self.panes_mut().into_iter().filter(|(_, p)| p.kind() == kind).zip(old) {
+                f(new, old);
+            }
         }
     }
 
@@ -314,7 +341,7 @@ impl Layout {
             return;
         }
         if let Some(node @ Layout::Panel(..)) = self.at_mut(path) {
-            let old = std::mem::take(node);
+            let old = std::mem::replace(node, Layout::HOLE);
             *node = Layout::Split { dir, children: vec![(1.0, old), (1.0, new)] };
         }
     }
@@ -325,7 +352,7 @@ impl Layout {
         if a == b || self.panel(a).is_none() || self.panel(b).is_none() {
             return;
         }
-        let first = std::mem::take(self.at_mut(a).expect("found above"));
+        let first = std::mem::replace(self.at_mut(a).expect("found above"), Layout::HOLE);
         let second = std::mem::replace(self.at_mut(b).expect("found above"), first);
         *self.at_mut(a).expect("found above") = second;
     }
@@ -334,6 +361,9 @@ impl Layout {
     pub fn path_of(&self, id: PaneId) -> Option<Vec<usize>> {
         self.paths().into_iter().find(|p| matches!(self.at(p), Some(Layout::Panel(pane, _)) if *pane == id))
     }
+
+    /// What a node holds while an edit moves it out, briefly: no pane, so no identity used up.
+    const HOLE: Layout = Layout::Split { dir: Dir::Row, children: Vec::new() };
 
     fn pane(panel: Panel) -> Layout {
         Layout::Panel(PaneId::new(), panel)
@@ -385,16 +415,15 @@ impl Layout {
         }
     }
 
-    /// Gives this layout's panels the settings of `from`'s panels of the same kind, in order:
-    /// a preset picked over a layout keeps its robot, its image topics, ... Panels `from` has no
-    /// match for keep their own.
+    /// Gives this layout's panels the identities and settings of `from`'s panels of the same
+    /// kind, in order: a preset picked over a layout keeps its robot, its image topics, ... and
+    /// the panels it keeps move rather than being replaced. Panels `from` has no match for keep
+    /// their own.
     pub fn adopt(&mut self, from: &Layout) {
-        for kind in PanelKind::ALL {
-            let old = from.panels().into_iter().filter(|p| p.kind() == kind);
-            for (new, old) in self.panels_mut().into_iter().filter(|p| p.kind() == kind).zip(old) {
-                *new = old.clone();
-            }
-        }
+        self.pair_with(from, |(id, panel), (old_id, old)| {
+            *id = old_id;
+            *panel = old.clone();
+        });
     }
 
     /// Gives each panel the settings of the same-kind panel in `after`, in order, where those
@@ -692,6 +721,8 @@ mod tests {
         assert!(l.same_tiling(&Layout::preset("dashboard").unwrap()));
         assert_eq!(l.view3d().unwrap().robot.urdf, "arm.urdf");
         assert_eq!(l.panel(&[1, 0]), current.panel(&[0]));
+        // The panels it keeps are the same panes, moved.
+        assert_eq!(l.path_of(current.panes()[0].0), Some(vec![1, 0]));
     }
 
     fn weights(l: &Layout) -> Vec<f32> {
