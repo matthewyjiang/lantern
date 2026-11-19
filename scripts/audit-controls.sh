@@ -137,13 +137,21 @@ snap base-thirds '[]' '{"layout": {"row": [{"panel": "3d", "weight": 2}, {"panel
 check base-thirds "$crop_view" small-weights same '[]' '{"layout": {"row": [{"panel": "3d", "weight": 0.5}, {"panel": "image", "weight": 0.25}]}}'
 # Showing the 3D view in the Data panel (its menu's Show) swaps it with the 3D panel.
 dview show-3d-swaps   changes "$(with_away "$(taps 1.0 panel-1-1-menu 1.3 panel-1-1-menu-item2 1.6 panel-1-1-menu-item2-sub-item0)")"
-# Dragging a panel by its header's name: onto another's middle swaps them, onto its side moves
-# it there, onto itself changes nothing. The 3D panel's handle is at about (60, 76) pt; the Data
-# panel's middle at (1060, 600), its bottom edge at y 770.
-hdrag() { echo "[{\"t\": 1.0, \"type\": \"move\", \"x\": 60, \"y\": 76}, {\"t\": 1.2, \"type\": \"drag\", \"x\": 60, \"y\": 76, \"dx\": $1, \"dy\": $2, \"dur\": 0.6}, $away]"; }
-dview drag-swap       changes "$(hdrag 1000 524)"
-dview drag-move       changes "$(hdrag 1000 694)"
-dview drag-onto-self  same    "$(hdrag 300 300)"
+# Dragging a panel by its header's name: over another panel the two swap places, live; dragged
+# back, they swap back; Escape puts the layout back; over itself nothing moves. The 3D panel's
+# handle is at about (60, 76) pt, the Data panel's middle at (1060, 600). `hpath X Y ...` holds
+# the handle and moves through the points, 0.3 s apart, then lets go (after the events in $MID).
+hpath() {
+  local evs=("{\"t\": 1.0, \"type\": \"move\", \"x\": 60, \"y\": 76}" "{\"t\": 1.1, \"type\": \"down\", \"x\": 60, \"y\": 76}") t=11 x y
+  while (($#)); do x=$1 y=$2; t=$((t + 3)); evs+=("{\"t\": $((t / 10)).$((t % 10)), \"type\": \"move\", \"x\": $x, \"y\": $y}"); shift 2; done
+  t=$((t + 3))
+  evs+=(${MID:+"$MID"} "{\"t\": $((t / 10)).$((t % 10)), \"type\": \"up\", \"x\": $x, \"y\": $y}" "$away")
+  local IFS=,; echo "[${evs[*]}]"
+}
+dview drag-swap       changes "$(hpath 200 200 1060 600)"
+dview drag-and-back   same    "$(hpath 200 200 1060 600 300 400)"
+dview drag-escape     same    "$(MID='{"t": 1.8, "type": "key", "name": "Escape"}' hpath 200 200 1060 600)"
+dview drag-onto-self  same    "$(hpath 200 200 300 300)"
 
 # Robot (the Med 7 from scripts/robot_fixture.py, posed by serve.py's joint states), on the
 # Robot tab. The robot would be under the settings: a middle-button pan first moves the scene

@@ -16,17 +16,17 @@ use crate::annotate;
 use crate::camera::OrbitCamera;
 use crate::connection::{Connection, Picked, Post, Received};
 use crate::decode::Kind;
-use crate::layout::{Edge, Landing, Layout, Panel, PanelKind};
+use crate::layout::{Dir, Layout, PaneId, Panel, PanelKind};
 use crate::robot::{self, Model};
 use crate::scene::{percentiles, Annotation, Diagnostic, Image, PointCloud, PointColor, Pose, TfTree};
 use crate::settings::{DataSettings, ImageSettings, Settings, View3dSettings};
 use crate::source::{Event, Wanted};
 use crate::viewport::{self, Lines, RobotView, Shade, View};
 
-/// The submenus of a panel's menu, each a list of panel kinds: split on that side, or show.
+/// The submenus of a panel's menu, each a list of panel kinds: split in that direction, or show.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Submenu {
-    Split(Edge),
+    Split(Dir),
     Show,
 }
 
@@ -46,11 +46,16 @@ impl Popup {
     }
 }
 
-/// A panel dragged by its header.
+/// A panel dragged by its header, swapping places with the panels it passes over.
 pub struct PanelDrag {
-    pub from: Vec<usize>,
-    /// The panel under the pointer, other than `from`, and where the dragged one would land.
-    pub over: Option<(Vec<usize>, Landing)>,
+    pub id: PaneId,
+    /// The layout when the drag started, which a cancelled drag puts back.
+    pub before: Layout,
+    /// Where the card was grabbed, from its top left corner, and its size then, points.
+    pub grab: [f32; 2],
+    pub size: [f32; 2],
+    /// The pointer, in the window's points.
+    pub pointer: [f32; 2],
 }
 
 /// The tabs of the 3D view's settings.
@@ -1096,7 +1101,7 @@ mod tests {
         let post: Post = Arc::new(|_, _| {});
         let mut s = State::new(file.clone(), o, post);
         s.edit3d(|v| v.grid = false);
-        s.settings.layout.insert(&[], crate::layout::Edge::Right, Panel::new(PanelKind::Data));
+        s.settings.layout.insert(&[], Dir::Row, Panel::new(PanelKind::Data));
         assert_eq!(urdf(&s.overrides.to_save(&s.settings, &file)), "arm.urdf");
     }
 

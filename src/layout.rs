@@ -12,10 +12,11 @@
 //! written; a setting left out takes its default. The file is checked when it's read
 //! (`RawNode` → `Layout`), so every `Layout` in the app is valid: its weights are positive, its branches have children, its panels' settings
 //! parse, and it has at most one 3D panel. The edits (`insert`, `close`, `show`, `swap`,
-//! `move_panel`, `move_divider`) keep it that way. They address a node by its path: the child index to take at each branch,
+//! `move_divider`) keep it that way. They address a node by its path: the child index to take at each branch,
 //! from the root.
 
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -91,34 +92,6 @@ impl Panel {
     }
 }
 
-/// Where a panel dropped onto another lands: in its place, the two swapping, or on one side.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Landing {
-    Swap,
-    Beside(Edge),
-}
-
-/// A side of a panel, where another goes beside it.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Edge {
-    Left,
-    Right,
-    Top,
-    Bottom,
-}
-
-impl Edge {
-    /// The direction of the branch that puts a panel on this side, and whether it goes first.
-    fn placement(self) -> (Dir, bool) {
-        match self {
-            Edge::Left => (Dir::Row, true),
-            Edge::Right => (Dir::Row, false),
-            Edge::Top => (Dir::Column, true),
-            Edge::Bottom => (Dir::Column, false),
-        }
-    }
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Dir {
     /// Children side by side.
@@ -127,17 +100,47 @@ pub enum Dir {
     Column,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+/// A panel's identity while the app runs, so it can be followed as it moves around the layout
+/// (and animate as itself). Not saved: every layout read from a file gets new ones.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct PaneId(u64);
+
+impl PaneId {
+    fn new() -> PaneId {
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        PaneId(NEXT.fetch_add(1, Ordering::Relaxed))
+    }
+}
+
+impl std::fmt::Display for PaneId {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+/// Layouts are equal when they tile the same panels with the same settings, whatever their
+/// panes' identities.
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(try_from = "RawNode", into = "RawNode")]
 pub enum Layout {
-    Panel(Panel),
+    Panel(PaneId, Panel),
     /// Two or more children, each with its weight.
     Split { dir: Dir, children: Vec<(f32, Layout)> },
 }
 
+impl PartialEq for Layout {
+    fn eq(&self, other: &Layout) -> bool {
+        match (self, other) {
+            (Layout::Panel(_, a), Layout::Panel(_, b)) => a == b,
+            (Layout::Split { dir: d1, children: c1 }, Layout::Split { dir: d2, children: c2 }) => d1 == d2 && c1 == c2,
+            _ => false,
+        }
+    }
+}
+
 impl Default for Layout {
     fn default() -> Self {
-        Layout::Panel(Panel::new(PanelKind::View3d))
+        leaf(PanelKind::View3d)
     }
 }
 
@@ -154,7 +157,7 @@ pub const PRESETS: [Preset; 3] = [
 ];
 
 fn leaf(kind: PanelKind) -> Layout {
-    Layout::Panel(Panel::new(kind))
+    Layout::pane(Panel::new(kind))
 }
 
 /// The 3D view, with the image to its right.
@@ -206,14 +209,14 @@ impl Layout {
     /// Every panel, depth first (left to right, top to bottom).
     pub fn panels(&self) -> Vec<&Panel> {
         match self {
-            Layout::Panel(p) => vec![p],
+            Layout::Panel(_, p) => vec![p],
             Layout::Split { children, .. } => children.iter().flat_map(|(_, c)| c.panels()).collect(),
         }
     }
 
     pub fn panels_mut(&mut self) -> Vec<&mut Panel> {
         match self {
-            Layout::Panel(p) => vec![p],
+            Layout::Panel(_, p) => vec![p],
             Layout::Split { children, .. } => children.iter_mut().flat_map(|(_, c)| c.panels_mut()).collect(),
         }
     }
@@ -236,7 +239,7 @@ impl Layout {
     /// The panel at `path`, if there's one there.
     pub fn panel(&self, path: &[usize]) -> Option<&Panel> {
         match self.at(path)? {
-            Layout::Panel(p) => Some(p),
+            Layout::Panel(_, p) => Some(p),
             Layout::Split { .. } => None,
         }
     }
@@ -251,7 +254,7 @@ impl Layout {
 
     pub fn panel_mut(&mut self, path: &[usize]) -> Option<&mut Panel> {
         match self.at_mut(path)? {
-            Layout::Panel(p) => Some(p),
+            Layout::Panel(_, p) => Some(p),
             Layout::Split { .. } => None,
         }
     }
@@ -259,7 +262,7 @@ impl Layout {
     /// The path of the first panel showing `kind`.
     pub fn find(&self, kind: PanelKind) -> Option<Vec<usize>> {
         match self {
-            Layout::Panel(p) => (p.kind() == kind).then(Vec::new),
+            Layout::Panel(_, p) => (p.kind() == kind).then(Vec::new),
             Layout::Split { children, .. } => children.iter().enumerate().find_map(|(i, (_, c))| {
                 let mut path = c.find(kind)?;
                 path.insert(0, i);
@@ -293,14 +296,13 @@ impl Layout {
         }
     }
 
-    /// Puts `panel` on the `edge` side of the panel at `path`, with half its space. A second 3D
-    /// panel isn't added.
-    pub fn insert(&mut self, path: &[usize], edge: Edge, panel: Panel) {
+    /// Puts `panel` after the panel at `path` in `dir` (to its right, or below it), with half its
+    /// space. A second 3D panel isn't added.
+    pub fn insert(&mut self, path: &[usize], dir: Dir, panel: Panel) {
         if panel.kind() == PanelKind::View3d && self.has(PanelKind::View3d) {
             return;
         }
-        let (dir, first) = edge.placement();
-        let new = Layout::Panel(panel);
+        let new = Layout::pane(panel);
         // In a branch of the same direction, the new panel is a sibling.
         if let Some((&i, parent)) = path.split_last()
             && let Some(Layout::Split { dir: d, children }) = self.at_mut(parent)
@@ -308,26 +310,18 @@ impl Layout {
             && i < children.len()
         {
             children[i].0 /= 2.0;
-            children.insert(if first { i } else { i + 1 }, (children[i].0, new));
+            children.insert(i + 1, (children[i].0, new));
             return;
         }
-        if let Some(node @ Layout::Panel(_)) = self.at_mut(path) {
+        if let Some(node @ Layout::Panel(..)) = self.at_mut(path) {
             let old = std::mem::take(node);
-            let children = if first { vec![(1.0, new), (1.0, old)] } else { vec![(1.0, old), (1.0, new)] };
-            *node = Layout::Split { dir, children };
+            *node = Layout::Split { dir, children: vec![(1.0, old), (1.0, new)] };
         }
     }
 
-    /// Puts the panel at `from` where `landing` says, relative to the panel at `to`.
-    pub fn drop_panel(&mut self, from: &[usize], to: &[usize], landing: Landing) {
-        match landing {
-            Landing::Swap => self.swap(from, to),
-            Landing::Beside(edge) => self.move_panel(from, to, edge),
-        }
-    }
-
-    /// Exchanges the panels at `a` and `b`, each with its settings; the tiling stays.
-    fn swap(&mut self, a: &[usize], b: &[usize]) {
+    /// Exchanges the panels at `a` and `b`, each with its settings and identity; the tiling
+    /// stays.
+    pub fn swap(&mut self, a: &[usize], b: &[usize]) {
         if a == b || self.panel(a).is_none() || self.panel(b).is_none() {
             return;
         }
@@ -336,34 +330,19 @@ impl Layout {
         *self.at_mut(a).expect("found above") = second;
     }
 
-    /// Moves the panel at `from`, with its settings, to the `edge` side of the panel at `to`. A
-    /// panel already there stays as it is.
-    fn move_panel(&mut self, from: &[usize], to: &[usize], edge: Edge) {
-        let paths = self.paths();
-        let (Some(f), Some(t)) = (paths.iter().position(|p| p == from), paths.iter().position(|p| p == to)) else { return };
-        if f == t || self.beside(from, to, edge) {
-            return;
-        }
-        let panel = self.panel(from).cloned().expect("found above");
-        self.close(from);
-        // Closing shifts paths but not the order of the panels: find `to` by its place in it.
-        let to = self.paths().swap_remove(if t > f { t - 1 } else { t });
-        self.insert(&to, edge, panel);
+    /// The path of the pane `id`, if the layout has it.
+    pub fn path_of(&self, id: PaneId) -> Option<Vec<usize>> {
+        self.paths().into_iter().find(|p| matches!(self.at(p), Some(Layout::Panel(pane, _)) if *pane == id))
     }
 
-    /// Whether the node at `a` is already on the `edge` side of its sibling at `b`.
-    fn beside(&self, a: &[usize], b: &[usize], edge: Edge) -> bool {
-        let (dir, first) = edge.placement();
-        let (Some((&i, parent)), Some((&j, other))) = (a.split_last(), b.split_last()) else { return false };
-        parent == other
-            && matches!(self.at(parent), Some(Layout::Split { dir: d, .. }) if *d == dir)
-            && if first { i + 1 == j } else { j + 1 == i }
+    fn pane(panel: Panel) -> Layout {
+        Layout::Panel(PaneId::new(), panel)
     }
 
     /// Every panel's path, in the order of `panels`.
     pub fn paths(&self) -> Vec<Vec<usize>> {
         match self {
-            Layout::Panel(_) => vec![Vec::new()],
+            Layout::Panel(..) => vec![Vec::new()],
             Layout::Split { children, .. } => children.iter().enumerate().flat_map(|(i, (_, c))| {
                 c.paths().into_iter().map(move |mut p| {
                     p.insert(0, i);
@@ -437,7 +416,7 @@ impl Layout {
     /// their settings.
     pub fn same_tiling(&self, other: &Layout) -> bool {
         match (self, other) {
-            (Layout::Panel(a), Layout::Panel(b)) => a.kind() == b.kind(),
+            (Layout::Panel(_, a), Layout::Panel(_, b)) => a.kind() == b.kind(),
             (Layout::Split { dir: d1, children: c1 }, Layout::Split { dir: d2, children: c2 }) => {
                 d1 == d2 && c1.len() == c2.len() && c1.iter().zip(c2).all(|((w1, a), (w2, b))| w1 == w2 && a.same_tiling(b))
             }
@@ -480,7 +459,7 @@ impl RawNode {
     fn of(layout: Layout, weight: f32) -> RawNode {
         let weight = (weight != 1.0).then_some(weight);
         match layout {
-            Layout::Panel(p) => {
+            Layout::Panel(_, p) => {
                 let settings = match &p {
                     Panel::View3d(v) => non_default(&**v),
                     Panel::Image(i) => non_default(i),
@@ -511,7 +490,7 @@ impl RawNode {
                     let known = PanelKind::ALL.map(PanelKind::id).join(", ");
                     format!("{at}: no panel called \"{id}\" (the panels are {known})")
                 })?;
-                Layout::Panel(panel(kind, self.settings, at)?)
+                Layout::pane(panel(kind, self.settings, at)?)
             }
             (None, Some(children), None) => {
                 no_settings(&self.settings, at)?;
@@ -642,42 +621,31 @@ mod tests {
     #[test]
     fn inserting_adds_a_sibling_or_a_branch() {
         let mut l = Layout::default();
-        l.insert(&[], Edge::Right, Panel::new(Image));
+        l.insert(&[], Dir::Row, Panel::new(Image));
         assert_eq!(l, row(vec![(1.0, leaf(View3d)), (1.0, leaf(Image))]));
-        // Along the branch: a sibling, sharing the panel's space, on the side asked for.
-        l.insert(&[1], Edge::Left, Panel::new(Data));
-        assert_eq!(l, row(vec![(1.0, leaf(View3d)), (0.5, leaf(Data)), (0.5, leaf(Image))]));
+        // Along the branch: a sibling after it, sharing the panel's space.
+        l.insert(&[0], Dir::Row, Panel::new(Data));
+        assert_eq!(l, row(vec![(0.5, leaf(View3d)), (0.5, leaf(Data)), (1.0, leaf(Image))]));
         // Across it: a branch in the panel's place.
-        l.insert(&[0], Edge::Bottom, Panel::new(Topics));
+        l.insert(&[0], Dir::Column, Panel::new(Topics));
         let Layout::Split { children, .. } = &l else { panic!() };
-        assert_eq!(children[0], (1.0, column(vec![(1.0, leaf(View3d)), (1.0, leaf(Topics))])));
+        assert_eq!(children[0], (0.5, column(vec![(1.0, leaf(View3d)), (1.0, leaf(Topics))])));
         // Still one 3D view.
         let before = l.clone();
-        l.insert(&[2], Edge::Top, Panel::new(View3d));
+        l.insert(&[2], Dir::Column, Panel::new(View3d));
         assert_eq!(l, before);
     }
 
-    // A panel dragged onto another's side moves there with its settings; onto its middle, the
-    // two swap. The others keep their places.
+    // Swapping exchanges two panels with their settings and identities; the tiling stays.
     #[test]
-    fn panels_move_and_swap() {
-        let mut l = parse(r#"{"row": [{"panel": "3d", "grid": false}, {"column": [{"panel": "image", "topic": "/a"}, {"panel": "data"}]}]}"#).unwrap();
-        // The row of one left collapses, so the 3D panel joins the column, half of Data's space.
-        l.move_panel(&[0], &[1, 1], Edge::Bottom);
-        assert_eq!(l, parse(r#"{"column": [{"panel": "image", "topic": "/a"}, {"panel": "data", "weight": 0.5}, {"panel": "3d", "grid": false, "weight": 0.5}]}"#).unwrap());
-        l.swap(&[0], &[2]);
-        assert_eq!(l, parse(r#"{"column": [{"panel": "3d", "grid": false}, {"panel": "data", "weight": 0.5}, {"panel": "image", "topic": "/a", "weight": 0.5}]}"#).unwrap());
-        // Onto the side of a neighbour it's already on: nothing moves, weights included.
-        let mut l = parse(r#"{"row": [{"panel": "image", "weight": 2}, {"panel": "data"}]}"#).unwrap();
-        let before = l.clone();
-        l.drop_panel(&[0], &[1], Landing::Beside(Edge::Left));
-        assert_eq!(l, before);
-        l.drop_panel(&[0], &[1], Landing::Swap);
-        assert_eq!(l, parse(r#"{"row": [{"panel": "data", "weight": 2}, {"panel": "image"}]}"#).unwrap());
-        // Onto a later panel in the same branch: closing shifts its path, not the target.
-        let mut l = parse(r#"{"row": [{"panel": "image"}, {"panel": "data"}, {"panel": "topics"}]}"#).unwrap();
-        l.move_panel(&[0], &[2], Edge::Left);
-        assert_eq!(l, parse(r#"{"row": [{"panel": "data"}, {"panel": "image", "weight": 0.5}, {"panel": "topics", "weight": 0.5}]}"#).unwrap());
+    fn swapping_exchanges_panels_in_place() {
+        let mut l = parse(r#"{"row": [{"panel": "3d", "grid": false, "weight": 2}, {"column": [{"panel": "image", "topic": "/a"}, {"panel": "data"}]}]}"#).unwrap();
+        let ids = |l: &Layout| l.paths().iter().map(|p| match l.at(p) { Some(Layout::Panel(id, _)) => *id, _ => unreachable!() }).collect::<Vec<_>>();
+        let before = ids(&l);
+        l.swap(&[0], &[1, 1]);
+        assert_eq!(l, parse(r#"{"row": [{"panel": "data", "weight": 2}, {"column": [{"panel": "image", "topic": "/a"}, {"panel": "3d", "grid": false}]}]}"#).unwrap());
+        assert_eq!(ids(&l), [before[2], before[1], before[0]]);
+        assert_eq!(l.path_of(before[0]), Some(vec![1, 1]));
     }
 
     #[test]

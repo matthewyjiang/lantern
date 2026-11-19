@@ -29,8 +29,8 @@ panels. The 3D view is rendered offscreen and composited into its panel.
 | `src/annotate.rs` | Draws image annotations into the image on the CPU |
 | `src/robot/` | URDF parsing and forward kinematics (`urdf.rs`), STL and primitive meshes with smoothed normals (`mesh.rs`), loading and mesh path resolution (`mod.rs`) |
 | `src/settings.rs` | `Settings`, saved to settings.json: the connections and the layout. Each panel type's settings: `View3dSettings`, `ImageSettings`, `DataSettings` |
-| `src/layout.rs` | The panel layout: the tree of panels (each with its settings), rows and columns, its file format and checks, the edits (insert on a side, close, show, swap, move a panel or a divider), presets and how they keep panel settings (`adopt`) |
-| `src/panels.rs` | Draws the layout: the tiled panels, the dividers, each panel's header (its drag handle, settings button and menu), dropping a dragged panel, and the Image, Data and Topics panels |
+| `src/layout.rs` | The panel layout: the tree of panels (each with its settings), rows and columns, its file format and checks, the edits (split, close, show, swap, move a divider), presets and how they keep panel settings (`adopt`) |
+| `src/panels.rs` | Draws the layout: the tiled panels, the dividers, each panel's header (its drag handle, settings button and menu), dragging a panel, and the Image, Data and Topics panels |
 | `src/ui.rs` | The window: the top bar, the Settings page, and the overlays (menus, each panel's settings, `panel_settings`) mounted with `rune_kit::root`. The 3D panel with its overlays (status chip, image, text and stats cards) |
 | `src/camera.rs` | Orbit camera (REP 103, z up), reversed infinite depth |
 | `src/viewport.rs` | Rune `Compositor`: offscreen 3D pass blitted into an `El::effect` slot, GPU timer |
@@ -74,8 +74,7 @@ which AMCL publishes on `/amcl_pose`:
 
 </Steps>
 
-The topic now shows in Settings with a **Poses** badge and gets a switch in the 3D view's Poses
-settings, and sources subscribe to it like any other pose topic.
+The topic then gets a **Poses** badge and a switch on the 3D view's Poses tab.
 
 A message that needs a new kind of drawing, such as a marker array, needs more: a `Decoded` variant
 and `Kind`, a scene type in `src/scene.rs`, state in `src/connection.rs` and `src/app.rs`, and
@@ -144,8 +143,8 @@ settings for the joints it leaves out:
 
 4. Add its settings to `ui::panel_settings`. A `panel_lens` reaches this panel's settings by its
    path in the layout. Your `joints_settings` builds its controls from the ones in `src/ui.rs`
-   (`toggle_row`, `picker`, `topic_switches`) and edits through the lens with `with`. Edits
-   are saved like any other. A panel with no settings has no settings button: list it in
+   (`toggle_row`, `picker`, `topic_switches`) and edits through the lens with `with`. A panel with
+   no settings has no settings button: list it in
    `panels::has_settings`.
 
    ```rust title="src/ui.rs"
@@ -160,8 +159,7 @@ settings for the joints it leaves out:
 
 </Steps>
 
-The panel now appears in the panel menus, `{"panel": "joints", "hidden": ["gripper"]}` works
-in a layout file, and its slider button opens its settings.
+Then `{"panel": "joints", "hidden": ["gripper"]}` works in a layout file.
 
 ## Add a source
 
