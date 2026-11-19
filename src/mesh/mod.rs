@@ -231,17 +231,21 @@ const STL_TYPES: [&str; 3] = ["model/stl", "model/x.stl-ascii", "model/x.stl-bin
 /// Reads a model as Foxglove does: GLB or glTF when the bytes start with GLB's magic, the media
 /// type says so or `name` ends in `.glb` or `.gltf`; STL by media type or `.stl`. Both are taken
 /// as Y-up and turned to Lantern's Z-up. `dir` is where a glTF's external buffers are, when it
-/// came from a file.
-pub fn model(bytes: &[u8], media_type: &str, name: &str, dir: Option<&Path>) -> Result<Asset, String> {
+/// came from a file. A model of more than `max_vertices` is an error, found before shading it.
+pub fn model(bytes: &[u8], media_type: &str, name: &str, dir: Option<&Path>, max_vertices: usize) -> Result<Asset, String> {
     let ext = Path::new(name).extension().and_then(|e| e.to_str()).unwrap_or("").to_ascii_lowercase();
     let pieces = if bytes.starts_with(b"glTF") || GLTF_TYPES.contains(&media_type) || ext == "glb" || ext == "gltf" {
-        gltf::read(bytes, dir)?
+        gltf::read(bytes, dir, max_vertices)?
     } else if STL_TYPES.contains(&media_type) || ext == "stl" {
         vec![(stl(bytes)?, None)]
     } else {
         let what = if media_type.is_empty() { String::new() } else { format!(" ({media_type})") };
         return Err(format!("{} bytes{what}: not a GLB, glTF or STL mesh", bytes.len()));
     };
+    let vertices: usize = pieces.iter().map(|(tris, _)| 3 * tris.len()).sum();
+    if vertices > max_vertices {
+        return Err(format!("{} vertices, more than the {} the GPU can draw", crate::ui::thousands(vertices), crate::ui::thousands(max_vertices)));
+    }
     let up = Quat::from_rotation_x(FRAC_PI_2);
     let pieces = pieces.into_iter().map(|(tris, color)| {
         let tris: Vec<Triangle> = tris.into_iter().map(|t| t.map(|p| up * p)).collect();
@@ -251,9 +255,29 @@ pub fn model(bytes: &[u8], media_type: &str, name: &str, dir: Option<&Path>) -> 
 }
 
 /// Reads a model file (`model`, with the file's name and directory).
-pub fn model_file(path: &Path) -> Result<Asset, String> {
-    let bytes = std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
-    model(&bytes, "", &path.to_string_lossy(), path.parent()).map_err(|e| format!("{}: {e}", path.display()))
+pub fn model_file(path: &Path, max_vertices: usize) -> Result<Asset, String> {
+    let bytes = read_file(path)?;
+    model(&bytes, "", &path.to_string_lossy(), path.parent(), max_vertices).map_err(|e| format!("{}: {e}", path.display()))
+}
+
+/// The largest mesh file read: as large as a model a message can carry.
+pub const MAX_FILE_BYTES: u64 = crate::source::MAX_MESSAGE as u64;
+
+/// A mesh file's bytes. Messages and URDFs name these paths, so only a regular file is read
+/// (not a device or a pipe that would never end), and at most `MAX_FILE_BYTES` of it.
+pub fn read_file(path: &Path) -> Result<Vec<u8>, String> {
+    use std::io::Read;
+    let fail = |e: std::io::Error| format!("{}: {e}", path.display());
+    let file = std::fs::File::open(path).map_err(fail)?;
+    if !file.metadata().map_err(fail)?.is_file() {
+        return Err(format!("{}: not a regular file", path.display()));
+    }
+    let mut bytes = Vec::new();
+    file.take(MAX_FILE_BYTES + 1).read_to_end(&mut bytes).map_err(fail)?;
+    if bytes.len() as u64 > MAX_FILE_BYTES {
+        return Err(format!("{}: over {} bytes, the most a mesh file can be", path.display(), crate::ui::thousands(MAX_FILE_BYTES as usize)));
+    }
+    Ok(bytes)
 }
 
 #[cfg(test)]
@@ -305,8 +329,8 @@ mod tests {
     // Z-up.
     #[test]
     fn gltf_parts_are_placed_coloured_and_turned_z_up() {
-        let glb = model(include_bytes!("testdata/two_parts.glb"), "model/gltf-binary", "", None).unwrap();
-        let gltf = model(include_bytes!("testdata/two_parts.gltf"), "", "two_parts.gltf", None).unwrap();
+        let glb = model(include_bytes!("testdata/two_parts.glb"), "model/gltf-binary", "", None, usize::MAX).unwrap();
+        let gltf = model(include_bytes!("testdata/two_parts.gltf"), "", "two_parts.gltf", None, usize::MAX).unwrap();
         for asset in [glb, gltf] {
             let [red, grey] = &asset.pieces[..] else { panic!("two pieces") };
             let close = |c: Option<[f32; 4]>, want: [f32; 4], tol: f32| c.is_some_and(|c| c.iter().zip(want).all(|(a, b)| (a - b).abs() < tol));
@@ -326,12 +350,28 @@ mod tests {
     fn model_stl_is_y_up_and_unknown_bytes_are_errors() {
         let bytes = binary_stl(b"", &[[[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]]]);
         for (media_type, name) in [("model/stl", ""), ("", "cup.STL")] {
-            let asset = model(&bytes, media_type, name, None).unwrap();
+            let asset = model(&bytes, media_type, name, None, usize::MAX).unwrap();
             assert_eq!((asset.pieces.len(), asset.pieces[0].color), (1, None));
             assert!(corners(&asset.pieces[0]).iter().any(|p| (*p - Vec3::Z).length() < 1e-6));
         }
-        let err = model(b"OBJ v 0 0 0", "model/obj", "", None).err().unwrap();
+        let err = model(b"OBJ v 0 0 0", "model/obj", "", None, usize::MAX).err().unwrap();
         assert!(err.contains("(model/obj): not a GLB, glTF or STL mesh"), "{err}");
+    }
+
+    // Models are checked before they cost memory: one over the vertex limit (the two-part GLB
+    // has 6) is an error, as is a glTF whose nodes loop, which would otherwise never finish.
+    // A path that isn't a regular file (a device that never ends) isn't read.
+    #[test]
+    fn models_past_the_limits_are_errors() {
+        let err = model(include_bytes!("testdata/two_parts.glb"), "model/gltf-binary", "", None, 5).unwrap_err();
+        assert!(err.contains("more than 5 vertices"), "{err}");
+        let looped = br#"{"asset": {"version": "2.0"}, "scenes": [{"nodes": [0]}], "nodes": [{"children": [1]}, {"children": [0]}]}"#;
+        let err = model(looped, "model/gltf+json", "", None, usize::MAX).unwrap_err();
+        assert!(err.contains("nodes must form trees"), "{err}");
+        let bytes = binary_stl(b"", &[[[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]]]);
+        let err = model(&bytes, "model/stl", "", None, 2).unwrap_err();
+        assert!(err.contains("3 vertices, more than the 2"), "{err}");
+        assert!(read_file(Path::new("/dev/zero")).unwrap_err().contains("not a regular file"));
     }
 
     // A box's corners keep its faces' normals (90° creases); a sphere's corners point outward

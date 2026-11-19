@@ -98,6 +98,6 @@ fn read_mesh(filename: &str, dir: &Path) -> Result<Vec<mesh::Triangle>, String> 
     if ext != "stl" {
         return Err(format!("{filename}: .{ext} meshes aren't supported (Lantern reads STL)"));
     }
-    let bytes = std::fs::read(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let bytes = mesh::read_file(&path)?;
     mesh::stl(&bytes).map_err(|e| format!("{}: {e}", path.display()))
 }

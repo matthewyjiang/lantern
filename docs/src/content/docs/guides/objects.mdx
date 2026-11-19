@@ -136,6 +136,8 @@ the layout's meshes too.
 
 - All objects share one mesh of up to 5,592,405 vertices
   ([limits](/lantern/reference/topics/#limits)). Shapes past it aren't drawn, and the status chip
-  gives the vertices they need, the limit and how many aren't drawn.
+  gives the vertices they need, the limit and how many aren't drawn. A model over it on its own
+  doesn't load.
+- Mesh files are read up to 256 MiB, and only regular files.
 - Not supported: OBJ and DAE meshes, textures, HTTP URLs, and entities fixed in place while their
   frame moves (`frame_locked: false`).

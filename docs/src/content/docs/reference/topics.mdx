@@ -87,7 +87,8 @@ its key-value pairs, in one card or a Data panel.
 | Points per cloud | 8,388,608 (128 MiB at 16 bytes per point) | The cloud isn't drawn; its topic shows the count and the limit |
 | Message size | 256 MiB | The connection fails with `Message too long: N > 268435456` |
 | Robot mesh vertices | 5,592,405 (128 MiB at 24 bytes per vertex) | The robot doesn't load; the status names the link, the count and the limit |
-| Object mesh vertices | 5,592,405, all objects together | Shapes past it aren't drawn; the status chip gives the vertices needed and how many aren't drawn |
+| Object mesh vertices | 5,592,405, all objects together | Shapes past it aren't drawn; the status chip gives the vertices needed and how many aren't drawn. A single model over it doesn't load. |
+| Mesh file size | 256 MiB, as for a message | The mesh doesn't load, and its error gives the limit |
 | Image side | 8,192 px | The image isn't shown; the status chip and its topic say why |
 | Text cards and statuses in the 3D view | 3 cards, 6 statuses | An `and N more` line counts the rest |
 | Pose trail | 60 s | A longer `poses.trail` in a layout is clamped, with a note on stderr |

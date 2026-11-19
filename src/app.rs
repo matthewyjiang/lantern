@@ -829,7 +829,7 @@ impl State {
         if v.objects.show {
             named.extend(v.objects.meshes.iter().map(|m| ModelSource::Url(m.file.clone())));
         }
-        self.models.sync(named);
+        self.models.sync(named, viewport::MAX_MESH_VERTICES);
     }
 
     /// Expires every connection's poses and trails (`Received::expire`); returns when the next

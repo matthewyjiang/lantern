@@ -13,8 +13,9 @@ use super::Triangle;
 pub type Pieces = Vec<(Vec<Triangle>, Option<[f32; 4]>)>;
 
 /// Each triangle primitive's triangles and base colour, in the file's own (Y-up) axes. Buffers
-/// come from a GLB's binary chunk, `data:` URIs, or files beside `dir`.
-pub fn read(bytes: &[u8], dir: Option<&Path>) -> Result<Pieces, String> {
+/// come from a GLB's binary chunk, `data:` URIs, or files beside `dir`. Stops with an error once
+/// the triangles pass `max_vertices` (a mesh placed by many nodes counts each time).
+pub fn read(bytes: &[u8], dir: Option<&Path>, max_vertices: usize) -> Result<Pieces, String> {
     let doc = gltf::Gltf::from_slice(bytes).map_err(|e| format!("glTF: {e}"))?;
     let mut buffers = Vec::new();
     for b in doc.buffers() {
@@ -27,8 +28,7 @@ pub fn read(bytes: &[u8], dir: Option<&Path>) -> Result<Pieces, String> {
                 }
                 None => {
                     let dir = dir.ok_or_else(|| format!("glTF: buffer {uri} is a separate file, and a mesh sent as bytes has no directory to find it in"))?;
-                    let path = dir.join(uri.replace("%20", " "));
-                    std::fs::read(&path).map_err(|e| format!("glTF: {}: {e}", path.display()))?
+                    super::read_file(&dir.join(uri.replace("%20", " "))).map_err(|e| format!("glTF: {e}"))?
                 }
             },
         };
@@ -39,10 +39,16 @@ pub fn read(bytes: &[u8], dir: Option<&Path>) -> Result<Pieces, String> {
     }
     let scene = doc.default_scene().or_else(|| doc.scenes().next()).ok_or("glTF: no scene")?;
     let mut out = Vec::new();
-    // Depth first, in the file's order (the stack holds siblings last to first).
+    let mut vertices = 0;
+    // Depth first, in the file's order (the stack holds siblings last to first). glTF's nodes
+    // form trees, so a node reached twice is a broken file (a cycle would never end).
+    let mut seen = vec![false; doc.nodes().len()];
     let mut stack: Vec<(gltf::Node, Mat4)> = scene.nodes().map(|n| (n, Mat4::IDENTITY)).collect();
     stack.reverse();
     while let Some((node, parent)) = stack.pop() {
+        if std::mem::replace(&mut seen[node.index()], true) {
+            return Err(format!("glTF: node {} has two parents, or is its own ancestor; nodes must form trees", node.index()));
+        }
         let m = parent * Mat4::from_cols_array_2d(&node.transform().matrix());
         let children: Vec<_> = node.children().collect();
         stack.extend(children.into_iter().rev().map(|c| (c, m)));
@@ -55,6 +61,15 @@ pub fn read(bytes: &[u8], dir: Option<&Path>) -> Result<Pieces, String> {
                 Some(i) => i.into_u32().collect(),
                 None => (0..positions.len() as u32).collect(),
             };
+            let n = match p.mode() {
+                Mode::Triangles => order.len() / 3,
+                Mode::TriangleStrip | Mode::TriangleFan => order.len().saturating_sub(2),
+                Mode::Points | Mode::Lines | Mode::LineLoop | Mode::LineStrip => 0,
+            };
+            vertices += 3 * n;
+            if vertices > max_vertices {
+                return Err(format!("glTF: more than {} vertices, the most the GPU can draw", crate::ui::thousands(max_vertices)));
+            }
             let corner = |i: u32| positions.get(i as usize).copied().ok_or_else(|| format!("glTF: index {i} is past the {} positions", positions.len()));
             let mut tris = Vec::new();
             match p.mode() {

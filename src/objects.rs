@@ -37,8 +37,9 @@ pub struct Models(HashMap<ModelKey, Result<Arc<Asset>, String>>);
 
 impl Models {
     /// Loads the `named` models not loaded yet, and drops the ones no longer named. Loads run
-    /// on the calling (UI) thread: a model is read when something first names it.
-    pub fn sync(&mut self, named: Vec<ModelSource>) {
+    /// on the calling (UI) thread: a model is read when something first names it. A model of
+    /// more than `max_vertices` is an error.
+    pub fn sync(&mut self, named: Vec<ModelSource>, max_vertices: usize) {
         let named: HashMap<ModelKey, ModelSource> = named.into_iter().map(|s| (ModelKey::of(&s), s)).collect();
         self.0.retain(|key, _| named.contains_key(key));
         for (key, source) in named {
@@ -47,8 +48,8 @@ impl Models {
             }
             let started = Instant::now();
             let (what, loaded) = match &source {
-                ModelSource::Url(url) => (url.clone(), mesh::resolve(url, Path::new(".")).and_then(|p| mesh::model_file(&p))),
-                ModelSource::Data { media_type, bytes, .. } => (format!("{} bytes of {media_type}", bytes.len()), mesh::model(bytes, media_type, "", None)),
+                ModelSource::Url(url) => (url.clone(), mesh::resolve(url, Path::new(".")).and_then(|p| mesh::model_file(&p, max_vertices))),
+                ModelSource::Data { media_type, bytes, .. } => (format!("{} bytes of {media_type}", bytes.len()), mesh::model(bytes, media_type, "", None, max_vertices)),
             };
             match &loaded {
                 Ok(a) => eprintln!("lantern: loaded model {what} in {:.1} ms: {} pieces, {} vertices", started.elapsed().as_secs_f64() * 1000.0, a.pieces.len(), a.vertex_count()),
@@ -214,6 +215,8 @@ impl Placed {
                     segment(n - 1, 0);
                 }
             }
+            // Transparent text (no colour) isn't drawn, like any other primitive.
+            Geometry::Text { .. } if shape.color[3] <= 0.0 => {}
             Geometry::Text { text, size } => self.labels.push((text.clone(), at.translation.as_vec3(), LabelStyle { color: shape.color, size: *size })),
         }
         None
