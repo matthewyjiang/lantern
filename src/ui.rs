@@ -190,15 +190,12 @@ fn status_chip(s: &State, max_w: f32) -> Option<El> {
     // the robot the server describes) and what the data is missing, so a server that's offline
     // doesn't hide what's wrong with the others' data.
     let conns = s.connections();
-    let connection = if conns.is_empty() {
-        Some("No servers: add one in Settings".to_string())
-    } else {
-        conns.iter().find_map(|c| match &c.received.status {
-            Status::Failed { error } => Some(format!("Can't reach {}: {error}", c.url)),
-            Status::Connecting => Some(format!("Connecting to {}…", c.url)),
-            Status::Connected { .. } => None,
-        })
-    };
+    // No servers at all is the top bar's to say.
+    let connection = conns.iter().find_map(|c| match &c.received.status {
+        Status::Failed { error } => Some(format!("Can't reach {}: {error}", c.url)),
+        Status::Connecting => Some(format!("Connecting to {}…", c.url)),
+        Status::Connected { .. } => None,
+    });
     let robot = match (s.robot_file(), s.robot_description(), s.robot_mismatch()) {
         (_, _, Some(m)) => Some(format!("Robot: {m}")),
         (Some(Err(e)), _, _) => Some(format!("Robot: {e}")),
@@ -209,7 +206,7 @@ fn status_chip(s: &State, max_w: f32) -> Option<El> {
     let data = match (&s.display.problem, warning) {
         (Some(p), _) => Some(p.clone()),
         (None, Some(w)) => Some(format!("Server: {w}")),
-        (None, None) if conns.iter().all(|c| c.received.channels.is_empty()) => Some("Connected; the server offers no topics yet".into()),
+        (None, None) if !conns.is_empty() && conns.iter().all(|c| c.received.channels.is_empty()) => Some("No topics".into()),
         _ => None,
     };
     let messages: Vec<String> = [connection, robot, data].into_iter().flatten().collect();
@@ -314,7 +311,7 @@ pub(crate) fn picture(s: &State, view: &ImageSettings, key: impl Into<String>, i
 
 /// "and N more …", when a card shows only the first of its items.
 fn more(n: usize, what: &str) -> Option<El> {
-    (n > 0).then(|| text(format!("and {n} more {what}: hide topics in the 3D view's settings")).font(SMALL).color(tok::theme(true).text_secondary))
+    (n > 0).then(|| text(format!("and {n} more {what}")).font(SMALL).color(tok::theme(true).text_secondary))
 }
 
 /// The newest message of the cards' first `TEXT_CARDS` text topics.
@@ -426,9 +423,7 @@ fn color_choices(key: &'static str, s: &State) -> El {
 /// (`panel_settings`).
 fn settings_page(s: &State) -> El {
     let t = tok::theme(true);
-    let top = col().gap(3.0)
-        .child(text("Settings").font(TextStyle::new(15.0, 600.0).lh(20.0)).color(t.text))
-        .child(text("What each panel shows is in its own settings").font(type_::LABEL).color(t.text_secondary));
+    let top = text("Settings").font(TextStyle::new(15.0, 600.0).lh(20.0)).color(t.text);
 
     let body = col().w_full().gap(28.0).px(SETTINGS_PAD).pb(24.0)
         .child(connection_section(s))
@@ -458,8 +453,7 @@ fn connection_section(s: &State) -> El {
                 }),
         );
     let add = fitted_button("connect", "Add", State::add_connection).w(92.0).min_w(92.0);
-    let mut sec = section("Connections")
-        .child(text("Foxglove WebSocket servers: foxglove_bridge for ROS 2, or any app using a Foxglove SDK. Lantern reads them all at once.").font(type_::LABEL).color(t.text_secondary).max_lines(3));
+    let mut sec = section("Connections");
     if !s.connections().is_empty() {
         let mut list = col().key("connections").radius(tok::radius::MD).fill(t.card).border(1.0, t.card_border);
         for (i, c) in s.connections().iter().enumerate() {
@@ -500,7 +494,7 @@ pub(crate) fn topics(s: &State, prefix: &str) -> El {
     let conns = s.connections();
     let total: usize = conns.iter().map(|c| c.received.channels.len()).sum();
     if total == 0 {
-        return text("No topics yet. Topics appear here as the servers advertise them.").font(type_::LABEL).color(t.text_secondary).max_lines(3);
+        return text("No topics").font(type_::LABEL).color(t.text_secondary);
     }
     let mut list = col().key(format!("{prefix}s")).radius(tok::radius::MD).fill(t.card).border(1.0, t.card_border);
     let mut i = 0;
@@ -590,13 +584,10 @@ fn layout_section(s: &State) -> El {
         Err(e) => text(e.clone()).font(type_::LABEL).color(oklch(0.72, 0.17, 25.0)).max_lines(4),
     });
     section("Layout")
-        .child(text("Point at a panel for its header: drag its name to move it (onto another's middle to swap them), or use its menu to split, change or close it. Drag the gap between two panels to resize them.").font(type_::LABEL).color(t.text_secondary).max_lines(4))
         .child(field("Presets", presets))
-        .child(text("A preset keeps the settings of the panels it has in common with the layout.").font(type_::LABEL).color(t.text_secondary).max_lines(2))
-        .child(field_note("Layout file", "The panels with their settings. Save writes the layout to this file. Load reads a file, or a preset by name. To start with one: lantern --layout FILE."))
-        .child(row().gap(8.0).child(input)
+        .child(field("Layout file", row().gap(8.0).child(input)
             .child(fitted_button("load-layout", "Load", State::load_layout).w(64.0).min_w(64.0))
-            .child(fitted_button("save-layout", "Save", State::save_layout).w(64.0).min_w(64.0)))
+            .child(fitted_button("save-layout", "Save", State::save_layout).w(64.0).min_w(64.0))))
         .children(note.map(|n| n.key("layout-file-note")))
 }
 
@@ -647,12 +638,15 @@ fn panel_settings(s: &State, k: &Kit, layer: &mut Vec<El>, path: &[usize], p: &P
     let t = tok::theme(true);
     let (tabs, body) = match p {
         Panel::View3d(v) => {
-            let tabs = Tab3d::ALL.map(|tab| (tab, tab.label()));
-            let bar = segmented("tab", &tabs, s.tab_3d, |s, tab| {
+            // Cards only while the layout lacks an Image or a Data panel.
+            let cards = s.card_for(PanelKind::Image).is_some() || s.card_for(PanelKind::Data).is_some();
+            let tabs: Vec<_> = Tab3d::ALL.into_iter().filter(|t| cards || *t != Tab3d::Cards).map(|tab| (tab, tab.label())).collect();
+            let tab = if tabs.iter().any(|(t, _)| *t == s.tab_3d) { s.tab_3d } else { Tab3d::Scene };
+            let bar = segmented("tab", &tabs, tab, |s, tab| {
                 s.tab_3d = tab;
                 s.close_picker();
             });
-            (Some(bar.w_full()), view3d_settings(s, k, layer, v))
+            (Some(bar.w_full()), view3d_settings(s, k, layer, v, tab))
         }
         Panel::Image(view) => (None, image_settings(s, k, layer, view, "image-panel", &panel_lens(path, |p| match p {
             Panel::Image(i) => Some(i),
@@ -675,10 +669,9 @@ fn panel_settings(s: &State, k: &Kit, layer: &mut Vec<El>, path: &[usize], p: &P
 }
 
 /// The tab of the 3D view's settings on show.
-fn view3d_settings(s: &State, k: &Kit, layer: &mut Vec<El>, v: &View3dSettings) -> El {
-    let t = tok::theme(true);
+fn view3d_settings(s: &State, k: &Kit, layer: &mut Vec<El>, v: &View3dSettings, tab: Tab3d) -> El {
     let body = col().w_full().gap(10.0);
-    match s.tab_3d {
+    match tab {
         Tab3d::Scene => {
             let frames = s.display.tf.frames();
             body.child(picker(s, k, layer, "fixed-frame", "Fixed frame", &v.fixed_frame, s.display.fixed.as_deref(), &frames, "not seen yet", |s, f| s.edit3d(|v| v.fixed_frame = f)))
@@ -686,7 +679,6 @@ fn view3d_settings(s: &State, k: &Kit, layer: &mut Vec<El>, v: &View3dSettings) 
                 .child(toggle_row("frames", "TF frames", v.frames, |s| s.edit3d(|v| v.frames ^= true)))
                 .child(toggle_row("labels", "Labels", v.labels, |s| s.edit3d(|v| v.labels ^= true)))
                 .child(field("Axis length", segmented("axis", &[(0.05, "5 cm"), (0.1, "10 cm"), (0.25, "25 cm"), (0.5, "50 cm"), (1.0, "1 m")], v.axis_length, |s, a| s.edit3d(|v| v.axis_length = a))))
-                .child(text("Drag to orbit, Shift-drag or middle-drag to pan, scroll to zoom. The panel's menu resets the view.").font(type_::LABEL).color(t.text_secondary).max_lines(3))
         }
         Tab3d::Points => {
             let clouds = s.topics_of(Kind::PointCloud);
@@ -704,18 +696,13 @@ fn view3d_settings(s: &State, k: &Kit, layer: &mut Vec<El>, v: &View3dSettings) 
         Tab3d::Robot => robot_settings(s, k, layer, v),
         // The cards stand in for the panels: with an Image or Data panel in the layout, it shows them.
         Tab3d::Cards => {
-            let note = |m: &str| text(m.to_string()).font(type_::LABEL).color(t.text_secondary).max_lines(2);
-            let body = if s.card_for(PanelKind::Image).is_none() {
-                body.child(note("The layout's Image panel shows the camera image."))
-            } else {
+            let body = if s.card_for(PanelKind::Image).is_some() {
                 body.child(toggle_row("show-image-card", "Camera image", v.image_card, |s| s.edit3d(|v| v.image_card ^= true)))
                     .children(v.image_card.then(|| image_settings(s, k, layer, &v.image, "card", &view3d_lens(|v| &mut v.image))))
-            };
-            if s.card_for(PanelKind::Data).is_none() {
-                body.child(note("The layout's Data panel shows text and stats."))
             } else {
-                body.child(data_settings(s, &v.data, "card", &view3d_lens(|v| &mut v.data)))
-            }
+                body
+            };
+            if s.card_for(PanelKind::Data).is_some() { body.child(data_settings(s, &v.data, "card", &view3d_lens(|v| &mut v.data))) } else { body }
         }
     }
 }
@@ -758,7 +745,7 @@ fn topic_switches(s: &State, key: &str, kind: Kind, hidden: &BTreeSet<String>, l
     let t = tok::theme(true);
     let topics = s.topics_of(kind);
     if topics.is_empty() {
-        return text(format!("No {} topics yet", kind.label().to_lowercase())).font(type_::LABEL).color(t.text_secondary);
+        return text(format!("No {} topics", kind.label().to_lowercase())).font(type_::LABEL).color(t.text_secondary);
     }
     let mut list = col().key(key.to_string()).w_full();
     for (i, topic) in topics.into_iter().enumerate() {
@@ -798,14 +785,14 @@ fn robot_settings(s: &State, k: &Kit, layer: &mut Vec<El>, v: &View3dSettings) -
         m.robot.name, m.robot.links.len(), m.robot.movable().count(), m.mesh.parts.len(), m.load_ms,
     );
     let status = match s.robot_file() {
-        None => note("Plain URDF (run xacro first), with STL meshes".into()),
-        Some(Err(e)) => text(e.clone()).font(type_::LABEL).color(error).max_lines(4),
-        Some(Ok(m)) => note(summary(m)),
+        None => None,
+        Some(Err(e)) => Some(text(e.clone()).font(type_::LABEL).color(error).max_lines(4)),
+        Some(Ok(m)) => Some(note(summary(m))),
     };
     let file = col().w_full().gap(6.0)
         .child(text("URDF file").font(type_::BODY).color(t.text))
         .child(row().gap(8.0).child(input).child(fitted_button("load-urdf", "Load", State::load_robot).h(30.0).px(14.0)))
-        .child(status.key("robot-status"));
+        .children(status.map(|s| s.key("robot-status")));
     let mut sec = col().w_full().gap(10.0)
         .child(toggle_row("robot", "Show", v.robot.show, |s| s.edit3d(|v| v.robot.show ^= true)))
         .child(file);
@@ -815,7 +802,7 @@ fn robot_settings(s: &State, k: &Kit, layer: &mut Vec<El>, v: &View3dSettings) -
     let descriptions = s.topics_of(Kind::RobotDescription);
     if !descriptions.is_empty() {
         let status = match s.robot_description() {
-            None => note("Nothing received yet".into()),
+            None => note("Not received".into()),
             Some((_, Err(e))) => text(e.clone()).font(type_::LABEL).color(error).max_lines(4),
             Some((_, Ok(m))) => note(summary(m)),
         };
@@ -842,7 +829,7 @@ fn robot_settings(s: &State, k: &Kit, layer: &mut Vec<El>, v: &View3dSettings) -
     let movable: Vec<&str> = m.robot.movable().collect();
     let received = match s.joints() {
         Some((_, j)) => format!("{} of {} joints received", movable.iter().filter(|n| j.contains_key(**n)).count(), movable.len()),
-        None => "No joint states yet: drawn at the URDF's zero pose".to_string(),
+        None => "No joint states".to_string(),
     };
     sec.child(picker(s, k, layer, "joint-topic", "Joint states", &v.robot.joint_topic, topics.first().map(String::as_str), &topics, "not advertised", |s, j| s.edit3d(|v| v.robot.joint_topic = j)))
         .child(note(received).key("joints-received"))
@@ -911,11 +898,6 @@ fn section(title: &str) -> El {
 fn field(label: &str, control: El) -> El {
     let t = tok::theme(true);
     col().gap(6.0).child(text(label).font(type_::LABEL).color(t.text)).child(control)
-}
-
-fn field_note(label: &str, note: &str) -> El {
-    let t = tok::theme(true);
-    col().gap(3.0).child(text(label).font(type_::LABEL).color(t.text)).child(text(note).font(type_::LABEL).color(t.text_secondary).max_lines(4))
 }
 
 /// A switch's track and knob, drawn for `on`.

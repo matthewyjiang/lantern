@@ -27,11 +27,11 @@ protobuf.
 
 ## How each kind is drawn
 
-![The table scan with a camera image card and its annotations at the bottom right, a text card and a stats card at the top right, and a tracked pose's trail on the table.](../../../../screenshots/camera-text-stats-trail.png)
+![The table scan with an annotated camera image card at the bottom right, text and stats cards at the top right, and a pose's trail on the table.](../../../../screenshots/camera-text-stats-trail.png)
 
 **Point clouds.** One cloud topic at a time, picked in the
-[3D view's settings](/lantern/guides/settings/#3d-view), which also set the colouring. Points with a
-non-finite coordinate are dropped.
+[3D view's settings](/lantern/guides/settings/#3d-view). Points with a non-finite coordinate are
+dropped.
 
 **Transforms.** Every transform topic, including `/tf_static`, goes into one TF tree. Each frame is
 drawn as axes (x red, y green, z blue) with an optional label.
@@ -41,10 +41,10 @@ from Foxglove) and an arrow showing one second of its linear velocity. An Odomet
 pose per label, so one topic can carry many tracked objects. Poses expire and leave trails as set
 in the [3D view's settings](/lantern/guides/settings/#3d-view).
 
-**Joint states.** They pose the [robot model](/lantern/guides/robot-model/#joint-states) and aren't
-drawn on their own. A message with no positions at all (a driver that reports only effort) is
-ignored; one whose `position` list is a different length from `name` is an error. `foxglove.JointStates` joints
-without a position are skipped.
+**Joint states.** They pose the [robot model](/lantern/guides/robot-model/#joint-states). A message
+with no positions at all (a driver that reports only effort) is ignored; one whose `position` list
+is a different length from `name` is an error. `foxglove.JointStates` joints without a position are
+skipped.
 
 **Robot description.** The URDF as text, loaded as the
 [robot model](/lantern/guides/robot-model/#from-the-server). Any other `std_msgs/msg/String` topic
@@ -56,8 +56,8 @@ Compressed images can be JPEG, PNG or WebP. Raw images can be `rgb8`, `bgr8`, `r
 
 **Image annotations.** Circles, points, line strips, line loops, line lists and text, drawn over
 each shown image, except topics switched off in that view's
-[settings](/lantern/guides/settings/#image). Circles and loops with a fill colour are filled. A points annotation of an unknown type
-is skipped.
+[settings](/lantern/guides/settings/#image). Circles and loops with a fill colour are filled. A
+points annotation of an unknown type is skipped.
 
 **Text.** Each text topic that's switched on gets a card at the top right of the 3D view with the
 message's first 10 lines, or goes in a [Data panel](/lantern/guides/layout/).
@@ -69,9 +69,8 @@ its key-value pairs, in one card or a Data panel.
 
 - **Newest wins.** Lantern draws the newest message on each topic. It ignores timestamps and does
   no buffering or time sync.
-- **Only what's shown is subscribed.** Lantern subscribes to the topics some panel or card shows:
-  hidden points aren't fetched. Transforms are always read, and `robot_description` whenever the
-  layout has a 3D view.
+- **Only what's shown is subscribed.** Lantern subscribes to the topics some panel or card shows.
+  Transforms are always read, and `robot_description` whenever the layout has a 3D view.
 - **Servers merge by topic.** Topics with the same name on different servers feed one display, and
   transforms from every server join one TF tree.
 - **A slow UI drops clouds and images, not TF.** If the UI falls behind, it skips to the newest

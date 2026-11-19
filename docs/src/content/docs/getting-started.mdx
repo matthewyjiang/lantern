@@ -4,7 +4,7 @@ description: Install Lantern from a release or build it from source, then find y
 ---
 
 Lantern is a single Linux binary. It needs a GPU with a Vulkan driver and a Wayland or X11
-desktop. It doesn't need ROS, even when the data comes from ROS.
+desktop, but not ROS.
 
 ## Install a release
 
@@ -22,10 +22,9 @@ curl -fsSL https://raw.githubusercontent.com/matthewyjiang/lantern/main/scripts/
     | LANTERN_VERSION=v0.1.0 LANTERN_INSTALL_DIR="$HOME/bin" sh
 ```
 
-The binary needs glibc 2.35 or newer (Ubuntu 22.04, Debian 12). It loads Vulkan, fontconfig,
-xkbcommon and the windowing libraries at startup, so those must be installed: on X11, that's
-libX11, libXcursor, libXi and libxkbcommon-x11; on Wayland, libwayland. The
-archives are also on the
+The binary needs glibc 2.35 or newer (Ubuntu 22.04, Debian 12), and loads Vulkan, fontconfig,
+xkbcommon and the windowing libraries at startup: libX11, libXcursor, libXi and libxkbcommon-x11
+on X11, libwayland on Wayland. The archives are on the
 [releases page](https://github.com/matthewyjiang/lantern/releases).
 
 ## Build from source
@@ -47,18 +46,16 @@ cd lantern
 cargo install --locked --path .    # installs lantern to ~/.cargo/bin
 ```
 
-To run from the checkout instead, use `cargo run --release -- <flags>`. Build in release mode: a
-debug build renders much more slowly. The first build fetches
-[Rune](https://github.com/anomalyco/rune), Lantern's UI library, from git and compiles wgpu, so it
-takes a while.
+To run from the checkout, use `cargo run --release -- <flags>`. A debug build renders much more
+slowly. The first build fetches [Rune](https://github.com/anomalyco/rune), Lantern's UI library,
+from git and compiles wgpu, so it's slow.
 
 ## The window
 
-Run `lantern`. It connects to `ws://localhost:8765`. Until something answers there, the status
-chip over the viewport says `Can't reach ws://localhost:8765: …` and Lantern retries every second,
-so you can start the [source](/lantern/connect/) before or after it.
+Run `lantern`. It connects to `ws://localhost:8765` and retries every second until something
+answers, so you can start the [source](/lantern/connect/) before or after it.
 
-![Lantern's window: a table scan coloured by intensity, two labelled objects, TF axes and a KUKA arm in the viewport, under the top bar with the connection.](../../../screenshots/robot-home-sdk.png)
+![A table scan coloured by intensity, two labelled objects, TF axes and a KUKA arm.](../../../screenshots/robot-home-sdk.png)
 
 | Input | Action |
 | --- | --- |
@@ -66,14 +63,10 @@ so you can start the [source](/lantern/connect/) before or after it.
 | Shift-drag or middle-drag | Pan |
 | Scroll | Zoom |
 
-The top bar shows the connection. Point at a panel and its header appears: the panel's name, which
-you drag to [move the panel](/lantern/guides/layout/#edit-the-layout), a slider button and a **⋯**
-menu. On the 3D view, the slider button opens [its settings](/lantern/guides/settings/#3d-view):
-the fixed frame, the point cloud, poses, the robot and the cards. The menu has **Reset view**,
-**Top down**, and the layout's split, show and close.
-
-The slider button at the right of the top bar opens the [Settings page](/lantern/guides/settings/),
-with the servers, the topic list and the layout presets and files.
+Point at a panel to show its [header](/lantern/guides/layout/#edit-the-layout): the slider button
+opens [its settings](/lantern/guides/settings/#panel-settings), and the 3D view's **⋯** menu has
+**Reset view** and **Top down**. The slider button at the right of the top bar opens the
+[Settings page](/lantern/guides/settings/).
 
 [Flags](/lantern/guides/settings/#command-line) set the servers, robot and layout for one run:
 
@@ -83,7 +76,7 @@ lantern --connect ws://a:8765 --connect ws://b:8765 --urdf robot.urdf --layout d
 
 ## The status chip
 
-The status chip over the viewport says why the view is empty or incomplete:
+The chip over the viewport says why the view is empty or incomplete:
 
 | Chip | Meaning |
 | --- | --- |
@@ -97,6 +90,4 @@ The status chip over the viewport says why the view is empty or incomplete:
 | `Robot: …` | The URDF file didn't load, or doesn't match the robot a server describes. See [Robot model](/lantern/guides/robot-model/#from-the-server). |
 | `Robot from /robot_description: …` | The URDF a server sent didn't load. |
 
-With several servers, the chip has separate lines for the connections, the robot and the data, so
-one offline server doesn't hide problems with the others. Topics Lantern can't decode are still
-listed in **Settings → Topics**, marked **No decoder**.
+With several servers, the chip has separate lines for the connections, the robot and the data.

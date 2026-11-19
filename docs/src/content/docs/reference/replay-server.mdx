@@ -6,12 +6,8 @@ description: scripts/serve.py serves recorded scans, joint states, a camera imag
 import { Tabs, TabItem } from '@astrojs/starlight/components';
 
 [`scripts/serve.py`](https://github.com/matthewyjiang/lantern/blob/main/scripts/serve.py) serves
-fixed test data over the Foxglove WebSocket protocol: a recorded scan with the transform that
-places the sensor, and optionally a robot's joint states, a camera image, status topics and moving
-poses. It's for trying Lantern out, taking screenshots and testing changes. Run it from a checkout
-of the repository.
-
-It needs Python with the Foxglove SDK, numpy and Pillow:
+fixed test data. Run it from a checkout of the repository. It needs Python with the Foxglove SDK,
+numpy and Pillow:
 
 ```sh
 uv venv --python /usr/bin/python3 --system-site-packages /tmp/fxenv
