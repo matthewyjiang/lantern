@@ -13,6 +13,7 @@ Lantern decodes a channel when it knows its encoding and schema. Other topics ar
 | Point cloud | `sensor_msgs/msg/PointCloud2` | `foxglove.PointCloud` |
 | Transforms | `tf2_msgs/msg/TFMessage`, `geometry_msgs/msg/TransformStamped` | `foxglove.FrameTransform`, `foxglove.FrameTransforms` |
 | Poses | `geometry_msgs/msg/PoseStamped`, `geometry_msgs/msg/PoseArray`, `nav_msgs/msg/Odometry` | `foxglove.PoseInFrame`, `foxglove.PosesInFrame`, `foxglove.Odometry` |
+| Objects | `foxglove_msgs/msg/SceneUpdate` | `foxglove.SceneUpdate` |
 | Joint states | `sensor_msgs/msg/JointState` | `foxglove.JointStates`, or `sensor_msgs/msg/JointState` as `json` |
 | Robot description | `std_msgs/msg/String` on a topic named `robot_description` or `…/robot_description` | The same, as `json` |
 | Camera image | `sensor_msgs/msg/Image`, `sensor_msgs/msg/CompressedImage` | `foxglove.RawImage`, `foxglove.CompressedImage` |
@@ -40,6 +41,9 @@ drawn as axes (x red, y green, z blue) with an optional label.
 from Foxglove) and an arrow showing one second of its linear velocity. An Odometry topic keeps one
 pose per label, so one topic can carry many tracked objects. Poses expire and leave trails as set
 in the [3D view's settings](/lantern/guides/settings/#3d-view).
+
+**Objects.** Shapes, text and meshes, each entity in its TF frame, from every scene topic that's
+switched on. See [Objects](/lantern/guides/objects/).
 
 **Joint states.** They pose the [robot model](/lantern/guides/robot-model/#joint-states). A message
 with no positions at all (a driver that reports only effort) is ignored; one whose `position` list
@@ -74,7 +78,7 @@ its key-value pairs, in one card or a Data panel.
 - **Servers merge by topic.** Topics with the same name on different servers feed one display, and
   transforms from every server join one TF tree.
 - **A slow UI drops clouds and images, not TF.** If the UI falls behind, it skips to the newest
-  cloud and image per topic. Transforms, poses and joint states are applied in order.
+  cloud and image per topic. Transforms, poses, scene updates and joint states are applied in order.
 
 ## Limits
 
@@ -83,6 +87,7 @@ its key-value pairs, in one card or a Data panel.
 | Points per cloud | 8,388,608 (128 MiB at 16 bytes per point) | The cloud isn't drawn; its topic shows the count and the limit |
 | Message size | 256 MiB | The connection fails with `Message too long: N > 268435456` |
 | Robot mesh vertices | 5,592,405 (128 MiB at 24 bytes per vertex) | The robot doesn't load; the status names the link, the count and the limit |
+| Object mesh vertices | 5,592,405, all objects together | Shapes past it aren't drawn; the status chip gives how many vertices they needed |
 | Image side | 8,192 px | The image isn't shown; the status chip and its topic say why |
 | Text cards and statuses in the 3D view | 3 cards, 6 statuses | An `and N more` line counts the rest |
 | Pose trail | 60 s | A longer `poses.trail` in a layout is clamped, with a note on stderr |

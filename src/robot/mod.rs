@@ -1,47 +1,38 @@
 //! Robot models: a URDF with its meshes, loaded into one vertex list the viewport draws per
 //! part, and posed by joint positions (`Robot::link_poses`).
 //!
-//! Mesh filenames resolve like RViz's: relative to the URDF's directory, absolute, `file://`, or
-//! `package://pkg/...`, where pkg is found in `ROS_PACKAGE_PATH`, `AMENT_PREFIX_PATH`
-//! (`<prefix>/share/pkg`), or as a directory named pkg at or above the URDF (a source checkout).
+//! Mesh filenames resolve like RViz's (`mesh::resolve`), relative to the URDF's directory.
 //! Meshes are STL; a visual Lantern can't draw is listed in `Model::problems` and skipped.
 
-mod mesh;
 mod urdf;
 
-use std::ops::Range;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 use std::time::Instant;
 
-use urdf::Geometry;
+use glam::Vec3;
+use urdf::{Geometry, Shape};
 pub use urdf::Robot;
 
+use crate::mesh::{self, Mesh};
 use crate::ui::thousands;
-
-/// Light grey, for visuals with no material.
-const DEFAULT_COLOR: [f32; 4] = [0.8, 0.8, 0.8, 1.0];
 
 pub struct Model {
     pub robot: Robot,
-    pub mesh: Arc<RobotMesh>,
+    /// Every visual's triangles in its link's frame (visual origin and scale applied), one mesh
+    /// part per visual.
+    pub mesh: Arc<Mesh>,
+    /// What each of the mesh's parts is: its link and colour.
+    pub parts: Vec<Part>,
     /// Visuals not drawn, and why.
     pub problems: Vec<String>,
     /// Read, parse and shade, wall time.
     pub load_ms: f64,
 }
 
-/// Every visual's triangles in its link's frame (visual origin and scale applied), position then
-/// normal per corner, three corners per triangle.
-pub struct RobotMesh {
-    pub vertices: Vec<[f32; 6]>,
-    pub parts: Vec<Part>,
-}
-
-/// One visual: a run of `vertices` drawn with its link's pose.
+/// One visual, drawn with its link's pose.
 pub struct Part {
     pub link: usize,
-    pub range: Range<u32>,
     /// sRGB and alpha.
     pub color: [f32; 4],
 }
@@ -63,7 +54,7 @@ pub fn load_text(xml: &str, max_vertices: usize) -> Result<Model, String> {
 
 fn build(xml: &str, dir: &Path, max_vertices: usize, started: Instant) -> Result<Model, String> {
     let robot = Robot::parse(xml)?;
-    let mut vertices: Vec<[f32; 6]> = Vec::new();
+    let mut out = Mesh::default();
     let mut parts = Vec::new();
     let mut problems = Vec::new();
     for v in &robot.visuals {
@@ -75,11 +66,13 @@ fn build(xml: &str, dir: &Path, max_vertices: usize, started: Instant) -> Result
                     continue;
                 }
             },
-            Geometry::Primitive(shape) => mesh::primitive(shape),
+            Geometry::Primitive(Shape::Box { size }) => mesh::cuboid(size.as_vec3()),
+            Geometry::Primitive(Shape::Cylinder { radius, length }) => mesh::frustum(*radius as f32, *radius as f32, *length as f32),
+            Geometry::Primitive(Shape::Sphere { radius }) => mesh::sphere(*radius as f32),
         };
         // Checked before shading (which costs memory per vertex): shading only drops triangles,
         // so this is the most the visual can add.
-        let at_most = vertices.len() + 3 * tris.len();
+        let at_most = out.vertices.len() + 3 * tris.len();
         if at_most > max_vertices {
             return Err(format!(
                 "{} brings the robot to {} mesh vertices, over the {} the GPU can draw",
@@ -87,63 +80,24 @@ fn build(xml: &str, dir: &Path, max_vertices: usize, started: Instant) -> Result
             ));
         }
         let m = v.origin.matrix();
-        let tris: Vec<mesh::Triangle> = tris.into_iter().map(|t| t.map(|p| m.transform_point3(p))).collect();
-        let start = vertices.len();
-        vertices.extend(mesh::shade(&tris));
+        let tris: Vec<mesh::Triangle> = tris.into_iter().map(|t| t.map(|p: Vec3| m.transform_point3(p))).collect();
+        let start = out.vertices.len();
+        out.vertices.extend(mesh::shade(&tris));
         // A visual with no area (an empty STL) draws nothing; it gets no part.
-        if vertices.len() > start {
-            parts.push(Part { link: v.link, range: start as u32..vertices.len() as u32, color: v.color.unwrap_or(DEFAULT_COLOR) });
+        if out.vertices.len() > start {
+            out.parts.push(start as u32..out.vertices.len() as u32);
+            parts.push(Part { link: v.link, color: v.color.unwrap_or(mesh::DEFAULT_COLOR) });
         }
     }
-    Ok(Model { robot, mesh: Arc::new(RobotMesh { vertices, parts }), problems, load_ms: started.elapsed().as_secs_f64() * 1000.0 })
+    Ok(Model { robot, mesh: Arc::new(out), parts, problems, load_ms: started.elapsed().as_secs_f64() * 1000.0 })
 }
 
 fn read_mesh(filename: &str, dir: &Path) -> Result<Vec<mesh::Triangle>, String> {
-    let path = resolve(filename, dir)?;
+    let path = mesh::resolve(filename, dir)?;
     let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("").to_ascii_lowercase();
     if ext != "stl" {
         return Err(format!("{filename}: .{ext} meshes aren't supported (Lantern reads STL)"));
     }
     let bytes = std::fs::read(&path).map_err(|e| format!("{}: {e}", path.display()))?;
     mesh::stl(&bytes).map_err(|e| format!("{}: {e}", path.display()))
-}
-
-/// Where a URDF mesh filename points, given the URDF's directory.
-fn resolve(filename: &str, dir: &Path) -> Result<PathBuf, String> {
-    let Some(rest) = filename.strip_prefix("package://") else {
-        return Ok(dir.join(filename.strip_prefix("file://").unwrap_or(filename)));
-    };
-    let (pkg, rel) = rest.split_once('/').ok_or_else(|| format!("{filename}: no path after the package name"))?;
-    let env = |var: &str| std::env::var_os(var).map(|v| std::env::split_paths(&v).collect::<Vec<_>>()).unwrap_or_default();
-    let mut roots: Vec<PathBuf> = env("ROS_PACKAGE_PATH").into_iter().map(|p| p.join(pkg)).collect();
-    roots.extend(env("AMENT_PREFIX_PATH").into_iter().map(|p| p.join("share").join(pkg)));
-    for up in dir.ancestors() {
-        if up.file_name().is_some_and(|n| n == pkg) {
-            roots.push(up.to_path_buf());
-        }
-        roots.push(up.join(pkg));
-    }
-    roots.into_iter().map(|r| r.join(rel)).find(|p| p.exists())
-        .ok_or_else(|| format!("{filename}: package {pkg} not found in ROS_PACKAGE_PATH, AMENT_PREFIX_PATH, or at or above {}", dir.display()))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    // A description package checked out from source: robot.urdf in pkg/urdf/, meshes under
-    // pkg/meshes/, referenced as package://pkg/meshes/...
-    #[test]
-    fn package_urls_resolve_to_an_enclosing_checkout() {
-        let root = std::env::temp_dir().join(format!("lantern-resolve-{}", std::process::id()));
-        let pkg = root.join("arm_description");
-        std::fs::create_dir_all(pkg.join("urdf")).unwrap();
-        std::fs::create_dir_all(pkg.join("meshes")).unwrap();
-        std::fs::write(pkg.join("meshes/base.stl"), b"").unwrap();
-        let found = resolve("package://arm_description/meshes/base.stl", &pkg.join("urdf"));
-        let missing = resolve("package://other_pkg/meshes/base.stl", &pkg.join("urdf"));
-        std::fs::remove_dir_all(&root).unwrap();
-        assert_eq!(found.unwrap(), pkg.join("meshes/base.stl"));
-        assert!(missing.unwrap_err().contains("package other_pkg not found"));
-    }
 }

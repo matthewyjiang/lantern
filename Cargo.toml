@@ -22,6 +22,10 @@ prost = { version = "0.14", default-features = false, features = ["derive", "std
 roxmltree = "0.21.2"
 # Camera images (JPEG, PNG): the same crate and codecs Rune already builds for its own images.
 image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
+# glTF and GLB meshes for scene entities: the document and its accessors, without the importer's
+# image decoding (textures aren't drawn); base64 for buffers embedded as data: URIs.
+gltf = { version = "1.4", default-features = false, features = ["utils"] }
+base64 = "0.22"
 
 # Rune ships patched copies of these crates and asks every app that builds it to apply them too
 # (a dependency's `[patch]` doesn't reach the workspace that depends on it). Same rev as `rune`.

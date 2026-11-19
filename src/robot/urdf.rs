@@ -265,8 +265,7 @@ fn origin_of(n: Node) -> Result<Pose, String> {
     let Some(o) = n.children().find(|c| c.has_tag_name("origin")) else { return Ok(Pose::IDENTITY) };
     let t = vec3(o.attribute("xyz").unwrap_or("0 0 0"))?;
     let r = vec3(o.attribute("rpy").unwrap_or("0 0 0"))?;
-    let rotation = DQuat::from_rotation_z(r.z) * DQuat::from_rotation_y(r.y) * DQuat::from_rotation_x(r.x);
-    Ok(Pose { translation: t, rotation })
+    Ok(Pose::from_xyz_rpy(t, r))
 }
 
 /// A `<material>`'s `<color rgba>`, if it has one.

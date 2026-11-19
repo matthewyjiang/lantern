@@ -16,11 +16,12 @@ use rune::{Align, Color, Cx, Drag, El, Phase, PointerButton, ScrollSpec, Side, T
 use rune_kit::{Kit, Select, SelectAppearance};
 
 use crate::app::{State, Tab3d};
+use crate::objects::ModelKey;
 use crate::connection::Connection;
 use crate::decode::{ColorChoice, Kind};
 use crate::layout::{Layout, Panel, PanelKind, Preset, PRESETS};
 use crate::panels;
-use crate::scene::{Annotation, Diagnostic, Image, Level, PointColor};
+use crate::scene::{Annotation, Diagnostic, Image, Level, PointColor, Thickness};
 use crate::settings::{DataSettings, ImageSettings, View3dSettings};
 use crate::source::Status;
 use crate::viewport::{self, Shade};
@@ -142,12 +143,15 @@ fn drag_camera(s: &mut State, d: &mut Drag, tx: &mut Tx) {
     }
 }
 
-/// Frame and object names, placed where their origins project into the viewport.
+/// Frame and pose names, placed beside where their origins project into the viewport, and
+/// objects' text centred on theirs, in its colour and size.
 fn frame_labels(s: &State, [w, h]: [f32; 2]) -> Vec<El> {
     let t = tok::theme(true);
     let vp = s.camera.view_proj(w / h.max(1.0));
-    s.display.labels.iter().filter_map(|(name, p)| {
-        let clip = vp * p.extend(1.0);
+    // Points per metre at unit depth, for text sized in metres.
+    let focal = h * 0.5 / (s.camera.fov_y * 0.5).tan();
+    s.display.labels.iter().filter_map(|label| {
+        let clip = vp * label.at.extend(1.0);
         if clip.w <= 0.0 {
             return None;
         }
@@ -155,10 +159,23 @@ fn frame_labels(s: &State, [w, h]: [f32; 2]) -> Vec<El> {
         if !(0.0..w - 40.0).contains(&x) || !(10.0..h - 10.0).contains(&y) {
             return None;
         }
-        Some(
-            el().absolute(x + 6.0, y - 18.0).px(5.0).py(1.0).radius(4.0).fill(oklcha(0.16, 0.006, 265.0, 0.7))
-                .child(text(name.clone()).font(MONO_SMALL).color(t.text_secondary)),
-        )
+        let chip = el().px(5.0).py(1.0).radius(4.0).fill(oklcha(0.16, 0.006, 265.0, 0.7));
+        Some(match label.style {
+            None => chip.absolute(x + 6.0, y - 18.0).child(text(label.text.clone()).font(MONO_SMALL).color(t.text_secondary)),
+            Some(style) => {
+                let size = match style.size {
+                    Thickness::Points(pt) => pt as f32,
+                    Thickness::Metres(m) => m as f32 * focal / clip.w,
+                };
+                // Readable, and no bigger than a heading, however near the camera is.
+                let size = size.clamp(6.0, 72.0);
+                let [r, g, b, a] = style.color;
+                let color = Color { r: srgb_decode(r), g: srgb_decode(g), b: srgb_decode(b), a };
+                // Centred on its origin: about half a line up, and half its width left.
+                let half_w = label.text.chars().count() as f32 * size * 0.3;
+                chip.absolute(x - half_w - 5.0, y - size * 0.7).child(text(label.text.clone()).font(TextStyle::new(size, 500.0)).color(color))
+            }
+        })
     }).collect()
 }
 
@@ -537,6 +554,7 @@ fn kind_badge(kind: Kind) -> El {
         Kind::PointCloud => 250.0,
         Kind::Transforms => 150.0,
         Kind::Poses => 70.0,
+        Kind::Objects => 100.0,
         Kind::JointStates => 310.0,
         Kind::Image => 200.0,
         Kind::Annotations => 230.0,
@@ -701,6 +719,7 @@ fn view3d_settings(s: &State, k: &Kit, layer: &mut Vec<El>, v: &View3dSettings, 
             .child(field("Expire after", segmented("pose-timeout", &[(0.0, "Never"), (0.5, "0.5 s"), (2.0, "2 s"), (10.0, "10 s")], v.poses.timeout, |s, x| s.edit3d(|v| v.poses.timeout = x))))
             .child(field("Trail", segmented("trail", &[(0.0, "Off"), (5.0, "5 s"), (15.0, "15 s"), (60.0, "60 s")], v.poses.trail, |s, x| s.edit3d(|v| v.poses.trail = x)))),
         Tab3d::Robot => robot_settings(s, k, layer, v),
+        Tab3d::Objects => objects_settings(s, v),
         Tab3d::Cards => {
             let body = if cards.image {
                 body.child(toggle_row("show-image-card", "Camera image", v.image_card, |s| s.edit3d(|v| v.image_card ^= true)))
@@ -840,6 +859,38 @@ fn robot_settings(s: &State, k: &Kit, layer: &mut Vec<El>, v: &View3dSettings) -
     sec.child(picker(s, k, layer, "joint-topic", "Joint states", &v.robot.joint_topic, topics.first().map(String::as_str), &topics, "not advertised", |s, j| s.edit3d(|v| v.robot.joint_topic = j)))
         .child(note(received).key("joints-received"))
         .child(field("Opacity", segmented("robot-opacity", &[(1.0, "100%"), (0.75, "75%"), (0.5, "50%"), (0.25, "25%")], v.robot.opacity, |s, x| s.edit3d(|v| v.robot.opacity = x))))
+}
+
+/// The 3D view's objects: which scene topics are drawn, and the layout's frame meshes with how
+/// each loaded.
+fn objects_settings(s: &State, v: &View3dSettings) -> El {
+    let t = tok::theme(true);
+    let body = col().w_full().gap(10.0)
+        .child(toggle_row("objects", "Show", v.objects.show, |s| s.edit3d(|v| v.objects.show ^= true)))
+        .child(field("Topics", topic_switches(s, "object", Kind::Objects, &v.objects.hidden, &view3d_lens(|v| &mut v.objects.hidden))));
+    if v.objects.meshes.is_empty() {
+        return body;
+    }
+    let error = oklch(0.72, 0.17, 25.0);
+    let mut list = col().key("frame-meshes").w_full();
+    for (i, m) in v.objects.meshes.iter().enumerate() {
+        let (status, color) = match s.model(&ModelKey::Url(m.file.clone())) {
+            None => ("Not loaded while objects are hidden".to_string(), t.text_secondary),
+            Some(Ok(a)) => (format!("{} vertices", thousands(a.vertex_count())), t.text_secondary),
+            Some(Err(e)) => (e.clone(), error),
+        };
+        list = list.child(col().key(format!("frame-mesh-{i}")).w_full().px(8.0).py(6.0).gap(2.0)
+            .child(row().gap(8.0)
+                .child(text(file_name(&m.file)).font(MONO).color(t.text).truncate().grow(1.0).min_w(0.0))
+                .child(text(m.frame.clone()).font(MONO_SMALL).color(t.text_secondary)))
+            .child(text(status).font(SMALL).color(color).max_lines(3)));
+    }
+    body.child(field("Frame meshes", inset(list)))
+}
+
+/// The last part of a path or URL, which a narrow list has room for.
+fn file_name(path: &str) -> String {
+    path.rsplit('/').next().unwrap_or(path).to_string()
 }
 
 /// A setting that takes one of a list of values, Auto first: its label, and a select (its field

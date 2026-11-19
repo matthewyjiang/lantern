@@ -15,6 +15,11 @@ Lantern" guide describes; or foxglove.JointStates protobuf with --joints proto),
 message through the bridge. Load fixtures/med7/med7.urdf (scripts/robot_fixture.py) in Lantern
 to see it.
 
+--objects adds a scene on /scene (foxglove.SceneUpdate, or foxglove_msgs/SceneUpdate through the
+bridge, which needs ros-humble-foxglove-msgs): a two-part GLB object held in the Med 7's gripper,
+and shapes, lines and text on the table. The gripper frame, lbr_link_ee, is published in TF at
+the reach pose, so pair it with --robot-pose reach.
+
 SDK only, for Lantern's other displays:
   --robot-description PATH  the URDF at PATH on /robot_description (std_msgs/msg/String, JSON)
   --camera                  a test-pattern camera image and annotations over it
@@ -74,6 +79,9 @@ JOINT_STATE_SCHEMA = {
 }
 STRING_SCHEMA = {"title": "std_msgs/msg/String", "type": "object", "properties": {"data": {"type": "string"}}}
 DIAGNOSTICS_SCHEMA = {"title": "diagnostic_msgs/msg/DiagnosticArray", "type": "object"}
+# world -> lbr_link_ee at the reach pose (pinocchio, as src/robot/urdf.rs checks): translation, and
+# rotation row by row. The gripper's z points down at the table.
+GRIPPER = ((0.499236303, 0.426029864, 0.234258961), ((-0.469207122, -0.877834063, -0.096187502), (-0.880154088, 0.455994247, 0.131901583), (-0.071926755, 0.146548985, -0.986584987)))
 # /tracked: a circle over the table (centre, radius m, seconds per turn), at the table top's height.
 CIRCLE = ((-0.15, 1.28, 0.78), 0.25, 8.0)
 
@@ -120,6 +128,44 @@ def yaw_quat(yaw):
     return (0.0, 0.0, math.sin(yaw / 2), math.cos(yaw / 2))
 
 
+def quat_of(m):
+    """Unit quaternion (x, y, z, w) of rotation matrix m (rows)."""
+    m = np.asarray(m)
+    w = math.sqrt(max(0.0, 1.0 + m[0, 0] + m[1, 1] + m[2, 2])) / 2
+    x = math.copysign(math.sqrt(max(0.0, 1.0 + m[0, 0] - m[1, 1] - m[2, 2])) / 2, m[2, 1] - m[1, 2])
+    y = math.copysign(math.sqrt(max(0.0, 1.0 - m[0, 0] + m[1, 1] - m[2, 2])) / 2, m[0, 2] - m[2, 0])
+    z = math.copysign(math.sqrt(max(0.0, 1.0 - m[0, 0] - m[1, 1] + m[2, 2])) / 2, m[1, 0] - m[0, 1])
+    return (x, y, z, w)
+
+
+def scene_entities():
+    """The --objects scene, encoding-neutral: entities as (id, frame, shapes), each shape a
+    (kind, position, quaternion, fields) tuple. Colours are sRGB 0-1, sizes metres."""
+    import glb
+
+    up = (0.0, 0.0, 0.0, 1.0)
+    # The held object: a can with a lid, 10 cm tall along the gripper's z (glTF's +y is the
+    # model's up, which Lantern turns to +z), its top 2 cm past the flange.
+    can = glb.glb([glb.box((0.06, 0.10, 0.06), (0.05, 0.25, 0.80, 1.0)), glb.box((0.065, 0.012, 0.065), (0.90, 0.35, 0.05, 1.0), (0.0, 0.056, 0.0))])
+    held = [
+        ("model", (0.0, 0.0, 0.07), up, {"media_type": "model/gltf-binary", "data": can}),
+        ("text", (0.0, 0.0, 0.16), up, {"text": "held", "font_size": 14.0, "scale_invariant": True, "color": (1.0, 1.0, 1.0, 1.0)}),
+    ]
+    z = 0.70  # the table top
+    zone = [(-0.22, 1.24, z + 0.01), (0.02, 1.24, z + 0.01), (0.02, 1.40, z + 0.01), (-0.22, 1.40, z + 0.01)]
+    table = [
+        ("cube", (0.30, 1.05, z + 0.04), yaw_quat(0.5), {"size": (0.08, 0.08, 0.08), "color": (0.30, 0.80, 0.40, 1.0)}),
+        ("sphere", (0.30, 1.25, z + 0.04), up, {"size": (0.08, 0.08, 0.08), "color": (0.90, 0.30, 0.30, 1.0)}),
+        ("cylinder", (-0.60, 1.50, z + 0.06), up, {"size": (0.06, 0.06, 0.12), "bottom_scale": 1.0, "top_scale": 1.0, "color": (0.95, 0.80, 0.20, 1.0)}),
+        ("cylinder", (-0.05, 1.55, z + 0.05), up, {"size": (0.08, 0.08, 0.10), "bottom_scale": 1.0, "top_scale": 0.0, "color": (0.70, 0.40, 0.90, 1.0)}),
+        ("arrow", (-0.60, 1.05, z + 0.02), yaw_quat(math.pi / 2), {"shaft_length": 0.22, "shaft_diameter": 0.015, "head_length": 0.06, "head_diameter": 0.04, "color": (1.0, 0.55, 0.15, 1.0)}),
+        ("line", (0.0, 0.0, 0.0), up, {"type": "loop", "points": zone, "thickness": 0.008, "color": (0.30, 0.85, 0.95, 1.0)}),
+        ("triangles", (0.0, 0.0, 0.0), up, {"points": [zone[0], zone[1], zone[2], zone[0], zone[2], zone[3]], "color": (0.30, 0.85, 0.95, 0.25)}),
+        ("text", (-0.10, 1.32, z + 0.04), up, {"text": "drop zone", "font_size": 0.035, "scale_invariant": False, "color": (0.30, 0.85, 0.95, 1.0)}),
+    ]
+    return [("held", "lbr_link_ee", held), ("table", "world", table)]
+
+
 def scene(name):
     cloud = fixtures.load(name)
     m = MOUNTS[name]
@@ -152,6 +198,9 @@ def serve_sdk(args, cloud, xyz, frame, mount):
         return fm.Quaternion(x=q[0], y=q[1], z=q[2], w=q[3])
 
     extras = sdk_extras(args, fm, vec, quat)
+    if args.objects:
+        pub_objects = sdk_objects(fm, vec, quat)
+        extras = (lambda first: lambda fresh: (first(fresh), pub_objects()))(extras)
     publish_cloud = cloud_publisher(args, fm, vec, quat, cloud, xyz, frame, mount) if cloud is not None else None
     if publish_cloud is None:
         print(f"serving on ws://127.0.0.1:{args.port} (no cloud)")
@@ -207,6 +256,45 @@ def cloud_publisher(args, fm, vec, quat, cloud, xyz, frame, mount):
             markers.log(fm.PosesInFrame(frame_id="world", poses=[fm.Pose(position=vec(p), orientation=quat(yaw_quat(y))) for p, y in MARKERS]))
 
     return publish
+
+
+def sdk_objects(fm, vec, quat):
+    """/scene as foxglove.SceneUpdate and the gripper frame in TF; returns the publisher."""
+    from foxglove.channels import FrameTransformsChannel, SceneUpdateChannel
+
+    def color(c):
+        return fm.Color(r=c[0], g=c[1], b=c[2], a=c[3])
+
+    def pose(p, q):
+        return fm.Pose(position=vec(p), orientation=quat(q))
+
+    kinds = {"strip": fm.LinePrimitiveLineType.LineStrip, "loop": fm.LinePrimitiveLineType.LineLoop, "list": fm.LinePrimitiveLineType.LineList}
+    entities = []
+    for eid, frame, shapes in scene_entities():
+        e = {k: [] for k in ("models", "texts", "cubes", "spheres", "cylinders", "arrows", "lines", "triangles")}
+        for kind, p, q, f in shapes:
+            at = pose(p, q)
+            if kind == "model":
+                e["models"].append(fm.ModelPrimitive(pose=at, scale=vec((1.0, 1.0, 1.0)), media_type=f["media_type"], data=f["data"]))
+            elif kind == "text":
+                e["texts"].append(fm.TextPrimitive(pose=at, billboard=True, font_size=f["font_size"], scale_invariant=f["scale_invariant"], color=color(f["color"]), text=f["text"]))
+            elif kind in ("cube", "sphere"):
+                prim = (fm.CubePrimitive if kind == "cube" else fm.SpherePrimitive)(pose=at, size=vec(f["size"]), color=color(f["color"]))
+                e[kind + "s"].append(prim)
+            elif kind == "cylinder":
+                e["cylinders"].append(fm.CylinderPrimitive(pose=at, size=vec(f["size"]), bottom_scale=f["bottom_scale"], top_scale=f["top_scale"], color=color(f["color"])))
+            elif kind == "arrow":
+                e["arrows"].append(fm.ArrowPrimitive(pose=at, shaft_length=f["shaft_length"], shaft_diameter=f["shaft_diameter"], head_length=f["head_length"], head_diameter=f["head_diameter"], color=color(f["color"])))
+            elif kind == "line":
+                e["lines"].append(fm.LinePrimitive(type=kinds[f["type"]], pose=at, thickness=f["thickness"], points=[fm.Point3(x=x, y=y, z=z) for x, y, z in f["points"]], color=color(f["color"])))
+            elif kind == "triangles":
+                e["triangles"].append(fm.TriangleListPrimitive(pose=at, points=[fm.Point3(x=x, y=y, z=z) for x, y, z in f["points"]], color=color(f["color"])))
+        entities.append(fm.SceneEntity(frame_id=frame, id=eid, **e))
+    update = fm.SceneUpdate(entities=entities)
+    gripper = fm.FrameTransforms(transforms=[fm.FrameTransform(parent_frame_id="world", child_frame_id="lbr_link_ee", translation=vec(GRIPPER[0]), rotation=quat(quat_of(GRIPPER[1])))])
+    tf = FrameTransformsChannel("/tf")
+    ch = SceneUpdateChannel("/scene")
+    return lambda: (tf.log(gripper), ch.log(update))
 
 
 def sdk_extras(args, fm, vec, quat):
@@ -325,7 +413,17 @@ def serve_ros(args, cloud, xyz, frame, mount):
     tf.transform.translation.x, tf.transform.translation.y, tf.transform.translation.z = mount[0]
     r = tf.transform.rotation
     r.x, r.y, r.z, r.w = mount[1]
-    node.create_publisher(TFMessage, "/tf_static", latched).publish(TFMessage(transforms=[tf]))
+    statics = [tf]
+    scene_pub = None
+    if args.objects:
+        g = TransformStamped()
+        g.header.frame_id, g.child_frame_id = "world", "lbr_link_ee"
+        g.transform.translation.x, g.transform.translation.y, g.transform.translation.z = GRIPPER[0]
+        r = g.transform.rotation
+        r.x, r.y, r.z, r.w = quat_of(GRIPPER[1])
+        statics.append(g)
+        scene_pub, scene_msg = ros_objects(node, pose)
+    node.create_publisher(TFMessage, "/tf_static", latched).publish(TFMessage(transforms=statics))
     points = node.create_publisher(PointCloud2, args.topic, 1)
     objects = node.create_publisher(Odometry, "/objects", 10)
     markers = node.create_publisher(PoseArray, "/markers", 1)
@@ -351,6 +449,8 @@ def serve_ros(args, cloud, xyz, frame, mount):
                 pa.header.frame_id = "world"
                 pa.poses = [pose(p, yaw_quat(y)) for p, y in MARKERS]
                 markers.publish(pa)
+            if scene_pub:
+                scene_pub.publish(scene_msg)
             if joints:
                 js = JointState(name=JOINTS, position=q)
                 js.header.stamp = msg.header.stamp
@@ -363,6 +463,42 @@ def serve_ros(args, cloud, xyz, frame, mount):
         rclpy.try_shutdown()
 
 
+def ros_objects(node, pose):
+    """A /scene publisher and its foxglove_msgs/SceneUpdate."""
+    from foxglove_msgs import msg as fx
+    from geometry_msgs.msg import Point, Vector3
+
+    def color(c):
+        return fx.Color(r=c[0], g=c[1], b=c[2], a=c[3])
+
+    def v3(v):
+        return Vector3(x=v[0], y=v[1], z=v[2])
+
+    kinds = {"strip": fx.LinePrimitive.LINE_STRIP, "loop": fx.LinePrimitive.LINE_LOOP, "list": fx.LinePrimitive.LINE_LIST}
+    entities = []
+    for eid, frame, shapes in scene_entities():
+        e = {k: [] for k in ("models", "texts", "cubes", "spheres", "cylinders", "arrows", "lines", "triangles")}
+        for kind, p, q, f in shapes:
+            at = pose(p, q)
+            if kind == "model":
+                e["models"].append(fx.ModelPrimitive(pose=at, scale=v3((1.0, 1.0, 1.0)), media_type=f["media_type"], data=f["data"]))
+            elif kind == "text":
+                e["texts"].append(fx.TextPrimitive(pose=at, billboard=True, font_size=f["font_size"], scale_invariant=f["scale_invariant"], color=color(f["color"]), text=f["text"]))
+            elif kind in ("cube", "sphere"):
+                prim = (fx.CubePrimitive if kind == "cube" else fx.SpherePrimitive)(pose=at, size=v3(f["size"]), color=color(f["color"]))
+                e[kind + "s"].append(prim)
+            elif kind == "cylinder":
+                e["cylinders"].append(fx.CylinderPrimitive(pose=at, size=v3(f["size"]), bottom_scale=f["bottom_scale"], top_scale=f["top_scale"], color=color(f["color"])))
+            elif kind == "arrow":
+                e["arrows"].append(fx.ArrowPrimitive(pose=at, shaft_length=f["shaft_length"], shaft_diameter=f["shaft_diameter"], head_length=f["head_length"], head_diameter=f["head_diameter"], color=color(f["color"])))
+            elif kind == "line":
+                e["lines"].append(fx.LinePrimitive(type=kinds[f["type"]], pose=at, thickness=f["thickness"], points=[Point(x=x, y=y, z=z) for x, y, z in f["points"]], color=color(f["color"])))
+            elif kind == "triangles":
+                e["triangles"].append(fx.TriangleListPrimitive(pose=at, points=[Point(x=x, y=y, z=z) for x, y, z in f["points"]], color=color(f["color"])))
+        entities.append(fx.SceneEntity(frame_id=frame, id=eid, **e))
+    return node.create_publisher(fx.SceneUpdate, "/scene", 10), fx.SceneUpdate(entities=entities)
+
+
 if __name__ == "__main__":
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--cloud", choices=[*fixtures.FIXTURES, "none"], default="table")
@@ -373,10 +509,13 @@ if __name__ == "__main__":
     p.add_argument("--robot-pose", choices=list(ROBOT_POSES), help="also publish the Med 7's joint states, fixed at this pose")
     p.add_argument("--joints", choices=["json", "proto"], default="json", help="--via sdk: joint states as JSON JointState or foxglove.JointStates")
     p.add_argument("--robot-description", metavar="PATH", help="--via sdk: publish this URDF on /robot_description")
+    p.add_argument("--objects", action="store_true", help="a scene on /scene: an object in the gripper (with --robot-pose reach), shapes on the table")
     p.add_argument("--camera", action="store_true", help="--via sdk: camera image and annotations")
     p.add_argument("--status", action="store_true", help="--via sdk: text and diagnostics")
     p.add_argument("--motion", action="store_true", help="--via sdk: a moving pose, and one sent once")
     a = p.parse_args()
+    if a.objects and a.robot_pose == "home":
+        p.error("--objects places its gripper frame at the reach pose: use --robot-pose reach")
     if a.via == "ros" and (a.cloud == "none" or a.joints != "json" or a.robot_description or a.camera or a.status or a.motion):
         p.error("--cloud none, --joints proto, --robot-description, --camera, --status and --motion need --via sdk")
     (serve_sdk if a.via == "sdk" else serve_ros)(a, *(scene(a.cloud) if a.cloud != "none" else (None, None, None, None)))

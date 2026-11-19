@@ -3,6 +3,7 @@
 //! its function. Nothing outside this module sees a message type.
 
 mod cdr;
+mod entities;
 mod foxglove;
 mod image;
 mod json;
@@ -11,7 +12,7 @@ mod ros;
 
 use std::fmt;
 
-use crate::scene::{Annotation, Diagnostic, Image, PointCloud, Poses, Transform};
+use crate::scene::{Annotation, Diagnostic, Image, PointCloud, Poses, SceneUpdate, Transform};
 
 pub use points::ColorChoice;
 
@@ -21,6 +22,8 @@ pub enum Kind {
     PointCloud,
     Transforms,
     Poses,
+    /// Scene entities: shapes, text and meshes placed in TF frames.
+    Objects,
     JointStates,
     Image,
     Annotations,
@@ -35,6 +38,7 @@ impl Kind {
             Kind::PointCloud => "Point cloud",
             Kind::Transforms => "Transforms",
             Kind::Poses => "Poses",
+            Kind::Objects => "Objects",
             Kind::JointStates => "Joints",
             Kind::Image => "Image",
             Kind::Annotations => "Annotations",
@@ -49,6 +53,7 @@ pub enum Decoded {
     Cloud(PointCloud),
     Transforms(Vec<Transform>),
     Poses(Poses),
+    Objects(SceneUpdate),
     /// Joint positions by name (radians, or metres for prismatic joints).
     Joints(Vec<(String, f64)>),
     Image(Image),
@@ -102,6 +107,7 @@ const DECODERS: &[Decoder] = &[
     row("cdr", "geometry_msgs/msg/PoseStamped", None, Kind::Poses, ros::pose_stamped),
     row("cdr", "geometry_msgs/msg/PoseArray", None, Kind::Poses, ros::pose_array),
     row("cdr", "nav_msgs/msg/Odometry", None, Kind::Poses, ros::odometry),
+    row("cdr", "foxglove_msgs/msg/SceneUpdate", None, Kind::Objects, ros::scene_update),
     row("cdr", "sensor_msgs/msg/JointState", None, Kind::JointStates, ros::joint_state),
     row("cdr", "sensor_msgs/msg/CompressedImage", None, Kind::Image, ros::compressed_image),
     row("cdr", "sensor_msgs/msg/Image", None, Kind::Image, ros::image),
@@ -113,6 +119,7 @@ const DECODERS: &[Decoder] = &[
     row("protobuf", "foxglove.PoseInFrame", None, Kind::Poses, foxglove::pose_in_frame),
     row("protobuf", "foxglove.PosesInFrame", None, Kind::Poses, foxglove::poses_in_frame),
     row("protobuf", "foxglove.Odometry", None, Kind::Poses, foxglove::odometry),
+    row("protobuf", "foxglove.SceneUpdate", None, Kind::Objects, foxglove::scene_update),
     row("protobuf", "foxglove.JointStates", None, Kind::JointStates, foxglove::joint_states),
     row("protobuf", "foxglove.CompressedImage", None, Kind::Image, foxglove::compressed_image),
     row("protobuf", "foxglove.RawImage", None, Kind::Image, foxglove::raw_image),
@@ -329,6 +336,47 @@ mod tests {
         }
     }
 
+    // The same scene from the Foxglove SDK and from rclpy's foxglove_msgs: both deletions, the
+    // grasped object's lifetime and two models, and one of every other shape, indices resolved.
+    #[test]
+    fn scene_updates_from_both_encodings() {
+        use crate::scene::{Deletion, Geometry, LineKind, ModelSource, Thickness};
+        let decoded = |enc, schema, bytes| match decode(enc, schema, bytes, &ColorChoice::Auto) {
+            Ok(Decoded::Objects(u)) => u,
+            _ => panic!("{schema}"),
+        };
+        let pb = decoded("protobuf", "foxglove.SceneUpdate", &include_bytes!("testdata/sceneupdate.pb")[..]);
+        let cdr = decoded("cdr", "foxglove_msgs/msg/SceneUpdate", &include_bytes!("testdata/sceneupdate.cdr")[..]);
+        assert_eq!(pb, cdr);
+
+        assert_eq!(pb.deletions, [Deletion::Id("old".into()), Deletion::All]);
+        let [grasped, shapes] = &pb.entities[..] else { panic!("two entities") };
+        assert_eq!((grasped.id.as_str(), grasped.frame_id.as_str(), grasped.lifetime), ("grasped", "gripper", Some(1.5)));
+        assert_eq!(shapes.lifetime, None, "no lifetime: kept until replaced");
+        let at = &grasped.shapes[0].pose;
+        assert_eq!(at.translation, DVec3::new(0.5, -0.25, 0.1));
+        assert!((at.rotation.z - std::f64::consts::FRAC_1_SQRT_2).abs() < 1e-12);
+        let Geometry::Model { source: ModelSource::Data { media_type, bytes, .. }, scale, override_color: true } = &grasped.shapes[0].geometry else { panic!() };
+        assert_eq!((media_type.as_str(), &bytes[..], *scale), ("model/gltf-binary", &b"glTF fake model bytes"[..], DVec3::splat(2.0)));
+        assert_eq!(grasped.shapes[1].geometry, Geometry::Model { source: ModelSource::Url("package://objects/meshes/cup.stl".into()), scale: DVec3::ONE, override_color: false }, "an unset scale is 1");
+
+        let geometry: Vec<&Geometry> = shapes.shapes.iter().map(|s| &s.geometry).collect();
+        assert_eq!(geometry[..4], [
+            &Geometry::Arrow { shaft_length: 0.3, shaft_diameter: 0.02, head_length: 0.1, head_diameter: 0.05 },
+            &Geometry::Cube { size: DVec3::new(0.1, 0.2, 0.3) },
+            &Geometry::Sphere { size: DVec3::splat(0.2) },
+            &Geometry::Cylinder { size: DVec3::new(0.1, 0.1, 0.4), bottom: 1.0, top: 0.0 },
+        ]);
+        assert_eq!(shapes.shapes[1].color, [0.0, 1.0, 0.0, 0.5]);
+        let (red, green, blue) = ([1.0, 0.0, 0.0, 1.0], [0.0, 1.0, 0.0, 1.0], [0.0, 0.0, 1.0, 1.0]);
+        let Geometry::Line { kind: LineKind::Strip, points, colors, thickness: Thickness::Metres(t) } = geometry[4] else { panic!("{:?}", geometry[4]) };
+        assert_eq!((points.len(), points[3], *t), (4, DVec3::ZERO, 0.01), "indices 0 1 2 0 close the strip");
+        assert_eq!(colors, &[red, green, blue, red]);
+        assert_eq!(geometry[5], &Geometry::Triangles { points: vec![DVec3::ZERO, DVec3::new(0.1, 0.0, 0.0), DVec3::new(0.0, 0.1, 0.0)] });
+        assert_eq!(shapes.shapes[5].color, red, "per-vertex colours draw as the first");
+        assert_eq!(geometry[6], &Geometry::Text { text: "cup".into(), size: Thickness::Points(14.0) });
+    }
+
     // A std_msgs/String is a URDF only on a robot_description topic.
     #[test]
     fn a_string_is_a_robot_description_only_by_its_topic() {
@@ -344,6 +392,10 @@ mod tests {
         let full = include_bytes!("testdata/pc2.cdr");
         for cut in [3, 20, full.len() / 2, full.len() - 1] {
             assert!(decode("cdr", "sensor_msgs/msg/PointCloud2", &full[..cut], &ColorChoice::Auto).is_err(), "cut at {cut}");
+        }
+        let full = include_bytes!("testdata/sceneupdate.cdr");
+        for cut in [3, 40, full.len() / 2, full.len() - 1] {
+            assert!(decode("cdr", "foxglove_msgs/msg/SceneUpdate", &full[..cut], &ColorChoice::Auto).is_err(), "cut at {cut}");
         }
         let full = include_bytes!("testdata/pointcloud.pb");
         assert!(decode("protobuf", "foxglove.PointCloud", &full[..full.len() - 3], &ColorChoice::Auto).is_err());

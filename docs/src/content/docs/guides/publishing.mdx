@@ -1,6 +1,6 @@
 ---
 title: Publish from your code
-description: Send point clouds, transforms, poses, joint states, camera images and status to Lantern from your own program with a Foxglove SDK. No ROS needed.
+description: Send point clouds, transforms, poses, objects, joint states, camera images and status to Lantern from your own program with a Foxglove SDK. No ROS needed.
 ---
 
 A program can serve Lantern with a [Foxglove SDK](https://github.com/foxglove/foxglove-sdk)
@@ -60,6 +60,7 @@ The server's `name` shows in the top bar. `start_server` listens on `127.0.0.1` 
 | `/points` | `PointCloudChannel` | A point cloud |
 | `/objects` | `OdometryChannel` | One labelled pose per tracked object, with a velocity arrow |
 | `/markers` | `PosesInFrameChannel` | Unlabelled poses, such as fiducial detections |
+| `/scene` | `SceneUpdateChannel` | Shapes, text and meshes at TF frames ([Objects](/lantern/guides/objects/)) |
 | `/joint_states` | `JointStatesChannel`, or JSON | The robot, posed from its URDF |
 | `/robot_description` | JSON | The robot model itself |
 | `/camera/image` | `CompressedImageChannel` or `RawImageChannel` | A camera image |

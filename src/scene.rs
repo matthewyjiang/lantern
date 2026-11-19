@@ -15,6 +15,12 @@ pub struct Pose {
 impl Pose {
     pub const IDENTITY: Pose = Pose { translation: DVec3::ZERO, rotation: DQuat::IDENTITY };
 
+    /// A URDF-style offset: `xyz`, then roll, pitch and yaw about the fixed x, y and z axes.
+    pub fn from_xyz_rpy(xyz: DVec3, rpy: DVec3) -> Pose {
+        let rotation = DQuat::from_rotation_z(rpy.z) * DQuat::from_rotation_y(rpy.y) * DQuat::from_rotation_x(rpy.x);
+        Pose { translation: xyz, rotation }
+    }
+
     pub fn matrix(&self) -> Mat4 {
         Mat4::from_rotation_translation(self.rotation.as_quat(), self.translation.as_vec3())
     }
@@ -112,6 +118,89 @@ pub enum PointsKind {
     Strip,
     /// Separate segments, two points each.
     Lines,
+}
+
+/// One `SceneUpdate` message: entities to remove, then entities to add or replace. Entities are
+/// per topic, by id.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SceneUpdate {
+    pub deletions: Vec<Deletion>,
+    pub entities: Vec<Entity>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum Deletion {
+    /// The topic's entity with this id.
+    Id(String),
+    /// Every entity of the topic.
+    All,
+}
+
+/// Shapes placed together in one frame, replaced as a whole when an entity with its id arrives.
+/// Entities follow their frame as TF moves it (Foxglove's `frame_locked` is ignored).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Entity {
+    pub id: String,
+    pub frame_id: String,
+    /// Dropped this many seconds after it arrives; `None` keeps it until replaced or deleted.
+    pub lifetime: Option<f64>,
+    pub shapes: Vec<Shape>,
+}
+
+/// One primitive of an entity, at `pose` in the entity's frame.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Shape {
+    pub pose: Pose,
+    /// sRGB and alpha, 0–1. A model uses it only with `override_color`.
+    pub color: [f32; 4],
+    pub geometry: Geometry,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum Geometry {
+    /// A box `size` across, centred on the pose.
+    Cube { size: DVec3 },
+    /// An ellipsoid `size` across.
+    Sphere { size: DVec3 },
+    /// Along z, `size` its bounding box; `bottom` and `top` scale the radius at each end (a cone
+    /// has one at 0).
+    Cylinder { size: DVec3, bottom: f64, top: f64 },
+    /// From the pose along +x: a shaft, then a cone.
+    Arrow { shaft_length: f64, shaft_diameter: f64, head_length: f64, head_diameter: f64 },
+    /// `points` as Foxglove's indices give them, each with its colour when `colors` isn't empty.
+    Line { kind: LineKind, points: Vec<DVec3>, colors: Vec<[f32; 4]>, thickness: Thickness },
+    /// Three points per triangle, in one colour.
+    Triangles { points: Vec<DVec3> },
+    Text { text: String, size: Thickness },
+    /// A GLB, glTF or STL mesh, scaled along its axes after it's turned Z-up.
+    Model { source: ModelSource, scale: DVec3, override_color: bool },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LineKind {
+    /// An open polyline.
+    Strip,
+    /// A closed one.
+    Loop,
+    /// Separate segments, two points each.
+    List,
+}
+
+/// A line's width or a text's height: on screen, or in the world.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Thickness {
+    Points(f64),
+    Metres(f64),
+}
+
+/// Where a model's mesh comes from.
+#[derive(Clone, Debug, PartialEq)]
+pub enum ModelSource {
+    /// An absolute path, `file://` or `package://` URL.
+    Url(String),
+    /// Mesh bytes sent in the message, with their media type (`model/gltf-binary`, `model/stl`,
+    /// or empty) and a hash of both that names them.
+    Data { media_type: String, bytes: std::sync::Arc<[u8]>, hash: u64 },
 }
 
 /// One status of a `diagnostic_msgs/DiagnosticArray`: a named component's health and readings.

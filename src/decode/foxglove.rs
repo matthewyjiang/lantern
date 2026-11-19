@@ -6,11 +6,11 @@
 use glam::{DQuat, DVec3};
 use prost::Message;
 
-use super::image;
 use super::points::{ColorChoice, Field, Num, Packed};
 use super::ros::unit;
+use super::{entities, image};
 use super::{DecodeError, Decoded};
-use crate::scene::{Annotation, PointsKind, Pose as ScenePose, Poses, Tracked, Transform};
+use crate::scene::{Annotation, Deletion, Entity, Geometry, PointsKind, Pose as ScenePose, Poses, SceneUpdate as Scene, Shape, Tracked, Transform};
 
 #[derive(Clone, PartialEq, Message)]
 struct Vector3 {
@@ -362,4 +362,216 @@ pub fn image_annotations(bytes: &[u8], _: &ColorChoice) -> Result<Decoded, Decod
         out.push(Annotation::Text { at: point2(t.position), text: t.text, size: t.font_size as f32, color, background: rgba(t.background_color) });
     }
     Ok(Decoded::Annotations(out))
+}
+
+#[derive(Clone, PartialEq, Message)]
+struct Duration {
+    #[prost(int64, tag = "1")]
+    seconds: i64,
+    #[prost(int32, tag = "2")]
+    nanos: i32,
+}
+
+#[derive(Clone, PartialEq, Message)]
+struct ArrowPrimitive {
+    #[prost(message, optional, tag = "1")]
+    pose: Option<Pose>,
+    #[prost(double, tag = "2")]
+    shaft_length: f64,
+    #[prost(double, tag = "3")]
+    shaft_diameter: f64,
+    #[prost(double, tag = "4")]
+    head_length: f64,
+    #[prost(double, tag = "5")]
+    head_diameter: f64,
+    #[prost(message, optional, tag = "6")]
+    color: Option<Color>,
+}
+
+/// `CubePrimitive` and `SpherePrimitive`: the same fields.
+#[derive(Clone, PartialEq, Message)]
+struct SizedPrimitive {
+    #[prost(message, optional, tag = "1")]
+    pose: Option<Pose>,
+    #[prost(message, optional, tag = "2")]
+    size: Option<Vector3>,
+    #[prost(message, optional, tag = "3")]
+    color: Option<Color>,
+}
+
+#[derive(Clone, PartialEq, Message)]
+struct CylinderPrimitive {
+    #[prost(message, optional, tag = "1")]
+    pose: Option<Pose>,
+    #[prost(message, optional, tag = "2")]
+    size: Option<Vector3>,
+    #[prost(double, tag = "3")]
+    bottom_scale: f64,
+    #[prost(double, tag = "4")]
+    top_scale: f64,
+    #[prost(message, optional, tag = "5")]
+    color: Option<Color>,
+}
+
+#[derive(Clone, PartialEq, Message)]
+struct LinePrimitive {
+    #[prost(int32, tag = "1")]
+    r#type: i32,
+    #[prost(message, optional, tag = "2")]
+    pose: Option<Pose>,
+    #[prost(double, tag = "3")]
+    thickness: f64,
+    #[prost(bool, tag = "4")]
+    scale_invariant: bool,
+    #[prost(message, repeated, tag = "5")]
+    points: Vec<Vector3>,
+    #[prost(message, optional, tag = "6")]
+    color: Option<Color>,
+    #[prost(message, repeated, tag = "7")]
+    colors: Vec<Color>,
+    #[prost(fixed32, repeated, tag = "8")]
+    indices: Vec<u32>,
+}
+
+#[derive(Clone, PartialEq, Message)]
+struct TriangleListPrimitive {
+    #[prost(message, optional, tag = "1")]
+    pose: Option<Pose>,
+    #[prost(message, repeated, tag = "2")]
+    points: Vec<Vector3>,
+    #[prost(message, optional, tag = "3")]
+    color: Option<Color>,
+    #[prost(message, repeated, tag = "4")]
+    colors: Vec<Color>,
+    #[prost(fixed32, repeated, tag = "5")]
+    indices: Vec<u32>,
+}
+
+#[derive(Clone, PartialEq, Message)]
+struct TextPrimitive {
+    #[prost(message, optional, tag = "1")]
+    pose: Option<Pose>,
+    #[prost(double, tag = "3")]
+    font_size: f64,
+    #[prost(bool, tag = "4")]
+    scale_invariant: bool,
+    #[prost(message, optional, tag = "5")]
+    color: Option<Color>,
+    #[prost(string, tag = "6")]
+    text: String,
+}
+
+#[derive(Clone, PartialEq, Message)]
+struct ModelPrimitive {
+    #[prost(message, optional, tag = "1")]
+    pose: Option<Pose>,
+    #[prost(message, optional, tag = "2")]
+    scale: Option<Vector3>,
+    #[prost(message, optional, tag = "3")]
+    color: Option<Color>,
+    #[prost(bool, tag = "4")]
+    override_color: bool,
+    #[prost(string, tag = "5")]
+    url: String,
+    #[prost(string, tag = "6")]
+    media_type: String,
+    #[prost(bytes = "vec", tag = "7")]
+    data: Vec<u8>,
+}
+
+#[derive(Clone, PartialEq, Message)]
+struct SceneEntity {
+    #[prost(string, tag = "2")]
+    frame_id: String,
+    #[prost(string, tag = "3")]
+    id: String,
+    #[prost(message, optional, tag = "4")]
+    lifetime: Option<Duration>,
+    #[prost(message, repeated, tag = "7")]
+    arrows: Vec<ArrowPrimitive>,
+    #[prost(message, repeated, tag = "8")]
+    cubes: Vec<SizedPrimitive>,
+    #[prost(message, repeated, tag = "9")]
+    spheres: Vec<SizedPrimitive>,
+    #[prost(message, repeated, tag = "10")]
+    cylinders: Vec<CylinderPrimitive>,
+    #[prost(message, repeated, tag = "11")]
+    lines: Vec<LinePrimitive>,
+    #[prost(message, repeated, tag = "12")]
+    triangles: Vec<TriangleListPrimitive>,
+    #[prost(message, repeated, tag = "13")]
+    texts: Vec<TextPrimitive>,
+    #[prost(message, repeated, tag = "14")]
+    models: Vec<ModelPrimitive>,
+}
+
+#[derive(Clone, PartialEq, Message)]
+struct SceneEntityDeletion {
+    #[prost(int32, tag = "2")]
+    r#type: i32,
+    #[prost(string, tag = "3")]
+    id: String,
+}
+
+#[derive(Clone, PartialEq, Message)]
+struct SceneUpdate {
+    #[prost(message, repeated, tag = "1")]
+    deletions: Vec<SceneEntityDeletion>,
+    #[prost(message, repeated, tag = "2")]
+    entities: Vec<SceneEntity>,
+}
+
+fn points(v: Vec<Vector3>) -> Vec<DVec3> {
+    v.into_iter().map(|p| vec3(Some(p))).collect()
+}
+
+fn colors(v: Vec<Color>) -> Vec<[f32; 4]> {
+    v.into_iter().map(|c| rgba(Some(c))).collect()
+}
+
+fn entity(e: SceneEntity) -> Result<Entity, DecodeError> {
+    let mut shapes = Vec::new();
+    for a in e.arrows {
+        let geometry = Geometry::Arrow { shaft_length: a.shaft_length, shaft_diameter: a.shaft_diameter, head_length: a.head_length, head_diameter: a.head_diameter };
+        shapes.push(Shape { pose: pose(a.pose), color: rgba(a.color), geometry });
+    }
+    for c in e.cubes {
+        shapes.push(Shape { pose: pose(c.pose), color: rgba(c.color), geometry: Geometry::Cube { size: vec3(c.size) } });
+    }
+    for s in e.spheres {
+        shapes.push(Shape { pose: pose(s.pose), color: rgba(s.color), geometry: Geometry::Sphere { size: vec3(s.size) } });
+    }
+    for c in e.cylinders {
+        let geometry = Geometry::Cylinder { size: vec3(c.size), bottom: c.bottom_scale, top: c.top_scale };
+        shapes.push(Shape { pose: pose(c.pose), color: rgba(c.color), geometry });
+    }
+    for l in e.lines {
+        let shape = entities::line(l.r#type.into(), pose(l.pose), l.thickness, l.scale_invariant, points(l.points), rgba(l.color), colors(l.colors), &l.indices)?;
+        shapes.extend(shape);
+    }
+    for t in e.triangles {
+        shapes.push(entities::triangles(pose(t.pose), points(t.points), rgba(t.color), colors(t.colors), &t.indices)?);
+    }
+    for t in e.texts {
+        shapes.push(entities::text(pose(t.pose), t.text, t.font_size, t.scale_invariant, rgba(t.color)));
+    }
+    for m in e.models {
+        shapes.push(entities::model(pose(m.pose), vec3(m.scale), rgba(m.color), m.override_color, m.url, m.media_type, m.data)?);
+    }
+    let lifetime = e.lifetime.and_then(|d| entities::lifetime(d.seconds, d.nanos.into()));
+    Ok(Entity { id: e.id, frame_id: e.frame_id, lifetime, shapes })
+}
+
+pub fn scene_update(bytes: &[u8], _: &ColorChoice) -> Result<Decoded, DecodeError> {
+    let m: SceneUpdate = parse(bytes)?;
+    let mut deletions = Vec::new();
+    for d in m.deletions {
+        deletions.push(match d.r#type {
+            0 => Deletion::Id(d.id),
+            1 => Deletion::All,
+            other => return Err(DecodeError::new(format!("deletion has unknown type {other}"))),
+        });
+    }
+    let entities = m.entities.into_iter().map(entity).collect::<Result<_, _>>()?;
+    Ok(Decoded::Objects(Scene { deletions, entities }))
 }

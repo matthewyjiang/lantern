@@ -12,7 +12,7 @@ export default defineConfig({
 		starlight({
 			title: 'Lantern',
 			description:
-				'A small RViz stand-in in Rust. Draws point clouds, TF, poses, a robot model and camera images from any Foxglove WebSocket server.',
+				'A small RViz stand-in in Rust. Draws point clouds, TF, poses, a robot model, objects and camera images from any Foxglove WebSocket server.',
 			logo: { src: './src/assets/lantern-mark.svg' },
 			favicon: '/favicon.svg',
 			social: [{ icon: 'github', label: 'GitHub', href: 'https://github.com/matthewyjiang/lantern' }],
@@ -26,7 +26,7 @@ export default defineConfig({
 				},
 				{
 					label: 'Guides',
-					items: ['guides/publishing', 'guides/robot-model', 'guides/layout', 'guides/settings'],
+					items: ['guides/publishing', 'guides/robot-model', 'guides/objects', 'guides/layout', 'guides/settings'],
 				},
 				{
 					label: 'Reference',

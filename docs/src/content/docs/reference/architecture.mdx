@@ -23,18 +23,20 @@ panels. The 3D view is rendered offscreen and composited into its panel.
 | --- | --- |
 | `src/source.rs` | The `Source` trait; `FoxgloveWs`, the WebSocket client thread (tungstenite): subscribes to what the app wants, reconnects |
 | `src/decode/` | The `(encoding, schema)` → decoder table; ROS CDR, Foxglove protobuf and JSON decoders; point field extraction; image decoding (`image.rs`) |
-| `src/scene.rs` | What gets drawn, independent of message types: clouds, transforms, poses, images, the TF tree |
-| `src/connection.rs` | One server: its source and what it has received (clouds, TF, poses, joints, images, text, stats), with pose expiry and trails |
-| `src/app.rs` | App state: opens and closes connections to match settings, resolves each panel's topics and subscribes to the union of what the panels show (`wanted`), loads the robot (file or description), derives the display. `State::v3()` gives the 3D panel's settings. Images are kept per topic shown and annotated per view. |
+| `src/scene.rs` | What gets drawn, independent of message types: clouds, transforms, poses, scene entities, images, the TF tree |
+| `src/connection.rs` | One server: its source and what it has received (clouds, TF, poses, scene entities, joints, images, text, stats), with pose and entity expiry, deletions and trails |
+| `src/app.rs` | App state: opens and closes connections to match settings, resolves each panel's topics and subscribes to the union of what the panels show (`wanted`), loads the robot (file or description) and the models objects name, derives the display. `State::v3()` gives the 3D panel's settings. Images are kept per topic shown and annotated per view. |
 | `src/annotate.rs` | Draws image annotations into the image on the CPU |
-| `src/robot/` | URDF parsing and forward kinematics (`urdf.rs`), STL and primitive meshes with smoothed normals (`mesh.rs`), loading and mesh path resolution (`mod.rs`) |
+| `src/robot/` | URDF parsing and forward kinematics (`urdf.rs`), loading a robot's visuals into one mesh (`mod.rs`) |
+| `src/mesh/` | Meshes: STL, glTF and GLB (`gltf.rs`), shapes, smoothed normals, mesh path resolution |
+| `src/objects.rs` | Scene entities and the layout's meshes as parts of one mesh, placed per frame, plus their lines and text |
 | `src/settings.rs` | `Settings`, saved to settings.json: the connections and the layout. Each panel type's settings: `View3dSettings`, `ImageSettings`, `DataSettings` |
 | `src/layout.rs` | The panel layout: the tree of panels (each with its settings), rows and columns, its file format and checks, the edits (split, close, show, swap, move a divider), presets and how they keep panel settings (`adopt`) |
 | `src/panels.rs` | Draws the layout: the tiled panels, the dividers, each panel's header (its drag handle, settings button and menu), dragging a panel, and the Image, Data and Topics panels |
 | `src/ui.rs` | The window: the top bar, the Settings page, and the overlays (menus, each panel's settings, `panel_settings`) mounted with `rune_kit::root`. The 3D panel with its overlays (status chip, image, text and stats cards) |
 | `src/camera.rs` | Orbit camera (REP 103, z up), reversed infinite depth |
 | `src/viewport.rs` | Rune `Compositor`: offscreen 3D pass blitted into an `El::effect` slot, GPU timer |
-| `src/viewport.wgsl` | Sky and grid, points (vertex-pulled quads), robot (lit meshes), lines, blit |
+| `src/viewport.wgsl` | Sky and grid, points (vertex-pulled quads), meshes (robot and objects, lit), lines, blit |
 | `src/main.rs` | Wiring, the source-to-app inbox, headless scenes |
 
 ## Add a message type

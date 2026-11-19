@@ -1,6 +1,6 @@
 ---
 title: Replay server
-description: scripts/serve.py serves recorded scans, joint states, a camera image and status topics, for testing Lantern without a robot.
+description: scripts/serve.py serves recorded scans, joint states, objects, a camera image and status topics, for testing Lantern without a robot.
 ---
 
 import { Tabs, TabItem } from '@astrojs/starlight/components';
@@ -43,6 +43,7 @@ Publishes ROS 2 messages with rclpy, and Lantern connects to the bridge.
 | `--cloud` | `table` (default; 460,400 points with intensity, plus two tracked objects and two markers), `rgbd` (307,200 points with RGB), `terrain` (1,366,408 points of airborne LiDAR), or `none`\* |
 | `--via` | `sdk` (default) or `ros` |
 | `--robot-pose` | `home` or `reach`: also publish fixed joint states for the KUKA Med 7. See [Robot model](/lantern/guides/robot-model/#try-it-with-the-med-7). |
+| `--objects` | A scene on `/scene`: a GLB object in the Med 7's gripper and shapes on the table. Publishes the gripper frame at the reach pose, so use it with `--robot-pose reach`. See [Objects](/lantern/guides/objects/). With `--via ros` it needs `ros-humble-foxglove-msgs`. |
 | `--joints` | `json` (default) or `proto`\* (`foxglove.JointStates`) |
 | `--robot-description PATH`\* | Publish this URDF on `/robot_description` |
 | `--camera`\* | A camera image with annotations |
