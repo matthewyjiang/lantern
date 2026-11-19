@@ -3,27 +3,21 @@ title: Settings
 description: The Settings page, each panel's own settings, the settings.json file they're saved in, and the command-line flags.
 ---
 
-Settings are in two places. The slider button at the top of the side panel opens the **Settings**
-page, which has what's app-wide: **Connections**, **Topics** and **Layout**. What a panel shows is
-set on the panel itself, in its [panel settings](#panel-settings). Changes apply as you make them
-and are saved right away. **Done** closes the page.
+The slider button at the right of the top bar opens the **Settings** page beside the panels:
+**Connections**, **Topics** and [**Layout**](/lantern/guides/layout/).
 
-![The Settings page next to the viewport: the connection, the read-only topic list with each topic's kind, schema and encoding, and the Layout section.](../../../../screenshots/sdk-table-settings.png)
-
-The **Layout** section is covered in [Panels and layouts](/lantern/guides/layout/).
+![The Settings page beside the panels: one connection, and the topic list with each topic's kind, schema and encoding.](../../../../screenshots/sdk-table-settings.png)
 
 ## Connections
 
-The [servers](/lantern/connect/#servers) to read. Each row shows the server's state: green with its
-name when connected, amber while connecting, red with the error when it can't connect. Type a URL
-and press **Add** to add one.
+Each [server](/lantern/connect/#servers) is green with its name when connected, amber while
+connecting, and red with the error when it can't connect.
 
 ## Topics
 
-Every topic the servers advertise, with its schema, encoding, and a badge for what Lantern draws
-from it. With several servers, topics are grouped by server. The list is read-only: which topics
-are drawn is set in each panel's settings. The [Topics panel](/lantern/guides/layout/#panels)
-shows the same list.
+Each advertised topic has its schema, encoding, and a badge for what Lantern draws from it. With
+several servers, topics are grouped by server. The list is read-only: which topics are drawn is set
+in each panel's settings.
 
 | Badge | Used by |
 | --- | --- |
@@ -37,21 +31,15 @@ shows the same list.
 | **No decoder** | Nothing. See [Supported topics](/lantern/reference/topics/). |
 
 Where a panel shows one topic, **Auto** (the default) uses the first one advertised. New topics
-start switched on. Lantern subscribes only to topics some panel shows.
-
-If a message fails to decode, the error shows in red under its topic and the topic keeps its last
-good message.
+start switched on. If a message fails to decode, the error shows in red under its topic and the
+topic keeps its last good message.
 
 ## Panel settings
 
-Each 3D, Image and Data panel has a slider button at its top right; on the 3D view it's next to
-the Drag, Shift-drag and Scroll hints. It opens that panel's settings under it, and stays lit while
-they're open. Press it again, press outside, or press Escape to close them. A topic or frame
-setting shows its value; press it to list the choices. The Topics panel has no settings.
+The slider button in a 3D, Image or Data panel's header opens its settings. Press it again, press
+outside, or press Escape to close them. The Topics panel has no settings.
 
 ### 3D view
-
-The side panel has the 3D view's quick controls. Its settings have everything, in tabs:
 
 | Tab | Settings |
 | --- | --- |
@@ -62,7 +50,7 @@ The side panel has the 3D view's quick controls. Its settings have everything, i
 | **Cards** | The camera image card with its topic and annotations, and the text and stats cards with a switch per topic |
 
 **Fixed frame** is the frame everything is drawn in. **Auto** shows what it picked, for example
-`Auto (world)`: the root of the TF tree that holds the point cloud's frame, or a pose topic's frame
+`Auto · world`: the root of the TF tree that holds the point cloud's frame, or a pose topic's frame
 when there's no cloud. With only a robot, see [Placement](/lantern/guides/robot-model/#placement).
 A frame or topic you pick stays selected even when the data doesn't have it; it's listed as
 `not seen yet` or `not advertised`.
@@ -81,22 +69,21 @@ A frame or topic you pick stays selected even when the data doesn't have it; it'
 colour map over their 1st to 99th percentile, so a few outliers don't wash out the rest. The legend
 at the bottom left of the viewport shows the field and its range.
 
-Hiding the point cloud also unsubscribes from it, which saves bandwidth with large clouds.
+Hiding the point cloud also unsubscribes from it.
 
 **Expire after** removes a pose its topic hasn't sent again within that time. **Trail** draws where
 each pose has been over that time.
 
-![The table from above, 4 s after connecting, twice: with Expire after on Never (left), a pose sent only once (/once) is still drawn; on 2 s (right) it has expired, while the poses still being sent remain.](../../../../screenshots/pose-expiry.png)
+![The table from above 4 s after connecting: with Expire after on Never (left), the pose sent once on /once is still drawn; on 2 s (right) it has expired.](../../../../screenshots/pose-expiry.png)
 
 **Cards.** Without an Image panel in the layout, the 3D view draws the camera image as a card in its
 lower right corner, set like an Image panel. Without a Data panel, it draws text and stats cards at
-its top right, set like a Data panel. When the layout has the panel, the **Cards** tab says so instead.
+its top right, set like a Data panel. With both panels in the layout, there's no **Cards** tab.
 
 ### Image
 
-**Image topic** is **Auto** or a topic. **Annotations** has a switch per annotation topic drawn over
-the image. Each Image panel has its own, so two panels can show two cameras, or the same camera
-with different annotations.
+**Image topic** picks the camera, and **Annotations** has a switch per annotation topic drawn over
+it.
 
 ### Data
 
@@ -105,8 +92,7 @@ with different annotations.
 ## settings.json
 
 Settings are stored in `$XDG_CONFIG_HOME/lantern/settings.json` (by default
-`~/.config/lantern/settings.json`). You can edit it while Lantern is closed. It holds the servers
-and the layout. This is the default file:
+`~/.config/lantern/settings.json`). You can edit it while Lantern is closed. The default:
 
 ```json title="~/.config/lantern/settings.json"
 {
@@ -116,27 +102,7 @@ and the layout. This is the default file:
 ```
 
 Each panel's settings sit beside its `"panel"` key, in the
-[layout format](/lantern/guides/layout/#layout-files). Here, the 3D view has a robot and two Image
-panels show the two cameras, the right one without its detections:
-
-```json title="~/.config/lantern/settings.json"
-{
-  "connections": ["ws://localhost:8765"],
-  "layout": {
-    "row": [
-      { "panel": "3d", "weight": 2, "robot": { "urdf": "/path/arm.urdf" } },
-      {
-        "column": [
-          { "panel": "image", "topic": "/cam/left" },
-          { "panel": "image", "topic": "/cam/right", "hidden": ["/cam/right/detections"] }
-        ]
-      }
-    ]
-  }
-}
-```
-
-Only values that differ from the defaults are written, and a missing key takes its default.
+[layout format](/lantern/guides/layout/#layout-files).
 
 Every key is checked. If the file doesn't parse (an unknown key, a wrong type, a mistake in the
 layout), Lantern prints why on stderr, copies the file to `settings.json.bak` next to it (or
@@ -183,11 +149,10 @@ A `topics` panel takes no keys.
 
 ### Files from earlier versions
 
-Lantern doesn't convert old files. A `settings.json` with the view settings at the top level
-(`robot_urdf`, `cloud_topic`, `hidden_topics`, `show_image`, ...) doesn't parse, so it's backed up
-and Lantern starts with the defaults. Redo your settings in the app, or edit the file into the
-shape above: for example, `"robot_urdf": "/path/arm.urdf"` becomes
-`"robot": { "urdf": "/path/arm.urdf" }` on the `3d` panel.
+Lantern doesn't convert old files. One with the view settings at the top level (`robot_urdf`,
+`cloud_topic`, `hidden_topics`, `show_image`, ...) doesn't parse, so it's backed up and Lantern
+starts with the defaults. Redo your settings in the app, or move each into its panel:
+`"robot_urdf": "/path/arm.urdf"` becomes `"robot": { "urdf": "/path/arm.urdf" }` on the `3d` panel.
 
 ## Command line
 

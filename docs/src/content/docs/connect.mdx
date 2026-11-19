@@ -3,21 +3,18 @@ title: Connect a source
 description: Point Lantern at foxglove_bridge on ROS 2, at your own program on a Foxglove SDK, or at the replay server for testing without a robot.
 ---
 
-Lantern is a client of the
-[Foxglove WebSocket protocol](https://github.com/foxglove/foxglove-sdk/blob/main/docs/spec/websocket/README.md).
-Anything that serves it is a source: foxglove_bridge on ROS 2, or a program using a Foxglove SDK.
-Lantern only subscribes to the topics it's drawing. If the view stays empty, the
+Lantern reads any server of the
+[Foxglove WebSocket protocol](https://github.com/foxglove/foxglove-sdk/blob/main/docs/spec/websocket/README.md):
+foxglove_bridge on ROS 2, or a program using a Foxglove SDK. If the view stays empty, the
 [status chip](/lantern/getting-started/#the-status-chip) says why.
 
 ## Servers
 
 The default server is `ws://localhost:8765`, the default port of foxglove_bridge and the SDKs. To
-add another, open **Settings → Connections**, type its URL (for example `ws://192.168.1.20:8765`)
-and press **Add** (or Enter). Lantern reads every server in the list at once, so a robot's bridge and an app
-on another machine can feed the same view. The list is saved with your
-[settings](/lantern/guides/settings/).
+add another, type its URL (for example `ws://192.168.1.20:8765`) in **Settings → Connections** and
+press **Add** or Enter. Lantern reads every server in the list at once.
 
-![Two servers feeding one view: the table scan, text and stats from one, the arm and a tracked pose with its trail from the other; the side panel says 2 of 2 servers connected.](../../../screenshots/two-servers.png)
+![The table scan, text and stats from one server, the arm and a tracked pose from another; the top bar says 2 of 2 servers connected.](../../../screenshots/two-servers.png)
 
 [`--connect`](/lantern/guides/settings/#command-line) replaces the list for one run:
 
@@ -42,23 +39,21 @@ sudo apt install ros-$ROS_DISTRO-foxglove-bridge
 ros2 run foxglove_bridge foxglove_bridge
 ```
 
-The bridge forwards ROS 2 messages in CDR, and Lantern decodes them itself, so the machine running
-Lantern doesn't need ROS. The bridge listens on every interface on port 8765. Add
-`--ros-args -p address:=127.0.0.1` to keep it on loopback (for an SSH tunnel), or
+The bridge forwards ROS 2 messages in CDR, and Lantern decodes
+[the types it supports](/lantern/reference/topics/) itself. The bridge listens on every interface
+on port 8765. Add `--ros-args -p address:=127.0.0.1` to keep it on loopback (for an SSH tunnel), or
 `-p port:=9090` to change the port. Lantern speaks both the newer SDK-based bridge's subprotocol
 (`foxglove.sdk.v1`) and the older one (`foxglove.websocket.v1`).
 
-![The Settings page listing topics from foxglove_bridge: PointCloud2, TFMessage, PoseArray and Odometry in cdr, and the bridge's own topics marked No decoder.](../../../screenshots/ros-bridge-settings.png)
-
-[Supported topics](/lantern/reference/topics/) lists the message types Lantern reads.
+![Topics from foxglove_bridge in Settings: PointCloud2, TFMessage, PoseArray and Odometry in cdr, and the bridge's own topics marked No decoder.](../../../screenshots/ros-bridge-settings.png)
 
 ## Your own program
 
-A program that doesn't use ROS can serve the protocol itself with a
-[Foxglove SDK](https://github.com/foxglove/foxglove-sdk) (Python, C++ or Rust).
-[Publish from your code](/lantern/guides/publishing/) shows how.
+Without ROS, serve the protocol from your program with a
+[Foxglove SDK](https://github.com/foxglove/foxglove-sdk) (Python, C++ or Rust):
+see [Publish from your code](/lantern/guides/publishing/).
 
 ## No robot: the replay server
 
 [The replay server](/lantern/reference/replay-server/) in the repository serves recorded scans,
-a robot's joint states, a camera image and status topics, for trying Lantern without a robot.
+a robot's joint states, a camera image and status topics.

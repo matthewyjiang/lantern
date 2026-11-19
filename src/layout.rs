@@ -11,11 +11,12 @@
 //! A panel's settings sit beside `panel`, and only those that differ from the defaults are
 //! written; a setting left out takes its default. The file is checked when it's read
 //! (`RawNode` → `Layout`), so every `Layout` in the app is valid: its weights are positive, its branches have children, its panels' settings
-//! parse, and it has at most one 3D panel. The edits (`split`, `close`, `show`, `move_divider`)
-//! keep it that way. They address a node by its path: the child index to take at each branch,
+//! parse, and it has at most one 3D panel. The edits (`insert`, `close`, `show`, `swap`,
+//! `move_divider`) keep it that way. They address a node by its path: the child index to take at each branch,
 //! from the root.
 
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -99,17 +100,47 @@ pub enum Dir {
     Column,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+/// A panel's identity while the app runs, so it can be followed as it moves around the layout
+/// (and animate as itself). Not saved: every layout read from a file gets new ones.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PaneId(u64);
+
+impl PaneId {
+    fn new() -> PaneId {
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        PaneId(NEXT.fetch_add(1, Ordering::Relaxed))
+    }
+}
+
+impl std::fmt::Display for PaneId {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+/// Layouts are equal when they tile the same panels with the same settings, whatever their
+/// panes' identities.
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(try_from = "RawNode", into = "RawNode")]
 pub enum Layout {
-    Panel(Panel),
+    Panel(PaneId, Panel),
     /// Two or more children, each with its weight.
     Split { dir: Dir, children: Vec<(f32, Layout)> },
 }
 
+impl PartialEq for Layout {
+    fn eq(&self, other: &Layout) -> bool {
+        match (self, other) {
+            (Layout::Panel(_, a), Layout::Panel(_, b)) => a == b,
+            (Layout::Split { dir: d1, children: c1 }, Layout::Split { dir: d2, children: c2 }) => d1 == d2 && c1 == c2,
+            _ => false,
+        }
+    }
+}
+
 impl Default for Layout {
     fn default() -> Self {
-        Layout::Panel(Panel::new(PanelKind::View3d))
+        leaf(PanelKind::View3d)
     }
 }
 
@@ -126,7 +157,7 @@ pub const PRESETS: [Preset; 3] = [
 ];
 
 fn leaf(kind: PanelKind) -> Layout {
-    Layout::Panel(Panel::new(kind))
+    Layout::pane(Panel::new(kind))
 }
 
 /// The 3D view, with the image to its right.
@@ -145,7 +176,8 @@ impl Layout {
         PRESETS.iter().find(|p| p.name == name).map(|p| (p.layout)())
     }
 
-    /// The preset `name`, its panels with the settings of `current`'s same-kind panels.
+    /// The preset `name`, its panels taking the identities and settings of `current`'s same-kind
+    /// panels (`adopt`).
     pub fn preset_keeping(name: &str, current: &Layout) -> Option<Layout> {
         let mut preset = Layout::preset(name)?;
         preset.adopt(current);
@@ -153,11 +185,15 @@ impl Layout {
     }
 
     /// A preset by name, its panels taking the settings of `current`'s (`adopt`), else the
-    /// layout file at that path as it is.
+    /// layout file at that path as it is, its panels taking only their identities. A panel that
+    /// keeps its identity moves to its new place rather than being replaced.
     pub fn named_or_file(value: &str, current: &Layout) -> Result<Layout, String> {
         match Layout::preset_keeping(value, current) {
             Some(preset) => Ok(preset),
-            None => Layout::load(Path::new(value)),
+            None => Layout::load(Path::new(value)).map(|mut file| {
+                file.pair_with(current, |(id, _), (old, _)| *id = old);
+                file
+            }),
         }
     }
 
@@ -178,15 +214,37 @@ impl Layout {
     /// Every panel, depth first (left to right, top to bottom).
     pub fn panels(&self) -> Vec<&Panel> {
         match self {
-            Layout::Panel(p) => vec![p],
+            Layout::Panel(_, p) => vec![p],
             Layout::Split { children, .. } => children.iter().flat_map(|(_, c)| c.panels()).collect(),
         }
     }
 
     pub fn panels_mut(&mut self) -> Vec<&mut Panel> {
+        self.panes_mut().into_iter().map(|(_, p)| p).collect()
+    }
+
+    fn panes(&self) -> Vec<(PaneId, &Panel)> {
         match self {
-            Layout::Panel(p) => vec![p],
-            Layout::Split { children, .. } => children.iter_mut().flat_map(|(_, c)| c.panels_mut()).collect(),
+            Layout::Panel(id, p) => vec![(*id, p)],
+            Layout::Split { children, .. } => children.iter().flat_map(|(_, c)| c.panes()).collect(),
+        }
+    }
+
+    fn panes_mut(&mut self) -> Vec<(&mut PaneId, &mut Panel)> {
+        match self {
+            Layout::Panel(id, p) => vec![(id, p)],
+            Layout::Split { children, .. } => children.iter_mut().flat_map(|(_, c)| c.panes_mut()).collect(),
+        }
+    }
+
+    /// Calls `f` with each of this layout's panes and `from`'s pane of the same kind, in order.
+    /// Panes `from` has no match for are left out.
+    fn pair_with(&mut self, from: &Layout, mut f: impl FnMut((&mut PaneId, &mut Panel), (PaneId, &Panel))) {
+        for kind in PanelKind::ALL {
+            let old = from.panes().into_iter().filter(|(_, p)| p.kind() == kind);
+            for (new, old) in self.panes_mut().into_iter().filter(|(_, p)| p.kind() == kind).zip(old) {
+                f(new, old);
+            }
         }
     }
 
@@ -207,16 +265,23 @@ impl Layout {
 
     /// The panel at `path`, if there's one there.
     pub fn panel(&self, path: &[usize]) -> Option<&Panel> {
+        match self.at(path)? {
+            Layout::Panel(_, p) => Some(p),
+            Layout::Split { .. } => None,
+        }
+    }
+
+    fn at(&self, path: &[usize]) -> Option<&Layout> {
         match (path, self) {
-            ([], Layout::Panel(p)) => Some(p),
-            ([i, rest @ ..], Layout::Split { children, .. }) => children.get(*i)?.1.panel(rest),
+            ([], node) => Some(node),
+            ([i, rest @ ..], Layout::Split { children, .. }) => children.get(*i)?.1.at(rest),
             _ => None,
         }
     }
 
     pub fn panel_mut(&mut self, path: &[usize]) -> Option<&mut Panel> {
         match self.at_mut(path)? {
-            Layout::Panel(p) => Some(p),
+            Layout::Panel(_, p) => Some(p),
             Layout::Split { .. } => None,
         }
     }
@@ -224,7 +289,7 @@ impl Layout {
     /// The path of the first panel showing `kind`.
     pub fn find(&self, kind: PanelKind) -> Option<Vec<usize>> {
         match self {
-            Layout::Panel(p) => (p.kind() == kind).then(Vec::new),
+            Layout::Panel(_, p) => (p.kind() == kind).then(Vec::new),
             Layout::Split { children, .. } => children.iter().enumerate().find_map(|(i, (_, c))| {
                 let mut path = c.find(kind)?;
                 path.insert(0, i);
@@ -252,18 +317,19 @@ impl Layout {
         if kind == PanelKind::View3d
             && let Some(there) = self.find(kind)
         {
-            let a = std::mem::take(self.at_mut(path).expect("found above"));
-            let b = std::mem::replace(self.at_mut(&there).expect("found above"), a);
-            *self.at_mut(path).expect("found above") = b;
+            self.swap(path, &there);
         } else {
             *self.panel_mut(path).expect("found above") = Panel::new(kind);
         }
     }
 
-    /// Splits the panel at `path` in two along `dir`, the new panel after it with half its
-    /// space. The new panel shows the first kind the layout doesn't have yet, or Data.
-    pub fn split(&mut self, path: &[usize], dir: Dir) {
-        let new = leaf(PanelKind::ALL.into_iter().find(|k| !self.has(*k)).unwrap_or(PanelKind::Data));
+    /// Puts `panel` after the panel at `path` in `dir` (to its right, or below it), with half its
+    /// space. A second 3D panel isn't added.
+    pub fn insert(&mut self, path: &[usize], dir: Dir, panel: Panel) {
+        if panel.kind() == PanelKind::View3d && self.has(PanelKind::View3d) {
+            return;
+        }
+        let new = Layout::pane(panel);
         // In a branch of the same direction, the new panel is a sibling.
         if let Some((&i, parent)) = path.split_last()
             && let Some(Layout::Split { dir: d, children }) = self.at_mut(parent)
@@ -274,9 +340,45 @@ impl Layout {
             children.insert(i + 1, (children[i].0, new));
             return;
         }
-        if let Some(node @ Layout::Panel(_)) = self.at_mut(path) {
-            let old = std::mem::take(node);
+        if let Some(node @ Layout::Panel(..)) = self.at_mut(path) {
+            let old = std::mem::replace(node, Layout::HOLE);
             *node = Layout::Split { dir, children: vec![(1.0, old), (1.0, new)] };
+        }
+    }
+
+    /// Exchanges the panels at `a` and `b`, each with its settings and identity; the tiling
+    /// stays.
+    pub fn swap(&mut self, a: &[usize], b: &[usize]) {
+        if a == b || self.panel(a).is_none() || self.panel(b).is_none() {
+            return;
+        }
+        let first = std::mem::replace(self.at_mut(a).expect("found above"), Layout::HOLE);
+        let second = std::mem::replace(self.at_mut(b).expect("found above"), first);
+        *self.at_mut(a).expect("found above") = second;
+    }
+
+    /// The path of the pane `id`, if the layout has it.
+    pub fn path_of(&self, id: PaneId) -> Option<Vec<usize>> {
+        self.paths().into_iter().find(|p| matches!(self.at(p), Some(Layout::Panel(pane, _)) if *pane == id))
+    }
+
+    /// What a node holds while an edit moves it out, briefly: no pane, so no identity used up.
+    const HOLE: Layout = Layout::Split { dir: Dir::Row, children: Vec::new() };
+
+    fn pane(panel: Panel) -> Layout {
+        Layout::Panel(PaneId::new(), panel)
+    }
+
+    /// Every panel's path, in the order of `panels`.
+    pub fn paths(&self) -> Vec<Vec<usize>> {
+        match self {
+            Layout::Panel(..) => vec![Vec::new()],
+            Layout::Split { children, .. } => children.iter().enumerate().flat_map(|(i, (_, c))| {
+                c.paths().into_iter().map(move |mut p| {
+                    p.insert(0, i);
+                    p
+                })
+            }).collect(),
         }
     }
 
@@ -313,16 +415,15 @@ impl Layout {
         }
     }
 
-    /// Gives this layout's panels the settings of `from`'s panels of the same kind, in order:
-    /// a preset picked over a layout keeps its robot, its image topics, ... Panels `from` has no
-    /// match for keep their own.
+    /// Gives this layout's panels the identities and settings of `from`'s panels of the same
+    /// kind, in order: a preset picked over a layout keeps its robot, its image topics, ... and
+    /// the panels it keeps move rather than being replaced. Panels `from` has no match for keep
+    /// their own.
     pub fn adopt(&mut self, from: &Layout) {
-        for kind in PanelKind::ALL {
-            let old = from.panels().into_iter().filter(|p| p.kind() == kind);
-            for (new, old) in self.panels_mut().into_iter().filter(|p| p.kind() == kind).zip(old) {
-                *new = old.clone();
-            }
-        }
+        self.pair_with(from, |(id, panel), (old_id, old)| {
+            *id = old_id;
+            *panel = old.clone();
+        });
     }
 
     /// Gives each panel the settings of the same-kind panel in `after`, in order, where those
@@ -344,7 +445,7 @@ impl Layout {
     /// their settings.
     pub fn same_tiling(&self, other: &Layout) -> bool {
         match (self, other) {
-            (Layout::Panel(a), Layout::Panel(b)) => a.kind() == b.kind(),
+            (Layout::Panel(_, a), Layout::Panel(_, b)) => a.kind() == b.kind(),
             (Layout::Split { dir: d1, children: c1 }, Layout::Split { dir: d2, children: c2 }) => {
                 d1 == d2 && c1.len() == c2.len() && c1.iter().zip(c2).all(|((w1, a), (w2, b))| w1 == w2 && a.same_tiling(b))
             }
@@ -387,7 +488,7 @@ impl RawNode {
     fn of(layout: Layout, weight: f32) -> RawNode {
         let weight = (weight != 1.0).then_some(weight);
         match layout {
-            Layout::Panel(p) => {
+            Layout::Panel(_, p) => {
                 let settings = match &p {
                     Panel::View3d(v) => non_default(&**v),
                     Panel::Image(i) => non_default(i),
@@ -418,7 +519,7 @@ impl RawNode {
                     let known = PanelKind::ALL.map(PanelKind::id).join(", ");
                     format!("{at}: no panel called \"{id}\" (the panels are {known})")
                 })?;
-                Layout::Panel(panel(kind, self.settings, at)?)
+                Layout::pane(panel(kind, self.settings, at)?)
             }
             (None, Some(children), None) => {
                 no_settings(&self.settings, at)?;
@@ -547,17 +648,33 @@ mod tests {
     }
 
     #[test]
-    fn splitting_adds_a_sibling_or_a_branch() {
+    fn inserting_adds_a_sibling_or_a_branch() {
         let mut l = Layout::default();
-        l.split(&[], Dir::Row);
+        l.insert(&[], Dir::Row, Panel::new(Image));
         assert_eq!(l, row(vec![(1.0, leaf(View3d)), (1.0, leaf(Image))]));
-        // Along the branch: a sibling, sharing the split panel's space.
-        l.split(&[1], Dir::Row);
-        assert_eq!(l, row(vec![(1.0, leaf(View3d)), (0.5, leaf(Image)), (0.5, leaf(Data))]));
+        // Along the branch: a sibling after it, sharing the panel's space.
+        l.insert(&[0], Dir::Row, Panel::new(Data));
+        assert_eq!(l, row(vec![(0.5, leaf(View3d)), (0.5, leaf(Data)), (1.0, leaf(Image))]));
         // Across it: a branch in the panel's place.
-        l.split(&[0], Dir::Column);
+        l.insert(&[0], Dir::Column, Panel::new(Topics));
         let Layout::Split { children, .. } = &l else { panic!() };
-        assert_eq!(children[0], (1.0, column(vec![(1.0, leaf(View3d)), (1.0, leaf(Topics))])));
+        assert_eq!(children[0], (0.5, column(vec![(1.0, leaf(View3d)), (1.0, leaf(Topics))])));
+        // Still one 3D view.
+        let before = l.clone();
+        l.insert(&[2], Dir::Column, Panel::new(View3d));
+        assert_eq!(l, before);
+    }
+
+    // Swapping exchanges two panels with their settings and identities; the tiling stays.
+    #[test]
+    fn swapping_exchanges_panels_in_place() {
+        let mut l = parse(r#"{"row": [{"panel": "3d", "grid": false, "weight": 2}, {"column": [{"panel": "image", "topic": "/a"}, {"panel": "data"}]}]}"#).unwrap();
+        let ids = |l: &Layout| l.paths().iter().map(|p| match l.at(p) { Some(Layout::Panel(id, _)) => *id, _ => unreachable!() }).collect::<Vec<_>>();
+        let before = ids(&l);
+        l.swap(&[0], &[1, 1]);
+        assert_eq!(l, parse(r#"{"row": [{"panel": "data", "weight": 2}, {"column": [{"panel": "image", "topic": "/a"}, {"panel": "3d", "grid": false}]}]}"#).unwrap());
+        assert_eq!(ids(&l), [before[2], before[1], before[0]]);
+        assert_eq!(l.path_of(before[0]), Some(vec![1, 1]));
     }
 
     #[test]
@@ -604,6 +721,8 @@ mod tests {
         assert!(l.same_tiling(&Layout::preset("dashboard").unwrap()));
         assert_eq!(l.view3d().unwrap().robot.urdf, "arm.urdf");
         assert_eq!(l.panel(&[1, 0]), current.panel(&[0]));
+        // The panels it keeps are the same panes, moved.
+        assert_eq!(l.path_of(current.panes()[0].0), Some(vec![1, 0]));
     }
 
     fn weights(l: &Layout) -> Vec<f32> {

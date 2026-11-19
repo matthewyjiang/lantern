@@ -3,14 +3,11 @@ title: Panels and layouts
 description: Split the window into panels, choose what each one shows, and save the layout to a file.
 ---
 
-The area beside the side panel is a layout of panels. It starts as a single 3D view. You can split
-it, choose what each panel shows, and resize panels. Each panel keeps its own settings in the
-layout. The layout is saved with your settings, and you can also save it to a file and load it
-with `--layout`.
+The window under the top bar is a layout of panels, starting as a single 3D view. Each panel keeps
+its own settings in the layout. The layout is saved with your settings, and can also be saved to a
+file and loaded with `--layout`.
 
-![Three panels: the 3D view of a table scan on the left, the camera image with its annotations at the top right, and a Data panel with three statuses and a text message under it.](../../../../screenshots/layout-dashboard.png)
-
-This is the `dashboard` preset (`--layout dashboard`).
+![The dashboard preset: the 3D view of a table scan on the left, the annotated camera image at the top right, and a Data panel with three statuses and a text message under it.](../../../../screenshots/layout-dashboard.png)
 
 ## Panels
 
@@ -21,32 +18,31 @@ This is the `dashboard` preset (`--layout dashboard`).
 | **Data** | `data` | Stats topics' statuses, then text topics' newest messages |
 | **Topics** | `topics` | Every advertised topic, the list from [Settings → Topics](/lantern/guides/settings/#topics) |
 
-A layout has at most one 3D view; the other panels can appear more than once. The slider button at
-the top right of a 3D, Image or Data panel opens its [settings](/lantern/guides/settings/#panel-settings):
-what it draws and from which topics. Two Image panels can show two cameras, or the same camera with
-different annotations.
-
-Without an Image panel, the camera image is drawn as a card in the 3D view's corner. Without a Data
-panel, so are the text and stats. Adding the panel moves them out of the 3D view. The cards are set
-in the 3D view's settings, under **Cards**.
+A layout has at most one 3D view; the other panels can appear more than once, so two Image panels
+can show two cameras, or the same camera with different annotations. Without an Image or Data
+panel, the 3D view draws the image, text and stats as [cards](/lantern/guides/settings/#3d-view).
 
 ## Edit the layout
 
-Drag the gap between two panels to resize them, at any time.
+![The 3D view's menu open, with the Split right submenu of panel types and 3D view greyed out.](../../../../screenshots/layout-menu.png)
 
-For anything else, press the tiles button at the top of the side panel, or turn on **Edit layout**
-in **Settings → Layout**. Each panel then shows its controls:
+Point at a panel to show its header: its name, its
+[settings](/lantern/guides/settings/#panel-settings) button and its **⋯** menu, which has:
 
-![The same three panels dimmed, each with a row of four panel names (its own highlighted) above Split right, Split down and Close buttons.](../../../../screenshots/layout-edit.png)
+- **Reset view** and **Top down**, on the 3D view only.
+- **Split right** and **Split down**, each with a submenu of panel types: the new panel takes half
+  of this one's space, with that type's default settings. **3D view** is greyed out when the layout
+  already has one.
+- **Show** changes what the panel shows, with the new type's default settings. Picking **3D view**
+  where another panel has it swaps the two, each with its settings.
+- **Close** removes the panel; its neighbours take the space. The last panel can't be closed.
 
-- The panel names set what the panel shows. A panel given a new type starts with that type's
-  default settings. Picking **3D view** where another panel has it swaps the two, each with its
-  settings.
-- **Split right** and **Split down** halve the panel. The new panel shows the first type the layout
-  doesn't have yet, with default settings.
-- **Close** removes the panel and its neighbours take the space. The last panel can't be closed.
+Drag a panel by its name to move it: it swaps places with each panel it passes over, each keeping
+its settings. Let go to drop it, or press Escape to put everything back.
 
-Press the tiles button again when you're done. Changes are saved as you make them.
+![The 3D view held over the Data panel, the two swapping places.](../../../../screenshots/layout-drag.png)
+
+Drag the gap between two panels to resize them.
 
 ## Presets
 
@@ -58,10 +54,9 @@ Press the tiles button again when you're done. Changes are saved as you make the
 | `camera` | The 3D view, with the image on the right |
 | `dashboard` | The 3D view, with the image above a Data panel on the right |
 
-Picking a preset keeps the settings of the panels it has in common with the current layout, matched
-by type in order: choosing `camera` keeps your robot. `--layout` with a preset name keeps the saved
-layout's panel settings the same way. A preset is highlighted when the tiling matches, whatever the
-panels' settings.
+Picking a preset carries over the settings of matching panels from the current layout, matched by
+type in order: choosing `camera` keeps your robot. A preset is highlighted when the tiling matches,
+whatever the panels' settings.
 
 ## Layout files
 
@@ -83,17 +78,13 @@ A layout file is JSON. Each node is a panel, or a `row` or `column` of nodes:
 
 - `panel` is `3d`, `image`, `data` or `topics`.
 - `row` places nodes left to right; `column` stacks them top to bottom.
-- `weight` is the node's share of its row or column, 1 by default. Here the 3D view is twice as
-  wide as the column beside it.
+- `weight` is the node's share of its row or column, 1 by default.
 - The other keys beside `panel` are its settings, listed in
-  [Panel keys](/lantern/guides/settings/#panel-keys). Here the 3D view draws a robot, and the two
-  Image panels show two cameras, the right one without its detections. A key left out takes its
-  default, and saving writes only the settings that differ from the defaults.
+  [Panel keys](/lantern/guides/settings/#panel-keys). A key left out takes its default, and saving
+  writes only the settings that differ from the defaults.
 
-To save the current layout, type a path into **Layout file** in **Settings → Layout** and press
-**Save**. **Load** reads a file or a preset name. A file is used as it is, with its panels'
-settings; a preset keeps the current panels' settings, as above. To start with a layout for one
-run:
+To save the layout, type a path into **Layout file** in **Settings → Layout** and press **Save**.
+**Load** reads a file, used as it is, or a preset name. For one run:
 
 ```sh
 lantern --layout layout.json
@@ -101,12 +92,10 @@ lantern --layout layout.json
 
 A name that matches a preset picks the preset, so write `./camera` for a file named `camera`.
 
-A file with a mistake isn't loaded, and Lantern says where the mistake is, for example
+A file with a mistake isn't loaded, and the error says where, for example
 `layout.row[1]: no panel called "plot" (the panels are 3d, image, data, topics)`. A bad setting
 gives ``layout.row[1]: invalid type: integer `3`, expected a string``, or
 ``layout: unknown field `size`, expected one of …``. With `--layout` Lantern prints the error and
 exits; with **Load** it shows the error and keeps the current layout.
 
 The `layout` key of [`settings.json`](/lantern/guides/settings/#settingsjson) uses the same format.
-A mistake there stops the whole file from loading.
-To add a panel type, see [Add a panel type](/lantern/reference/architecture/#add-a-panel-type).

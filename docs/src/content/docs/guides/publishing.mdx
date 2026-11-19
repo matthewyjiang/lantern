@@ -3,11 +3,9 @@ title: Publish from your code
 description: Send point clouds, transforms, poses, joint states, camera images and status to Lantern from your own program with a Foxglove SDK. No ROS needed.
 ---
 
-Your program can feed Lantern directly by serving the
-[Foxglove WebSocket protocol](https://github.com/foxglove/foxglove-sdk/blob/main/docs/spec/websocket/README.md)
-with a [Foxglove SDK](https://github.com/foxglove/foxglove-sdk) (Python, C++ or Rust). The examples
-here use the [Python SDK](https://pypi.org/project/foxglove-sdk/). If your stack already runs ROS 2,
-use [foxglove_bridge](/lantern/connect/#ros-2-foxglove_bridge) instead.
+A program can serve Lantern with a [Foxglove SDK](https://github.com/foxglove/foxglove-sdk)
+(Python, C++ or Rust). The examples use the [Python SDK](https://pypi.org/project/foxglove-sdk/).
+On ROS 2, use [foxglove_bridge](/lantern/connect/#ros-2-foxglove_bridge) instead.
 
 ## A first point cloud
 
@@ -47,12 +45,12 @@ while True:
     time.sleep(0.1)
 ```
 
-Run `python ring.py` and Lantern draws the ring 1.2 m above `world`:
+Run `python ring.py`:
 
-![Lantern drawing the 3,600-point ring around the lidar frame, 1.2 m above world, with my-app · localhost:8765 at the top of the side panel.](../../../assets/first-cloud.png)
+![The 3,600-point ring around the lidar frame, 1.2 m above world, with my-app · localhost:8765 in the top bar.](../../../assets/first-cloud.png)
 
-The server's `name` appears at the top of the side panel. `start_server` listens on `127.0.0.1`
-by default; pass `host="0.0.0.0"` to let Lantern connect from another machine.
+The server's `name` shows in the top bar. `start_server` listens on `127.0.0.1` by default; pass
+`host="0.0.0.0"` to let Lantern connect from another machine.
 
 ## What to publish
 
@@ -69,8 +67,7 @@ by default; pass `host="0.0.0.0"` to let Lantern connect from another machine.
 | `/status` | JSON | A text card |
 | `/diagnostics` | JSON | Status lines in a stats card |
 
-Publish only what you have. Lantern picks channels by schema, so topic names are up to you, with
-one exception: a robot description's topic must be `robot_description` or end in
+Lantern picks channels by schema, so topic names are up to you, with one exception: a robot description's topic must be `robot_description` or end in
 `/robot_description`.
 
 Log each message in whatever frame you have it in; TF places it in the fixed frame. One odometry
@@ -115,9 +112,6 @@ joints = foxglove.Channel("/joint_states", schema={
 joints.log({"name": joint_names, "position": list(q)})
 ```
 
-Logging on every tick of a fast control loop is fine. See
-[Joint states](/lantern/guides/robot-model/#joint-states) for how they're matched to the URDF.
-
 ## Text, stats and the robot description
 
 Foxglove has no schema for these, so they also go out as JSON under the ROS type's name:
@@ -139,8 +133,7 @@ description = ros_json("/robot_description", "std_msgs/msg/String", {"data": {"t
 description.log({"data": urdf_text})
 ```
 
-The URDF's meshes must be on Lantern's machine; see
-[Robot model](/lantern/guides/robot-model/#from-the-server).
+The URDF's meshes must be [on Lantern's machine](/lantern/guides/robot-model/#from-the-server).
 
 ## A complete example
 
@@ -152,4 +145,4 @@ joints, a camera image with annotations, text and diagnostics.
 /tmp/fxenv/bin/python scripts/serve.py --cloud table --robot-pose home --camera --status
 ```
 
-[Replay server](/lantern/reference/replay-server/) has the setup.
+The setup is in [Replay server](/lantern/reference/replay-server/).

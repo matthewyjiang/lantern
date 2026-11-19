@@ -16,12 +16,47 @@ use crate::annotate;
 use crate::camera::OrbitCamera;
 use crate::connection::{Connection, Picked, Post, Received};
 use crate::decode::Kind;
-use crate::layout::{Layout, Panel, PanelKind};
+use crate::layout::{Dir, Layout, PaneId, Panel, PanelKind};
 use crate::robot::{self, Model};
 use crate::scene::{percentiles, Annotation, Diagnostic, Image, PointCloud, PointColor, Pose, TfTree};
 use crate::settings::{DataSettings, ImageSettings, Settings, View3dSettings};
 use crate::source::{Event, Wanted};
 use crate::viewport::{self, Lines, RobotView, Shade, View};
+
+/// The submenus of a panel's menu, each a list of panel kinds: split in that direction, or show.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Submenu {
+    Split(Dir),
+    Show,
+}
+
+/// What's open over the panel at `path`; one thing at a time.
+pub enum Popup {
+    /// Its menu, and the submenu open in it.
+    Menu { path: Vec<usize>, sub: Option<Submenu> },
+    /// Its settings, and the picker in them whose options are listed, by its key.
+    Settings { path: Vec<usize>, picker: Option<String> },
+}
+
+impl Popup {
+    pub fn path(&self) -> &[usize] {
+        match self {
+            Popup::Menu { path, .. } | Popup::Settings { path, .. } => path,
+        }
+    }
+}
+
+/// A panel dragged by its header, swapping places with the panels it passes over.
+pub struct PanelDrag {
+    pub id: PaneId,
+    /// The layout when the drag started, which a cancelled drag puts back.
+    pub before: Layout,
+    /// Where the card was grabbed, from its top left corner, and its size then, points.
+    pub grab: [f32; 2],
+    pub size: [f32; 2],
+    /// The pointer, in the window's points.
+    pub pointer: [f32; 2],
+}
 
 /// The tabs of the 3D view's settings.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -81,19 +116,17 @@ pub struct State {
     /// How the first data frames the camera (headless scenes choose a view before data lands).
     pub frame_with: fn(&State) -> OrbitCamera,
     pub settings_open: bool,
-    /// The panel whose settings are open over it, by its path in the layout.
-    pub panel_settings: Option<Vec<usize>>,
+    /// The menu or settings open over a panel.
+    pub popup: Option<Popup>,
     /// The 3D view's settings tab on show.
     pub tab_3d: Tab3d,
-    /// The picker in the open settings whose options are listed, by its key.
-    pub open_picker: Option<String>,
     /// The Settings field for a server to add.
     pub url_edit: TextEdit,
     pub urdf_edit: TextEdit,
     /// Pointer travel already applied by the drag in progress.
     pub drag_seen: (f32, f32),
-    /// Every panel shows its layout controls (what it shows, split, close).
-    pub layout_edit: bool,
+    /// The panel being dragged by its header, and where it would land.
+    pub panel_drag: Option<PanelDrag>,
     /// The Settings field for a layout file to load or save.
     pub layout_file_edit: TextEdit,
     /// How the last layout file load or save went.
@@ -152,6 +185,12 @@ impl Overrides {
         }
         s
     }
+}
+
+/// Whether `a` and `b` hold the same panels, in any order.
+fn same_panels(a: &[&Panel], b: &[&Panel]) -> bool {
+    let count = |of: &[&Panel], p: &Panel| of.iter().filter(|q| **q == p).count();
+    a.len() == b.len() && a.iter().all(|p| count(a, p) == count(b, p))
 }
 
 /// What the camera was last framed on. A robot alone frames the view; a cloud arriving later
@@ -256,11 +295,10 @@ impl State {
             framed: Framed::Nothing,
             frame_with: State::home_view,
             settings_open: false,
-            panel_settings: None,
+            popup: None,
             tab_3d: Tab3d::Scene,
-            open_picker: None,
             drag_seen: (0.0, 0.0),
-            layout_edit: false,
+            panel_drag: None,
             layout_file_edit: TextEdit::new(String::new()),
             layout_file_note: None,
         }
@@ -289,15 +327,67 @@ impl State {
     /// Opens the settings of the panel at `path` over it, its URDF field (for a 3D panel)
     /// showing what it has, or closes them if they're open.
     pub fn toggle_panel_settings(&mut self, path: Vec<usize>) {
-        self.open_picker = None;
-        if self.panel_settings.as_ref() == Some(&path) {
-            self.panel_settings = None;
+        if self.settings_at() == Some(&path) {
+            self.popup = None;
             return;
         }
         if let Some(Panel::View3d(v)) = self.settings.layout.panel(&path) {
             self.urdf_edit = TextEdit::new(v.robot.urdf.clone());
         }
-        self.panel_settings = Some(path);
+        self.popup = Some(Popup::Settings { path, picker: None });
+    }
+
+    /// Opens the menu of the panel at `path`, or closes it if it's open.
+    pub fn toggle_panel_menu(&mut self, path: Vec<usize>) {
+        self.popup = match self.menu_at() {
+            Some((open, _)) if open == path => None,
+            _ => Some(Popup::Menu { path, sub: None }),
+        };
+    }
+
+    /// Opens `sub` in the open menu, or closes it if it's open.
+    pub fn toggle_submenu(&mut self, sub: Submenu) {
+        if let Some(Popup::Menu { sub: open, .. }) = &mut self.popup {
+            *open = if *open == Some(sub) { None } else { Some(sub) };
+        }
+    }
+
+    /// Lists the options of the picker keyed `key` in the open settings, or closes them.
+    pub fn toggle_picker(&mut self, key: &str) {
+        if let Some(Popup::Settings { picker, .. }) = &mut self.popup {
+            *picker = if picker.as_deref() == Some(key) { None } else { Some(key.to_string()) };
+        }
+    }
+
+    /// Closes the open settings' picker, keeping the settings open.
+    pub fn close_picker(&mut self) {
+        if let Some(Popup::Settings { picker, .. }) = &mut self.popup {
+            *picker = None;
+        }
+    }
+
+    /// The path of the panel whose settings are open.
+    pub fn settings_at(&self) -> Option<&[usize]> {
+        match &self.popup {
+            Some(Popup::Settings { path, .. }) => Some(path),
+            _ => None,
+        }
+    }
+
+    /// The path of the panel whose menu is open, and its open submenu.
+    pub fn menu_at(&self) -> Option<(&[usize], Option<Submenu>)> {
+        match &self.popup {
+            Some(Popup::Menu { path, sub }) => Some((path, *sub)),
+            _ => None,
+        }
+    }
+
+    /// The key of the open settings' picker whose options are listed.
+    pub fn open_picker(&self) -> Option<&str> {
+        match &self.popup {
+            Some(Popup::Settings { picker, .. }) => picker.as_deref(),
+            _ => None,
+        }
     }
 
     /// The 3D view's image card's settings, when it's drawn: the layout has a 3D panel and no
@@ -585,10 +675,11 @@ impl State {
         self.conns.iter_mut().for_each(|c| c.want(&wanted));
         if self.settings != self.applied {
             self.overrides.to_save(&self.settings, &self.from_file).save();
-            // Only the tiling changed (a divider mid-drag moves it every frame): the servers and
-            // panels, which the display and the images are derived from, are the same.
+            // Only the tiling changed (a divider mid-drag moves it every frame, a dragged panel
+            // swaps places): the servers and panels, which the display and the images are
+            // derived from, are the same, in whatever order.
             let moved_only = self.settings.connections == self.applied.connections
-                && self.settings.layout.panels() == self.applied.layout.panels();
+                && same_panels(&self.settings.layout.panels(), &self.applied.layout.panels());
             self.applied = self.settings.clone();
             if !moved_only {
                 self.dirty = true;
@@ -1017,7 +1108,7 @@ mod tests {
         let post: Post = Arc::new(|_, _| {});
         let mut s = State::new(file.clone(), o, post);
         s.edit3d(|v| v.grid = false);
-        s.settings.layout.split(&[], crate::layout::Dir::Row);
+        s.settings.layout.insert(&[], Dir::Row, Panel::new(PanelKind::Data));
         assert_eq!(urdf(&s.overrides.to_save(&s.settings, &file)), "arm.urdf");
     }
 

@@ -29,9 +29,9 @@ panels. The 3D view is rendered offscreen and composited into its panel.
 | `src/annotate.rs` | Draws image annotations into the image on the CPU |
 | `src/robot/` | URDF parsing and forward kinematics (`urdf.rs`), STL and primitive meshes with smoothed normals (`mesh.rs`), loading and mesh path resolution (`mod.rs`) |
 | `src/settings.rs` | `Settings`, saved to settings.json: the connections and the layout. Each panel type's settings: `View3dSettings`, `ImageSettings`, `DataSettings` |
-| `src/layout.rs` | The panel layout: the tree of panels (each with its settings), rows and columns, its file format and checks, the edits (split, close, show, move a divider), presets and how they keep panel settings (`adopt`) |
-| `src/panels.rs` | Draws the layout: the tiled panels, the dividers, each panel's settings button and layout controls, and the Image, Data and Topics panels |
-| `src/ui.rs` | The 3D panel with its overlays (status chip, image, text and stats cards), the side panel (the 3D view's quick controls), the Settings page, and each panel's settings (`panel_settings`) |
+| `src/layout.rs` | The panel layout: the tree of panels (each with its settings), rows and columns, its file format and checks, the edits (split, close, show, swap, move a divider), presets and how they keep panel settings (`adopt`) |
+| `src/panels.rs` | Draws the layout: the tiled panels, the dividers, each panel's header (its drag handle, settings button and menu), dragging a panel, and the Image, Data and Topics panels |
+| `src/ui.rs` | The window: the top bar, the Settings page, and the overlays (menus, each panel's settings, `panel_settings`) mounted with `rune_kit::root`. The 3D panel with its overlays (status chip, image, text and stats cards) |
 | `src/camera.rs` | Orbit camera (REP 103, z up), reversed infinite depth |
 | `src/viewport.rs` | Rune `Compositor`: offscreen 3D pass blitted into an `El::effect` slot, GPU timer |
 | `src/viewport.wgsl` | Sky and grid, points (vertex-pulled quads), robot (lit meshes), lines, blit |
@@ -74,8 +74,7 @@ which AMCL publishes on `/amcl_pose`:
 
 </Steps>
 
-The topic now shows in Settings with a **Poses** badge and gets a switch in the 3D view's Poses
-settings, and sources subscribe to it like any other pose topic.
+The topic then gets a **Poses** badge and a switch on the 3D view's Poses tab.
 
 A message that needs a new kind of drawing, such as a marker array, needs more: a `Decoded` variant
 and `Kind`, a scene type in `src/scene.rs`, state in `src/connection.rs` and `src/app.rs`, and
@@ -91,7 +90,7 @@ settings for the joints it leaves out:
 
 1. Add the variant in `src/layout.rs`, with its file name (`id`), its `label`, and an entry in
    `ALL`. The compiler catches a missing `id` or `label`, but not a missing `ALL` entry, which is
-   what puts the panel in the layout controls and the file format.
+   what puts the panel in the panel menus and the file format.
 
    ```rust title="src/layout.rs" ins={4}
    pub enum PanelKind {
@@ -128,29 +127,31 @@ settings for the joints it leaves out:
    reading and writing the file (`panel` and `RawNode::of`).
 
 3. Draw it in `src/panels.rs` and add its arm to `body`. `key` is unique to the panel; prefix the
-   keys of its children with it, because a layout can hold the same panel type twice. `cornered`
-   puts its settings button, `gear`, at its top right.
+   keys of its children with it, because a layout can hold the same panel type twice. The panel's
+   header (its name, settings button and menu) draws over the body's top when the pointer is on
+   the panel, so start text `HEADER_H` down.
 
    ```rust title="src/panels.rs"
-   fn joints(s: &State, view: &JointsSettings, key: &str, gear: El) -> El {
-       let Some((_, positions)) = s.joints() else { return cornered(empty("No joint states yet".into()), gear) };
+   fn joints(s: &State, view: &JointsSettings, key: &str) -> El {
+       let Some((_, positions)) = s.joints() else { return empty("No joint states yet".into()) };
        let mut names: Vec<_> = positions.iter().filter(|(name, _)| !view.hidden.contains(*name)).collect();
        names.sort_by_key(|(name, _)| *name);
        let rows = names.into_iter().map(|(name, at)| text(format!("{name}  {at:.3}")).font(MONO_SMALL));
-       cornered(scrolling(format!("{key}-scroll")).child(col().padding(12.0).gap(4.0).children(rows)), gear)
+       scrolling(format!("{key}-scroll")).child(col().padding(12.0).pt(HEADER_H).gap(4.0).children(rows))
    }
    ```
 
 4. Add its settings to `ui::panel_settings`. A `panel_lens` reaches this panel's settings by its
    path in the layout. Your `joints_settings` builds its controls from the ones in `src/ui.rs`
-   (`toggle_row`, `auto_picker`, `topic_switches`) and edits through the lens with `with`. Edits
-   are saved like any other.
+   (`toggle_row`, `picker`, `topic_switches`) and edits through the lens with `with`. A panel with
+   no settings has no settings button: list it in
+   `panels::has_settings`.
 
    ```rust title="src/ui.rs"
-   Panel::Joints(view) => joints_settings(s, view, &panel_lens(path, |p| match p {
+   Panel::Joints(view) => (None, joints_settings(s, view, &panel_lens(path, |p| match p {
        Panel::Joints(j) => Some(j),
        _ => None,
-   })),
+   }))),
    ```
 
 5. If the panel needs topics nothing else subscribes to, add them in `State::wanted`
@@ -158,8 +159,7 @@ settings for the joints it leaves out:
 
 </Steps>
 
-The panel now appears in the layout controls, `{"panel": "joints", "hidden": ["gripper"]}` works
-in a layout file, and its slider button opens its settings.
+Then `{"panel": "joints", "hidden": ["gripper"]}` works in a layout file.
 
 ## Add a source
 
@@ -188,7 +188,7 @@ A source must:
 - **Run on its own thread.** `want` returns immediately; I/O and decoding happen on a thread the
   source spawns. Dropping the source stops it.
 - **Report status.** Send `Event::Status` with `Connecting`, `Connected { server }` (the name shown
-  in the side panel), or `Failed { error }` (shown in the status chip). Retry if that makes sense
+  in the top bar), or `Failed { error }` (shown in the status chip). Retry if that makes sense
   for the transport.
 - **Advertise channels.** Send `Event::Channels` with every topic it offers, each with its `kind`
   from `decode::decoder_for(encoding, schema, topic)`. Each list replaces the previous one.
@@ -235,7 +235,7 @@ scripts/bench.sh 3             # timing table → out/bench.tsv, raw logs in out
     scripts/snap-live.sh out/robot "--cloud table --robot-pose reach" - panel-settings
   ```
 
-- **Scenes** (`--scene`) are `top`, `height`, `intensity`, `settings`, `edit-layout` and
+- **Scenes** (`--scene`) are `top`, `height`, `intensity`, `settings` and
   `panel-settings` (the 3D view's settings, open), plus the timing scenes `no-points`, `half`,
   `quarter`, `size-1` and `size-4`. Scenes don't save settings. Lantern's own flags work headless
   too: `"-:--layout dashboard"` snaps the dashboard preset.
