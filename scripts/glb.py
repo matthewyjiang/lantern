@@ -1,12 +1,10 @@
 """Minimal glTF 2.0 writer: triangle meshes with one base colour each, as GLB or as .gltf with
 the buffer in a data: URI. `serve.py --objects` sends a GLB made here. Run as a script, it
-writes the test models in src/mesh/testdata/, or with --bin PATH an open bin for a layout's
-frame mesh (scripts/snap-displays.sh):
+writes the test models in src/mesh/testdata/:
 
-    python3 scripts/glb.py [--bin PATH]
+    python3 scripts/glb.py
 """
 
-import argparse
 import base64
 import json
 import struct
@@ -80,22 +78,7 @@ TEST_PARTS = [
     ([(0, 0, 0), (1, 0, 0), (0, 0, 1)], [0, 1, 2], (0.2140, 0.2140, 0.2140, 0.5), (0, 1, 0)),
 ]
 
-# A bin 16 x 12 cm and 8 cm tall (glTF's y), open at the top, standing on its origin.
-BIN = [
-    box((0.16, 0.01, 0.12), (0.35, 0.36, 0.40, 1.0), (0.0, 0.005, 0.0)),
-    box((0.01, 0.08, 0.12), (0.55, 0.57, 0.62, 1.0), (-0.075, 0.04, 0.0)),
-    box((0.01, 0.08, 0.12), (0.55, 0.57, 0.62, 1.0), (0.075, 0.04, 0.0)),
-    box((0.14, 0.08, 0.01), (0.55, 0.57, 0.62, 1.0), (0.0, 0.04, -0.055)),
-    box((0.14, 0.08, 0.01), (0.55, 0.57, 0.62, 1.0), (0.0, 0.04, 0.055)),
-]
-
 if __name__ == "__main__":
-    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--bin", metavar="PATH", help="write the bin model here instead")
-    args = ap.parse_args()
-    if args.bin:
-        Path(args.bin).write_bytes(glb(BIN))
-        raise SystemExit
     out = Path(__file__).resolve().parent.parent / "src/mesh/testdata"
     out.mkdir(exist_ok=True)
     for name, data in [("two_parts.glb", glb(TEST_PARTS)), ("two_parts.gltf", gltf(TEST_PARTS))]:

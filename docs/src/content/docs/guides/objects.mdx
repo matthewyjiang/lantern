@@ -1,11 +1,11 @@
 ---
 title: Objects
-description: Draw shapes, text and meshes at TF frames in the 3D view, such as a grasped object in the gripper, from foxglove.SceneUpdate topics or from the layout.
+description: Draw shapes, text and meshes at TF frames in the 3D view, such as a grasped object in the gripper, from foxglove.SceneUpdate topics.
 ---
 
 The 3D view draws Foxglove `SceneUpdate` messages: entities made of cubes, spheres, cylinders,
-arrows, lines, triangles, text and meshes, each placed in a TF frame. An object in a gripper is an
-entity in the gripper's frame, so it moves with the arm.
+arrows, lines, triangles, text and meshes, each placed in a TF frame. An object in a gripper is a
+frame-locked entity in the gripper's frame, so it moves with the arm.
 
 ![The KUKA Med 7 holding a blue can with an orange lid, labelled held, with an arrow, cylinder, drop zone, cone and cube beyond it.](../../../../screenshots/objects-held.png)
 
@@ -18,6 +18,8 @@ To try it, run the [replay server](/lantern/reference/replay-server/) with
 With the [Python SDK](/lantern/guides/publishing/):
 
 ```python title="grasp.py"
+import time
+
 import foxglove
 from foxglove import messages as fm
 from foxglove.channels import SceneUpdateChannel
@@ -29,20 +31,27 @@ cup = open("cup.glb", "rb").read()
 def pose(x, y, z):
     return fm.Pose(position=fm.Vector3(x=x, y=y, z=z), orientation=fm.Quaternion(x=0, y=0, z=0, w=1))
 
+def cup_in_gripper(**placement):
+    # 7 cm along the gripper frame's z.
+    model = fm.ModelPrimitive(pose=pose(0, 0, 0.07), scale=fm.Vector3(x=1, y=1, z=1), media_type="model/gltf-binary", data=cup)
+    return fm.SceneEntity(id="cup", frame_id="gripper_link", models=[model], **placement)
+
+# Held: it moves with the gripper.
 scene.log(fm.SceneUpdate(entities=[
-    # Held: 7 cm along the gripper frame's z.
-    fm.SceneEntity(id="cup", frame_id="gripper_link", models=[
-        fm.ModelPrimitive(pose=pose(0, 0, 0.07), scale=fm.Vector3(x=1, y=1, z=1), media_type="model/gltf-binary", data=cup),
-    ]),
+    cup_in_gripper(frame_locked=True),
     fm.SceneEntity(id="target", frame_id="world", cubes=[
         fm.CubePrimitive(pose=pose(0.5, 0.2, 0.05), size=fm.Vector3(x=0.1, y=0.1, z=0.1), color=fm.Color(r=0.3, g=0.8, b=0.4, a=1)),
     ]),
 ]))
 ```
 
-When the gripper lets go, send the cup again in `world`, or delete it:
+When the gripper lets go, send the cup unlocked, stamped now: it stays where the gripper is at that
+time. Or delete it:
 
 ```python
+now = time.time_ns()
+scene.log(fm.SceneUpdate(entities=[cup_in_gripper(timestamp=fm.Timestamp(sec=now // 10**9, nsec=now % 10**9))]))
+
 scene.log(fm.SceneUpdate(deletions=[fm.SceneEntityDeletion(type=fm.SceneEntityDeletionType.MatchingId, id="cup")]))
 ```
 
@@ -59,8 +68,21 @@ in a link's frame.
 - Deletions (by `id`, or all of the topic's) apply before the update's entities.
 - An entity with a `lifetime` goes that long after it arrives; without one it stays until replaced
   or deleted. Its topic going away or being switched off, or **Show** off, removes its entities too.
-- An entity always follows its frame as TF moves it. `frame_locked` is ignored.
 - An entity whose frame has no transform to the fixed frame isn't drawn, and the status chip says so.
+
+## Placement
+
+Each entity is placed by its `frame_id` and the primitives' poses, as Foxglove places it:
+
+- **`frame_locked: true`** follows the frame as TF moves it.
+- **`frame_locked: false`**, the default, stays where the frame was at the entity's `timestamp`. Its
+  pose goes into the root of the fixed frame's TF tree with the transforms at that time, and stays
+  there as the frame moves.
+
+For the second, Lantern keeps up to 10,000 transforms per frame. A `timestamp` between two of them
+is interpolated, and one outside them takes the nearest. The timestamp is compared with the
+transforms' header stamps, so both must come from the same clock. An unset `timestamp` is 0, which
+takes the oldest transform kept.
 
 ## Shapes
 
@@ -74,7 +96,7 @@ in a link's frame.
 | Texts | Facing the camera, centred on the pose. `font_size` is in points with `scale_invariant`, else metres (shown 6 to 72 pt). |
 | Models | Meshes, below |
 
-![The table scan with a cube, sphere, cylinder, cone, arrow and a translucent drop zone outlined by a line loop and labelled in text, and a grey bin from the layout.](../../../../screenshots/objects-table.png)
+![The table scan with a cube, sphere, cylinder, cone, arrow and a translucent drop zone outlined by a line loop and labelled in text.](../../../../screenshots/objects-table.png)
 
 A primitive without a colour is transparent, as in Foxglove, and isn't drawn. Colours with alpha
 below 1 are drawn translucent.
@@ -99,38 +121,10 @@ A `ModelPrimitive` sends the mesh in `data`, with its `media_type`, or names a f
 - Each file or distinct `data` is loaded once, when an entity first names it. A mesh that fails to
   load is reported in the status chip.
 
-## Meshes in the layout
-
-For fixtures no topic sends, such as a table or a bin, the 3D panel's `objects.meshes` in a
-[layout file](/lantern/guides/layout/#layout-files) attaches mesh files to TF frames:
-
-```json title="layout.json"
-{
-  "panel": "3d",
-  "objects": {
-    "meshes": [
-      { "frame": "table", "file": "package://cell_description/meshes/bin.glb", "xyz": [0.4, 0, 0], "rpy": [0, 0, 1.5708] }
-    ]
-  }
-}
-```
-
-| Key | Default | Meaning |
-| --- | --- | --- |
-| `frame` | | The TF frame |
-| `file` | | A GLB, glTF or STL file, read as `url` is; a relative path is from Lantern's working directory |
-| `xyz` | `[0, 0, 0]` | Offset from the frame, in metres |
-| `rpy` | `[0, 0, 0]` | Roll, pitch and yaw about the frame's fixed axes, in radians, as in a URDF `origin` |
-| `scale` | `[1, 1, 1]` | Along each axis |
-| `color` | | `[r, g, b, a]`, 0 to 1, replacing the file's colours |
-
 ## Settings
 
-The 3D view's **Objects** tab has **Show**, a switch per scene topic, and the layout's meshes with
-their vertex counts or load errors. Only topics switched on are subscribed to. **Show** off hides
-the layout's meshes too.
-
-![The Objects tab: Show on, the /scene topic switched on, and bin.glb on frame world with 180 vertices.](../../../../screenshots/objects-settings.png)
+The 3D view's **Objects** tab has **Show** and a switch per scene topic. Only topics switched on
+are subscribed to.
 
 ## Limits
 
@@ -139,5 +133,6 @@ the layout's meshes too.
   gives the vertices they need, the limit and how many aren't drawn. A model over it on its own
   doesn't load.
 - Mesh files are read up to 256 MiB, and only regular files.
-- Not supported: OBJ and DAE meshes, textures, HTTP URLs, and entities fixed in place while their
-  frame moves (`frame_locked: false`).
+- A transform older than the newest 10,000 of its frame is dropped, so an unlocked entity stamped
+  before them takes the oldest kept.
+- Not supported: OBJ and DAE meshes, textures and HTTP URLs.

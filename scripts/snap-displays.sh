@@ -93,16 +93,11 @@ shot poses-expire "{$local8765, \"layout\": {\"panel\": \"3d\", \"poses\": {\"ti
 stop
 
 # Objects: /scene sends a two-part GLB held in the gripper and shapes, a line loop, triangles
-# and text on the table; the layout attaches a bin (a GLB file) to the world frame. Hiding the
-# topic draws what switching objects off does (the bin aside), and the Objects tab lists the bin.
+# and text on the table. Hiding the topic draws what switching objects off does.
 serve objects 8765 "--cloud table --robot-pose reach --objects"
-"$py" scripts/glb.py --bin "$dir/bin.glb"
 objects() { echo "{$local8765, \"layout\": {\"panel\": \"3d\", \"robot\": {\"urdf\": \"$med7\"}, \"objects\": {$1}}}"; }
-fixture="\"meshes\": [{\"frame\": \"world\", \"file\": \"$PWD/$dir/bin.glb\", \"xyz\": [-0.55, 1.3, 0.7]}]"
 printf '[{"t": 0.5, "type": "wheel", "x": 640, "y": 400, "dx": 0, "dy": 150}]\n' > "$dir/zoom.json"
-printf '[{"t": 0.5, "type": "tap", "key": "panel-settings"}, {"t": 0.9, "type": "tap", "key": "tab-4"}]\n' > "$dir/objects-tab.json"
-shot objects "$(objects "$fixture")" 3 --script "$dir/zoom.json"
-shot objects-settings "$(objects "$fixture")" 3 --script "$dir/objects-tab.json"
+shot objects "$(objects '')" 3 --script "$dir/zoom.json"
 shot objects-hidden "$(objects '"hidden": ["/scene"]')" 3 --script "$dir/zoom.json"
 shot objects-off "$(objects '"show": false')" 3 --script "$dir/zoom.json"
 stop

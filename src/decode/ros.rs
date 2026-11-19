@@ -7,14 +7,23 @@ use super::cdr::Cdr;
 use super::{entities, image};
 use super::points::{ColorChoice, Field, Num, Packed};
 use super::{DecodeError, Decoded};
-use crate::scene::{Diagnostic, Entity, Geometry, Level, Pose, Poses, SceneUpdate, Shape, Tracked, Transform};
+use crate::scene::{nanos, Diagnostic, Entity, Geometry, Level, Pose, Poses, SceneUpdate, Shape, Tracked, Transform};
 
 /// `std_msgs/Header`: stamp (int32 sec, uint32 nanosec), then the frame_id it returns. Lantern
 /// draws the newest message of each topic, so it doesn't use stamps.
 fn header(r: &mut Cdr) -> Result<String, DecodeError> {
-    r.i32()?;
-    r.u32()?;
-    r.string()
+    Ok(stamped_header(r)?.1)
+}
+
+/// A `std_msgs/Header`: its stamp in nanoseconds, and its frame.
+fn stamped_header(r: &mut Cdr) -> Result<(i64, String), DecodeError> {
+    let stamp = time(r)?;
+    Ok((stamp, r.string()?))
+}
+
+/// A `builtin_interfaces/Time`, in nanoseconds.
+fn time(r: &mut Cdr) -> Result<i64, DecodeError> {
+    Ok(nanos(r.i32()?.into(), r.u32()?.into()))
 }
 
 fn vector3(r: &mut Cdr) -> Result<DVec3, DecodeError> {
@@ -38,9 +47,9 @@ fn pose(r: &mut Cdr) -> Result<Pose, DecodeError> {
 
 /// `geometry_msgs/TransformStamped` without the encapsulation header.
 fn transform(r: &mut Cdr) -> Result<Transform, DecodeError> {
-    let parent = header(r)?;
+    let (stamp, parent) = stamped_header(r)?;
     let child = r.string()?;
-    Ok(Transform { parent, child, pose: Pose { translation: vector3(r)?, rotation: quaternion(r)? } })
+    Ok(Transform { parent, child, stamp, pose: Pose { translation: vector3(r)?, rotation: quaternion(r)? } })
 }
 
 pub fn point_cloud2(bytes: &[u8], color: &ColorChoice) -> Result<Decoded, DecodeError> {
@@ -202,11 +211,11 @@ fn seq<T>(r: &mut Cdr, min: usize, mut item: impl FnMut(&mut Cdr) -> Result<T, D
 
 /// One `foxglove_msgs/SceneEntity`, fields in the `.msg`'s order.
 fn scene_entity(r: &mut Cdr) -> Result<Entity, DecodeError> {
-    let (_sec, _nanosec) = (r.i32()?, r.u32()?);
+    let timestamp = time(r)?;
     let frame_id = r.string()?;
     let id = r.string()?;
     let lifetime = entities::lifetime(r.i32()?.into(), r.u32()?.into());
-    let _frame_locked = r.bool()?;
+    let frame_locked = r.bool()?;
     seq(r, 8, |r| Ok((r.string()?, r.string()?)))?; // metadata
     let mut shapes = Vec::new();
     // Every primitive starts with a 56-byte pose.
@@ -253,7 +262,7 @@ fn scene_entity(r: &mut Cdr) -> Result<Entity, DecodeError> {
         let (url, media_type, data) = (r.string()?, r.string()?, r.bytes()?.to_vec());
         shapes.push(entities::model(pose, scale, color, override_color, url, media_type, data)?);
     }
-    Ok(Entity { id, frame_id, lifetime, shapes })
+    Ok(Entity { id, timestamp, frame_id, frame_locked, lifetime, shapes })
 }
 
 /// `foxglove_msgs/SceneUpdate`, as a ROS node publishes it through foxglove_bridge.

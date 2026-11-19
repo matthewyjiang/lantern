@@ -134,54 +134,19 @@ impl Default for RobotSettings {
     }
 }
 
-/// Objects: the shapes and meshes `SceneUpdate` topics send, and meshes fixed to TF frames.
+/// Objects: the shapes and meshes `SceneUpdate` topics send.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct ObjectsSettings {
     pub show: bool,
     /// Scene topics switched off (new topics show by default).
     pub hidden: BTreeSet<String>,
-    /// Meshes drawn at TF frames, for fixtures no topic sends (a table, a bin).
-    pub meshes: Vec<FrameMesh>,
 }
 
 impl Default for ObjectsSettings {
     fn default() -> Self {
-        ObjectsSettings { show: true, hidden: BTreeSet::new(), meshes: Vec::new() }
+        ObjectsSettings { show: true, hidden: BTreeSet::new() }
     }
-}
-
-/// A mesh file drawn at a TF frame, offset by `xyz` and `rpy` as a URDF origin is.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct FrameMesh {
-    pub frame: String,
-    /// A GLB, glTF or STL file (taken as Y-up, as Foxglove does): a path, `file://` or
-    /// `package://` URL; a relative path is from the working directory.
-    pub file: String,
-    /// Offset from the frame, metres.
-    #[serde(default, skip_serializing_if = "is_zero")]
-    pub xyz: [f64; 3],
-    /// Roll, pitch, yaw about the frame's fixed x, y, z axes, radians.
-    #[serde(default, skip_serializing_if = "is_zero")]
-    pub rpy: [f64; 3],
-    #[serde(default = "unit_scale", skip_serializing_if = "is_unit")]
-    pub scale: [f64; 3],
-    /// sRGB and alpha, 0–1, replacing the file's colours; `None` keeps them.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub color: Option<[f32; 4]>,
-}
-
-fn is_zero(v: &[f64; 3]) -> bool {
-    *v == [0.0; 3]
-}
-
-fn unit_scale() -> [f64; 3] {
-    [1.0; 3]
-}
-
-fn is_unit(v: &[f64; 3]) -> bool {
-    *v == unit_scale()
 }
 
 /// An Image panel's settings (and the 3D view's image card's).

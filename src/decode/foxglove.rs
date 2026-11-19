@@ -10,7 +10,7 @@ use super::points::{ColorChoice, Field, Num, Packed};
 use super::ros::unit;
 use super::{entities, image};
 use super::{DecodeError, Decoded};
-use crate::scene::{Annotation, Entity, Geometry, PointsKind, Pose as ScenePose, Poses, SceneUpdate as Scene, Shape, Tracked, Transform};
+use crate::scene::{nanos, Annotation, Entity, Geometry, PointsKind, Pose as ScenePose, Poses, SceneUpdate as Scene, Shape, Tracked, Transform};
 
 #[derive(Clone, PartialEq, Message)]
 struct Vector3 {
@@ -68,6 +68,8 @@ struct PointCloud {
 
 #[derive(Clone, PartialEq, Message)]
 struct FrameTransform {
+    #[prost(message, optional, tag = "1")]
+    timestamp: Option<Timestamp>,
     #[prost(string, tag = "2")]
     parent_frame_id: String,
     #[prost(string, tag = "3")]
@@ -133,6 +135,7 @@ fn transform(t: FrameTransform) -> Transform {
     Transform {
         parent: t.parent_frame_id,
         child: t.child_frame_id,
+        stamp: stamp(t.timestamp),
         pose: ScenePose { translation: vec3(t.translation), rotation: quat(t.rotation) },
     }
 }
@@ -365,6 +368,19 @@ pub fn image_annotations(bytes: &[u8], _: &ColorChoice) -> Result<Decoded, Decod
 }
 
 #[derive(Clone, PartialEq, Message)]
+struct Timestamp {
+    #[prost(int64, tag = "1")]
+    seconds: i64,
+    #[prost(int32, tag = "2")]
+    nanos: i32,
+}
+
+/// Nanoseconds since the epoch; zero when unset.
+fn stamp(t: Option<Timestamp>) -> i64 {
+    t.map_or(0, |t| nanos(t.seconds, t.nanos.into()))
+}
+
+#[derive(Clone, PartialEq, Message)]
 struct Duration {
     #[prost(int64, tag = "1")]
     seconds: i64,
@@ -481,12 +497,16 @@ struct ModelPrimitive {
 
 #[derive(Clone, PartialEq, Message)]
 struct SceneEntity {
+    #[prost(message, optional, tag = "1")]
+    timestamp: Option<Timestamp>,
     #[prost(string, tag = "2")]
     frame_id: String,
     #[prost(string, tag = "3")]
     id: String,
     #[prost(message, optional, tag = "4")]
     lifetime: Option<Duration>,
+    #[prost(bool, tag = "5")]
+    frame_locked: bool,
     #[prost(message, repeated, tag = "7")]
     arrows: Vec<ArrowPrimitive>,
     #[prost(message, repeated, tag = "8")]
@@ -559,7 +579,7 @@ fn entity(e: SceneEntity) -> Result<Entity, DecodeError> {
         shapes.push(entities::model(pose(m.pose), vec3(m.scale), rgba(m.color), m.override_color, m.url, m.media_type, m.data)?);
     }
     let lifetime = e.lifetime.and_then(|d| entities::lifetime(d.seconds, d.nanos.into()));
-    Ok(Entity { id: e.id, frame_id: e.frame_id, lifetime, shapes })
+    Ok(Entity { id: e.id, timestamp: stamp(e.timestamp), frame_id: e.frame_id, frame_locked: e.frame_locked, lifetime, shapes })
 }
 
 pub fn scene_update(bytes: &[u8], _: &ColorChoice) -> Result<Decoded, DecodeError> {

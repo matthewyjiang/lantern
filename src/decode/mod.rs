@@ -226,6 +226,7 @@ mod tests {
             assert_eq!(ts[0].pose.translation, DVec3::new(1.0, 2.0, 0.0));
             assert!((ts[0].pose.rotation.z - std::f64::consts::FRAC_1_SQRT_2).abs() < 1e-12, "{schema}");
             assert_eq!((ts[1].parent.as_str(), ts[1].child.as_str()), ("base_link", "lidar"));
+            assert_eq!(ts[1].stamp, 1_700_000_000_250_000_000, "the header stamp, in nanoseconds: {schema}");
         }
     }
 
@@ -353,6 +354,8 @@ mod tests {
         let [grasped, shapes] = &pb.entities[..] else { panic!("two entities") };
         assert_eq!((grasped.id.as_str(), grasped.frame_id.as_str(), grasped.lifetime), ("grasped", "gripper", Some(1.5)));
         assert_eq!(shapes.lifetime, None, "no lifetime: kept until replaced");
+        assert_eq!((grasped.timestamp, grasped.frame_locked), (1_700_000_001_000_000_005, true));
+        assert_eq!((shapes.timestamp, shapes.frame_locked), (0, false), "unset, as Foxglove's defaults");
         let at = &grasped.shapes[0].pose;
         assert_eq!(at.translation, DVec3::new(0.5, -0.25, 0.1));
         assert!((at.rotation.z - std::f64::consts::FRAC_1_SQRT_2).abs() < 1e-12);

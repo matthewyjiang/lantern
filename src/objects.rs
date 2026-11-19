@@ -1,7 +1,6 @@
-//! Objects in the 3D view: the entities `SceneUpdate` topics send and the meshes the layout
-//! attaches to TF frames. Shapes with a surface become the parts of one mesh, each part in its
-//! own frame (scale applied) and placed at draw time, so a part that only moves keeps the mesh;
-//! lines join the TF lines and text the labels.
+//! Objects in the 3D view: the entities `SceneUpdate` topics send. Shapes with a surface become
+//! the parts of one mesh, each part in its own frame (scale applied) and placed at draw time, so a
+//! part that only moves keeps the mesh; lines join the TF lines and text the labels.
 
 use std::collections::HashMap;
 use std::f32::consts::FRAC_PI_2;
@@ -31,7 +30,7 @@ impl ModelKey {
     }
 }
 
-/// The models that objects and the layout's meshes name, each loaded once, or why it can't be.
+/// The models objects name, each loaded once, or why it can't be.
 #[derive(Default)]
 pub struct Models(HashMap<ModelKey, Result<Arc<Asset>, String>>);
 
@@ -174,7 +173,7 @@ impl Placed {
     }
 
     /// Places a model's pieces at `at`, `scale`d, each in `color` or else its own.
-    pub fn model(&mut self, asset: &Arc<Asset>, at: Mat4, scale: Vec3, color: Option<[f32; 4]>) {
+    fn model(&mut self, asset: &Arc<Asset>, at: Mat4, scale: Vec3, color: Option<[f32; 4]>) {
         for (k, piece) in asset.pieces.iter().enumerate() {
             let color = color.or(piece.color).unwrap_or(mesh::DEFAULT_COLOR);
             self.part(Geom::Model { asset: AssetRef(Arc::clone(asset)), piece: k, scale }, at, color);

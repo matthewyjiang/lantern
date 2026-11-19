@@ -20,7 +20,7 @@ use crate::connection::Connection;
 use crate::decode::{ColorChoice, Kind};
 use crate::layout::{Layout, Panel, PanelKind, Preset, PRESETS};
 use crate::panels;
-use crate::scene::{Annotation, Diagnostic, Image, Level, ModelSource, PointColor, Thickness};
+use crate::scene::{Annotation, Diagnostic, Image, Level, PointColor, Thickness};
 use crate::settings::{DataSettings, ImageSettings, View3dSettings};
 use crate::source::Status;
 use crate::viewport::{self, Shade};
@@ -697,8 +697,8 @@ fn view3d_settings(s: &State, k: &Kit, layer: &mut Vec<El>, v: &View3dSettings, 
     let body = col().w_full().gap(10.0);
     match tab {
         Tab3d::Scene => {
-            let frames = s.display.tf.frames();
-            body.child(picker(s, k, layer, "fixed-frame", "Fixed frame", &v.fixed_frame, s.display.fixed.as_deref(), &frames, "not seen yet", |s, f| s.edit3d(|v| v.fixed_frame = f)))
+            let frames = &s.display.frames;
+            body.child(picker(s, k, layer, "fixed-frame", "Fixed frame", &v.fixed_frame, s.display.fixed.as_deref(), frames, "not seen yet", |s, f| s.edit3d(|v| v.fixed_frame = f)))
                 .child(toggle_row("grid", "Grid", v.grid, |s| s.edit3d(|v| v.grid ^= true)))
                 .child(toggle_row("frames", "TF frames", v.frames, |s| s.edit3d(|v| v.frames ^= true)))
                 .child(toggle_row("labels", "Labels", v.labels, |s| s.edit3d(|v| v.labels ^= true)))
@@ -860,36 +860,11 @@ fn robot_settings(s: &State, k: &Kit, layer: &mut Vec<El>, v: &View3dSettings) -
         .child(field("Opacity", segmented("robot-opacity", &[(1.0, "100%"), (0.75, "75%"), (0.5, "50%"), (0.25, "25%")], v.robot.opacity, |s, x| s.edit3d(|v| v.robot.opacity = x))))
 }
 
-/// The 3D view's objects: which scene topics are drawn, and the layout's frame meshes with how
-/// each loaded.
+/// The 3D view's objects: which scene topics are drawn.
 fn objects_settings(s: &State, v: &View3dSettings) -> El {
-    let t = tok::theme(true);
-    let body = col().w_full().gap(10.0)
+    col().w_full().gap(10.0)
         .child(toggle_row("objects", "Show", v.objects.show, |s| s.edit3d(|v| v.objects.show ^= true)))
-        .child(field("Topics", topic_switches(s, "object", Kind::Objects, &v.objects.hidden, &view3d_lens(|v| &mut v.objects.hidden))));
-    if v.objects.meshes.is_empty() {
-        return body;
-    }
-    let error = oklch(0.72, 0.17, 25.0);
-    let mut list = col().key("frame-meshes").w_full();
-    for (i, m) in v.objects.meshes.iter().enumerate() {
-        let (status, color) = match s.models().get(&ModelSource::Url(m.file.clone())) {
-            None => ("Not loaded while objects are hidden".to_string(), t.text_secondary),
-            Some(Ok(a)) => (format!("{} vertices", thousands(a.vertex_count())), t.text_secondary),
-            Some(Err(e)) => (e.clone(), error),
-        };
-        list = list.child(col().key(format!("frame-mesh-{i}")).w_full().px(8.0).py(6.0).gap(2.0)
-            .child(row().gap(8.0)
-                .child(text(file_name(&m.file)).font(MONO).color(t.text).truncate().grow(1.0).min_w(0.0))
-                .child(text(m.frame.clone()).font(MONO_SMALL).color(t.text_secondary)))
-            .child(text(status).font(SMALL).color(color).max_lines(3)));
-    }
-    body.child(field("Frame meshes", inset(list)))
-}
-
-/// The last part of a path or URL, which a narrow list has room for.
-fn file_name(path: &str) -> String {
-    path.rsplit('/').next().unwrap_or(path).to_string()
+        .child(field("Topics", topic_switches(s, "object", Kind::Objects, &v.objects.hidden, &view3d_lens(|v| &mut v.objects.hidden))))
 }
 
 /// A setting that takes one of a list of values, Auto first: its label, and a select (its field

@@ -29,7 +29,7 @@ panels. The 3D view is rendered offscreen and composited into its panel.
 | `src/annotate.rs` | Draws image annotations into the image on the CPU |
 | `src/robot/` | URDF parsing and forward kinematics (`urdf.rs`), loading a robot's visuals into one mesh (`mod.rs`) |
 | `src/mesh/` | Meshes: STL, glTF and GLB (`gltf.rs`), shapes, smoothed normals, mesh path resolution |
-| `src/objects.rs` | Scene entities and the layout's meshes as parts of one mesh, placed per frame, plus their lines and text |
+| `src/objects.rs` | Scene entities as parts of one mesh, placed per frame, plus their lines and text; the model cache |
 | `src/settings.rs` | `Settings`, saved to settings.json: the connections and the layout. Each panel type's settings: `View3dSettings`, `ImageSettings`, `DataSettings` |
 | `src/layout.rs` | The panel layout: the tree of panels (each with its settings), rows and columns, its file format and checks, the edits (split, close, show, swap, move a divider), presets and how they keep panel settings (`adopt`) |
 | `src/panels.rs` | Draws the layout: the tiled panels, the dividers, each panel's header (its drag handle, settings button and menu), dragging a panel, and the Image, Data and Topics panels |

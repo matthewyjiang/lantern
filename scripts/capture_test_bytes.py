@@ -29,6 +29,9 @@ POINTS = [(1.0, 2.0, 3.0, 10.0), (4.0, 5.0, 6.0, 20.0), (math.nan, 0.0, 0.0, 30.
 YAW90 = (0.0, 0.0, math.sqrt(0.5), math.sqrt(0.5))
 TFS = [("map", "base_link", (1.0, 2.0, 0.0), YAW90), ("base_link", "lidar", (0.2, 0.0, 0.5), (0.0, 0.0, 0.0, 1.0))]
 POSES = [((0.0, 0.0, 0.0), (0.0, 0.0, 0.0, 1.0)), ((0.5, -0.25, 0.1), YAW90)]
+# Header stamps: seconds and nanoseconds.
+TF_STAMP = (1_700_000_000, 250_000_000)
+ENTITY_STAMP = (1_700_000_001, 5)
 
 
 def write(name, data):
@@ -54,6 +57,7 @@ tf = TFMessage()
 for parent, child, t, q in TFS:
     m = TransformStamped()
     m.header.frame_id, m.child_frame_id = parent, child
+    m.header.stamp.sec, m.header.stamp.nanosec = TF_STAMP
     m.transform.translation.x, m.transform.translation.y, m.transform.translation.z = t
     m.transform.rotation.x, m.transform.rotation.y, m.transform.rotation.z, m.transform.rotation.w = q
     tf.transforms.append(m)
@@ -85,7 +89,7 @@ cloud = fm.PointCloud(
 write("pointcloud.pb", cloud.encode())
 
 fts = fm.FrameTransforms(transforms=[
-    fm.FrameTransform(parent_frame_id=p, child_frame_id=c, translation=fm.Vector3(x=t[0], y=t[1], z=t[2]), rotation=fm.Quaternion(x=q[0], y=q[1], z=q[2], w=q[3]))
+    fm.FrameTransform(timestamp=fm.Timestamp(sec=TF_STAMP[0], nsec=TF_STAMP[1]), parent_frame_id=p, child_frame_id=c, translation=fm.Vector3(x=t[0], y=t[1], z=t[2]), rotation=fm.Quaternion(x=q[0], y=q[1], z=q[2], w=q[3]))
     for p, c, t, q in TFS
 ])
 write("frametransforms.pb", fts.encode())
@@ -173,6 +177,7 @@ write("diagnostics.cdr", serialize_message(da))
 from foxglove_msgs import msg as fx
 from geometry_msgs.msg import Point, Vector3
 from builtin_interfaces.msg import Duration as RosDuration
+from builtin_interfaces.msg import Time as RosTime
 
 MODEL_BYTES = b"glTF fake model bytes"
 LINE = [(0.0, 0.0, 0.0), (1.0, 0.0, 0.0), (1.0, 1.0, 0.0)]
@@ -196,7 +201,7 @@ def fp(v):
 write("sceneupdate.pb", fm.SceneUpdate(
     deletions=[fm.SceneEntityDeletion(type=fm.SceneEntityDeletionType.MatchingId, id="old"), fm.SceneEntityDeletion(type=fm.SceneEntityDeletionType.All)],
     entities=[
-        fm.SceneEntity(frame_id="gripper", id="grasped", lifetime=fm.Duration(sec=1, nsec=500_000_000), models=[
+        fm.SceneEntity(timestamp=fm.Timestamp(sec=ENTITY_STAMP[0], nsec=ENTITY_STAMP[1]), frame_id="gripper", id="grasped", lifetime=fm.Duration(sec=1, nsec=500_000_000), frame_locked=True, models=[
             fm.ModelPrimitive(pose=fpose(*AT), scale=fv((2.0, 2.0, 2.0)), color=fcol((1.0, 0.0, 0.0, 1.0)), override_color=True, media_type="model/gltf-binary", data=MODEL_BYTES),
             fm.ModelPrimitive(pose=fpose(*AT), url="package://objects/meshes/cup.stl"),
         ]),
@@ -235,7 +240,7 @@ def rp(v):
 su = fx.SceneUpdate()
 su.deletions = [fx.SceneEntityDeletion(type=fx.SceneEntityDeletion.MATCHING_ID, id="old"), fx.SceneEntityDeletion(type=fx.SceneEntityDeletion.ALL)]
 su.entities = [
-    fx.SceneEntity(frame_id="gripper", id="grasped", lifetime=RosDuration(sec=1, nanosec=500_000_000), models=[
+    fx.SceneEntity(timestamp=RosTime(sec=ENTITY_STAMP[0], nanosec=ENTITY_STAMP[1]), frame_id="gripper", id="grasped", lifetime=RosDuration(sec=1, nanosec=500_000_000), frame_locked=True, models=[
         fx.ModelPrimitive(pose=rpose(*AT), scale=rv((2.0, 2.0, 2.0)), color=rcol((1.0, 0.0, 0.0, 1.0)), override_color=True, media_type="model/gltf-binary", data=MODEL_BYTES),
         fx.ModelPrimitive(pose=rpose(*AT), url="package://objects/meshes/cup.stl"),
     ]),

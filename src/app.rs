@@ -20,7 +20,7 @@ use crate::layout::{Dir, Layout, PaneId, Panel, PanelKind};
 use crate::mesh::Mesh;
 use crate::objects::{self, Geom, LabelStyle, Models, Placed};
 use crate::robot::{self, Model};
-use crate::scene::{percentiles, Annotation, Diagnostic, Geometry, Image, ModelSource, PointCloud, PointColor, Pose, TfTree};
+use crate::scene::{percentiles, Annotation, Diagnostic, Geometry, Image, ModelSource, PointCloud, PointColor, Pose, Tf};
 use crate::settings::{DataSettings, ImageSettings, Settings, View3dSettings};
 use crate::source::{Event, Wanted};
 use crate::viewport::{self, Lines, MeshView, PartDraw, Shade, View};
@@ -108,7 +108,7 @@ pub struct State {
     robot_description: Option<(String, String, Result<Model, String>)>,
     /// How the file's robot differs from the described one, when both loaded and they differ.
     robot_mismatch: Option<Mismatch>,
-    /// The models the shown objects and frame meshes name, loaded or why not (`sync_models`).
+    /// The models the shown objects name, loaded or why not (`sync_models`).
     models: Models,
     /// Joint positions changed: `sync` re-poses the robot without rebuilding the display.
     robot_dirty: bool,
@@ -212,8 +212,8 @@ enum Framed {
 pub struct Display {
     /// The frame everything is drawn in, once there's data to name one.
     pub fixed: Option<String>,
-    /// Every connection's transforms, as one tree.
-    pub tf: TfTree,
+    /// Every TF frame, sorted.
+    pub frames: Vec<String>,
     /// `fixed_T_cloud`, when the cloud's frame connects to the fixed frame.
     pub cloud_model: Option<Mat4>,
     pub shade: Shade,
@@ -260,7 +260,7 @@ impl Default for Display {
     fn default() -> Self {
         Display {
             fixed: None,
-            tf: TfTree::default(),
+            frames: Vec::new(),
             cloud_model: None,
             shade: Shade::Height { lo: 0.0, hi: 1.0 },
             lines: Arc::default(),
@@ -587,11 +587,6 @@ impl State {
         self.robot_mismatch.as_ref().map(|m| m.message.as_str())
     }
 
-    /// The models the shown objects and frame meshes name.
-    pub fn models(&self) -> &Models {
-        &self.models
-    }
-
     /// The robot drawn: the file's, unless a server describes a different robot, which wins (a
     /// file that matches still draws, for its meshes and colours; see `Mismatch`); else whichever
     /// loaded.
@@ -817,18 +812,14 @@ impl State {
         }
     }
 
-    /// Loads the models the received entities (only shown topics' are kept) and, with Show on,
-    /// the layout's meshes name. Runs when the display is rebuilt, just before `derive`.
+    /// Loads the models the received entities name (only shown topics' entities are kept).
+    /// Runs when the display is rebuilt, just before `derive`.
     fn sync_models(&mut self) {
-        let v = self.v3();
         let shapes = self.received().flat_map(|r| r.objects.values()).flat_map(|(_, e)| &e.shapes);
-        let mut named: Vec<ModelSource> = shapes.filter_map(|s| match &s.geometry {
+        let named: Vec<ModelSource> = shapes.filter_map(|s| match &s.geometry {
             Geometry::Model { source, .. } => Some(source.clone()),
             _ => None,
         }).collect();
-        if v.objects.show {
-            named.extend(v.objects.meshes.iter().map(|m| ModelSource::Url(m.file.clone())));
-        }
         self.models.sync(named, viewport::MAX_MESH_VERTICES);
     }
 
@@ -891,7 +882,7 @@ impl State {
         Some(PosedRobot { root, links })
     }
 
-    fn fixed_frame(&self, tf: &TfTree) -> Option<String> {
+    fn fixed_frame(&self, tf: &Tf) -> Option<String> {
         if let Some(f) = &self.v3().fixed_frame {
             return Some(f.clone());
         }
@@ -903,13 +894,9 @@ impl State {
 
     fn derive(&self) -> Display {
         let s = self.v3();
-        let mut tf = TfTree::default();
-        self.received().for_each(|r| tf.extend(&r.tf));
-        let mut d = Display { fixed: self.fixed_frame(&tf), ..Display::default() };
-        let Some(fixed) = d.fixed.clone() else {
-            d.tf = tf;
-            return d;
-        };
+        let tf = Tf(self.received().map(|r| &r.tf).collect());
+        let mut d = Display { fixed: self.fixed_frame(&tf), frames: tf.frames(), ..Display::default() };
+        let Some(fixed) = d.fixed.clone() else { return d };
         // The shown cloud's and image card's errors first: a cloud or image refused or
         // undecodable is why it isn't drawn. (Joint names the robot lacks go before even those,
         // below.)
@@ -940,8 +927,8 @@ impl State {
         let mut marks: Vec<Vec3> = Vec::new();
         if s.frames {
             let mut origins = BTreeMap::new();
-            for f in tf.frames() {
-                if let Some(p) = tf.lookup(&fixed, &f) {
+            for f in &d.frames {
+                if let Some(p) = tf.lookup(&fixed, f) {
                     let m = p.matrix();
                     lines.axes(m, axis, 2.5);
                     let o = m.transform_point3(Vec3::ZERO);
@@ -949,7 +936,7 @@ impl State {
                     if s.labels {
                         d.labels.push(Label { text: f.clone(), at: o, style: None });
                     }
-                    origins.insert(f, o);
+                    origins.insert(f.as_str(), o);
                 }
             }
             for (parent, child) in tf.edges() {
@@ -1031,22 +1018,22 @@ impl State {
             },
         };
         d.problem = problems.into_iter().next();
-        d.tf = tf;
         d
     }
 
-    /// Places the shown topics' entities and the layout's frame meshes in the fixed frame: their
+    /// Places the shown topics' entities in the fixed frame: their
     /// mesh parts (the last display's mesh again when the parts are the same, so moving objects
     /// don't rebuild it), their lines into `lines`, their text as labels, and each shape's
     /// origin into `marks`. Why something isn't drawn goes to `problems`.
-    fn place_objects(&self, tf: &TfTree, fixed: &str, lines: &mut Lines, marks: &mut Vec<Vec3>, problems: &mut Vec<String>) -> (ObjectsDisplay, Vec<Label>) {
+    fn place_objects(&self, tf: &Tf, fixed: &str, lines: &mut Lines, marks: &mut Vec<Vec3>, problems: &mut Vec<String>) -> (ObjectsDisplay, Vec<Label>) {
         let v = &self.v3().objects;
         let mut placed = Placed::default();
         for topic in self.topics_of(Kind::Objects).into_iter().filter(|t| !v.hidden.contains(t)) {
             problems.extend(self.error(&topic).map(|e| format!("{topic}: {e}")));
         }
         for ((topic, _), (_, e)) in self.received().flat_map(|r| &r.objects) {
-            let Some(frame) = tf.lookup(fixed, &e.frame_id) else {
+            let frame = if e.frame_locked { tf.lookup(fixed, &e.frame_id) } else { tf.lookup_at(fixed, &e.frame_id, e.timestamp) };
+            let Some(frame) = frame else {
                 problems.push(format!("{topic}: no transform from {} to {fixed}", e.frame_id));
                 continue;
             };
@@ -1056,21 +1043,6 @@ impl State {
                 if let Some(err) = placed.shape(shape, at, lines, &self.models) {
                     problems.push(format!("{topic}: {}: {err}", e.id));
                 }
-            }
-        }
-        for m in &v.meshes {
-            let Some(frame) = tf.lookup(fixed, &m.frame) else {
-                problems.push(format!("Mesh {}: no transform from {} to {fixed}", m.file, m.frame));
-                continue;
-            };
-            match self.models.get(&ModelSource::Url(m.file.clone())) {
-                Some(Ok(asset)) => {
-                    let at = frame.then(&Pose::from_xyz_rpy(DVec3::from(m.xyz), DVec3::from(m.rpy)));
-                    marks.push(at.translation.as_vec3());
-                    placed.model(asset, at.matrix(), DVec3::from(m.scale).as_vec3(), m.color);
-                }
-                Some(Err(e)) => problems.push(format!("Mesh at {}: {e}", m.frame)),
-                None => {}
             }
         }
         let last = &self.display.objects;
@@ -1261,6 +1233,37 @@ mod tests {
         assert_eq!(wanted, ["/cloud", "/diag", "/left", "/marks", "/right"]);
     }
 
+    // A gripper at x 1 m at 1 s, then x 3 m at 2 s. A frame-locked cube in it moves with it; one
+    // sent unlocked with a 1 s timestamp stays where the gripper was then, as in Foxglove.
+    #[test]
+    fn unlocked_entities_stay_where_their_frame_was_at_their_timestamp() {
+        use crate::decode::Decoded;
+        use crate::scene::{Entity, SceneUpdate, Shape, Transform};
+        let settings = Settings { connections: vec!["ws://127.0.0.1:9".into()], layout: layout(r#"{"panel": "3d", "fixed_frame": "world"}"#) };
+        let post: Post = Arc::new(|_, _| {});
+        let mut s = State::new(settings, Overrides::default(), post);
+        s.sync_connections();
+        let id = s.conns[0].id;
+        let channel = |topic: &str, kind| crate::source::Channel { topic: topic.into(), schema: String::new(), encoding: String::new(), kind: Some(kind) };
+        let sec = 1_000_000_000;
+        let gripper = |stamp: i64, x: f64| {
+            let pose = Pose { translation: DVec3::new(x, 0.0, 0.0), ..Pose::IDENTITY };
+            (id, Event::Data { topic: "/tf".into(), data: Decoded::Transforms(vec![Transform { parent: "world".into(), child: "gripper".into(), stamp, pose }]) })
+        };
+        let cube = Shape { pose: Pose::IDENTITY, color: [1.0; 4], geometry: Geometry::Cube { size: DVec3::splat(0.1) } };
+        let entity = |id: &str, frame_locked| Entity { id: id.into(), timestamp: sec, frame_id: "gripper".into(), frame_locked, lifetime: None, shapes: vec![cube.clone()] };
+        let scene = Decoded::Objects(SceneUpdate { deletions: vec![], entities: vec![entity("dropped", false), entity("held", true)] });
+        s.apply(vec![
+            (id, Event::Channels(vec![channel("/tf", Kind::Transforms), channel("/scene", Kind::Objects)])),
+            gripper(sec, 1.0),
+            (id, Event::Data { topic: "/scene".into(), data: scene }),
+            gripper(2 * sec, 3.0),
+        ], 0.0);
+        s.sync(0.0, &mut Tx::default());
+        let x: Vec<f32> = s.display.objects.draws.iter().map(|d| d.model.transform_point3(Vec3::ZERO).x).collect();
+        assert_eq!(x, [1.0, 3.0], "dropped, then held");
+    }
+
     // Objects hidden with Show unsubscribe their topic, so they would miss its deletions: they
     // go then, and showing them again doesn't bring back an object the server has since deleted.
     #[test]
@@ -1273,7 +1276,7 @@ mod tests {
         s.sync_connections();
         let id = s.conns[0].id;
         let channel = crate::source::Channel { topic: "/scene".into(), schema: String::new(), encoding: String::new(), kind: Some(Kind::Objects) };
-        let cup = Entity { id: "cup".into(), frame_id: "gripper".into(), lifetime: None, shapes: vec![] };
+        let cup = Entity { id: "cup".into(), timestamp: 0, frame_id: "gripper".into(), frame_locked: true, lifetime: None, shapes: vec![] };
         let update = Decoded::Objects(SceneUpdate { deletions: vec![], entities: vec![cup] });
         s.apply(vec![(id, Event::Channels(vec![channel])), (id, Event::Data { topic: "/scene".into(), data: update })], 0.0);
         let objects = |s: &State| s.received().map(|r| r.objects.len()).sum::<usize>();

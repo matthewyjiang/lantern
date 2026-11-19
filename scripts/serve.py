@@ -139,8 +139,8 @@ def quat_of(m):
 
 
 def scene_entities():
-    """The --objects scene, encoding-neutral: entities as (id, frame, shapes), each shape a
-    (kind, position, quaternion, fields) tuple. Colours are sRGB 0-1, sizes metres."""
+    """The --objects scene, encoding-neutral: entities as (id, frame, frame_locked, shapes), each
+    shape a (kind, position, quaternion, fields) tuple. Colours are sRGB 0-1, sizes metres."""
     import glb
 
     up = (0.0, 0.0, 0.0, 1.0)
@@ -163,7 +163,8 @@ def scene_entities():
         ("triangles", (0.0, 0.0, 0.0), up, {"points": [zone[0], zone[1], zone[2], zone[0], zone[2], zone[3]], "color": (0.30, 0.85, 0.95, 0.25)}),
         ("text", (-0.10, 1.32, z + 0.04), up, {"text": "drop zone", "font_size": 0.035, "scale_invariant": False, "color": (0.30, 0.85, 0.95, 1.0)}),
     ]
-    return [("held", "lbr_link_ee", held), ("table", "world", table)]
+    # The held object moves with the gripper; the table's shapes are in the root frame.
+    return [("held", "lbr_link_ee", True, held), ("table", "world", False, table)]
 
 
 def scene(name):
@@ -211,9 +212,11 @@ def serve_sdk(args, cloud, xyz, frame, mount):
             if fresh:
                 time.sleep(0.05)
                 subscribed.clear()
+            # The cloud last: Lantern frames its camera on the first cloud, with the frames and
+            # objects already received, so they must arrive first for the framing to repeat.
+            extras(fresh)
             if publish_cloud:
                 publish_cloud()
-            extras(fresh)
     except KeyboardInterrupt:
         server.stop()
 
@@ -268,7 +271,7 @@ def scene_update(m, pose, vec, point, line_types):
 
     kinds = dict(zip(("strip", "loop", "list"), line_types))
     entities = []
-    for eid, frame, shapes in scene_entities():
+    for eid, frame, frame_locked, shapes in scene_entities():
         e = {k: [] for k in ("models", "texts", "cubes", "spheres", "cylinders", "arrows", "lines", "triangles")}
         for kind, p, q, f in shapes:
             at = pose(p, q)
@@ -287,7 +290,7 @@ def scene_update(m, pose, vec, point, line_types):
                 e["lines"].append(m.LinePrimitive(type=kinds[f["type"]], pose=at, thickness=f["thickness"], points=[point(x) for x in f["points"]], color=color(f["color"])))
             elif kind == "triangles":
                 e["triangles"].append(m.TriangleListPrimitive(pose=at, points=[point(x) for x in f["points"]], color=color(f["color"])))
-        entities.append(m.SceneEntity(frame_id=frame, id=eid, **e))
+        entities.append(m.SceneEntity(frame_id=frame, id=eid, frame_locked=frame_locked, **e))
     return m.SceneUpdate(entities=entities)
 
 

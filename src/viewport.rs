@@ -65,7 +65,7 @@ pub struct View<'a> {
     /// TF axes, the TF tree, poses and velocities, already in the display frame.
     pub lines: &'a Arc<Lines>,
     pub robot: Option<MeshView<'a>>,
-    /// Scene objects and the layout's frame meshes.
+    /// Scene objects.
     pub objects: Option<MeshView<'a>>,
 }
 

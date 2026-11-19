@@ -48,7 +48,7 @@ outside, or press Escape to close them. The Topics panel has no settings.
 | **Points** | Show, topic, colour, point size, density |
 | **Poses** | Show, a switch per pose topic, expire after, trail |
 | **Robot** | Show, URDF file, robot description topic, joint states topic, opacity. See [Robot model](/lantern/guides/robot-model/). |
-| **Objects** | Show, a switch per scene topic, and the layout's meshes with their load status. See [Objects](/lantern/guides/objects/). |
+| **Objects** | Show, a switch per scene topic. See [Objects](/lantern/guides/objects/). |
 | **Cards** | The camera image card with its topic and annotations, and the text and stats cards with a switch per topic |
 
 **Fixed frame** is the frame everything is drawn in. **Auto** shows what it picked, for example
@@ -133,9 +133,8 @@ A dot is a nested key: `points.size` is written `"points": { "size": 3 }`.
 | `robot.urdf` | `""` | The URDF file; empty for none |
 | `robot.description_topic`, `robot.joint_topic` | `null` | `null` is Auto |
 | `robot.opacity` | `1` | 0 to 1 |
-| `objects.show` | `true` | Scene topics and the layout's meshes |
+| `objects.show` | `true` | |
 | `objects.hidden` | `[]` | Scene topics switched off |
-| `objects.meshes` | `[]` | Mesh files attached to TF frames; see [Meshes in the layout](/lantern/guides/objects/#meshes-in-the-layout) |
 | `image_card` | `true` | The camera image card |
 | `image` | | What the card shows, with an `image` panel's keys |
 | `data` | | The text and stats cards, with a `data` panel's keys |

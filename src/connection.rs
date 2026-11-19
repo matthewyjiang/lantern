@@ -321,7 +321,7 @@ mod tests {
     }
 
     fn scene(deletions: Vec<Deletion>, entities: &[(&str, Option<f64>)]) -> Event {
-        let entity = |&(id, lifetime): &(&str, Option<f64>)| Entity { id: id.into(), frame_id: "world".into(), lifetime, shapes: vec![] };
+        let entity = |&(id, lifetime): &(&str, Option<f64>)| Entity { id: id.into(), timestamp: 0, frame_id: "world".into(), frame_locked: true, lifetime, shapes: vec![] };
         Event::Data { topic: "/scene".into(), data: Decoded::Objects(crate::scene::SceneUpdate { deletions, entities: entities.iter().map(entity).collect() }) }
     }
 
