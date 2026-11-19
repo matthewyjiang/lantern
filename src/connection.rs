@@ -113,6 +113,11 @@ impl Received {
         let mut changed = Changed::default();
         let display = match e {
             Event::Status(s) => {
+                // A new session may be on a restarted clock: its transforms start over, as a new
+                // data source does in Foxglove.
+                if matches!(s, Status::Connected { .. }) {
+                    self.tf = TfTree::default();
+                }
                 self.status = s;
                 true
             }
@@ -276,7 +281,7 @@ impl Received {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::scene::{Pose, Tracked};
+    use crate::scene::{Pose, Tf, Tracked, Transform};
 
     /// An unlabelled pose message on /tracked with a pose at each x.
     fn poses_at(xs: &[f64]) -> Event {
@@ -286,6 +291,20 @@ mod tests {
 
     fn pose_at(x: f64) -> Event {
         poses_at(&[x])
+    }
+
+    // A server restarted at 1 s on its clock, after sending the gripper at 5 s: the old run's
+    // transform no longer places anything, so the gripper at 5 s is the new run's latest.
+    #[test]
+    fn a_new_session_starts_the_transforms_over() {
+        let picked = Picked::default();
+        let mut r = Received::default();
+        let gripper = |stamp: i64, x: f64| Event::Data { topic: "/tf".into(), data: Decoded::Transforms(vec![Transform { parent: "world".into(), child: "gripper".into(), stamp, pose: Pose { translation: DVec3::new(x, 0.0, 0.0), ..Pose::IDENTITY } }]) };
+        let sec = 1_000_000_000;
+        r.apply(gripper(5 * sec, 1.0), 0.0, &picked, false);
+        r.apply(Event::Status(Status::Connected { server: String::new() }), 0.0, &picked, false);
+        r.apply(gripper(sec, 2.0), 0.0, &picked, false);
+        assert_eq!(Tf(vec![&r.tf]).lookup("world", "gripper", Some(5 * sec)).unwrap().translation.x, 2.0);
     }
 
     // An array (PoseArray, PosesInFrame) whose length goes 2, 1, 0 replaces itself each time:
@@ -321,7 +340,7 @@ mod tests {
     }
 
     fn scene(deletions: Vec<Deletion>, entities: &[(&str, Option<f64>)]) -> Event {
-        let entity = |&(id, lifetime): &(&str, Option<f64>)| Entity { id: id.into(), timestamp: 0, frame_id: "world".into(), frame_locked: true, lifetime, shapes: vec![] };
+        let entity = |&(id, lifetime): &(&str, Option<f64>)| Entity { id: id.into(), frame_id: "world".into(), placed_at: None, lifetime, shapes: vec![] };
         Event::Data { topic: "/scene".into(), data: Decoded::Objects(crate::scene::SceneUpdate { deletions, entities: entities.iter().map(entity).collect() }) }
     }
 

@@ -882,20 +882,21 @@ impl State {
         Some(PosedRobot { root, links })
     }
 
-    fn fixed_frame(&self, tf: &Tf) -> Option<String> {
+    fn fixed_frame(&self, tf: &Tf, frames: &[String]) -> Option<String> {
         if let Some(f) = &self.v3().fixed_frame {
             return Some(f.clone());
         }
         let data_frame = self.cloud().map(|(_, c)| c.frame_id.clone())
             .or_else(|| self.received().find_map(|r| r.poses.values().next()).map(|(_, p)| p.frame_id.clone()));
         let robot_root = self.shown_robot().map(|m| m.robot.links[0].clone());
-        Some(tf.root_of(&anchor_frame(data_frame, robot_root, &tf.frames())?))
+        Some(tf.root_of(&anchor_frame(data_frame, robot_root, frames)?))
     }
 
     fn derive(&self) -> Display {
         let s = self.v3();
         let tf = Tf(self.received().map(|r| &r.tf).collect());
-        let mut d = Display { fixed: self.fixed_frame(&tf), frames: tf.frames(), ..Display::default() };
+        let frames = tf.frames();
+        let mut d = Display { fixed: self.fixed_frame(&tf, &frames), frames, ..Display::default() };
         let Some(fixed) = d.fixed.clone() else { return d };
         // The shown cloud's and image card's errors first: a cloud or image refused or
         // undecodable is why it isn't drawn. (Joint names the robot lacks go before even those,
@@ -910,7 +911,7 @@ impl State {
         // height ramp (16 Ki points: percentiles to well under 1%).
         let mut sample: Vec<Vec3> = Vec::new();
         if let Some((topic, c)) = self.cloud() {
-            match tf.lookup(&fixed, &c.frame_id) {
+            match tf.lookup(&fixed, &c.frame_id, None) {
                 Some(p) => {
                     let m = p.then(&c.origin).matrix();
                     d.cloud_model = Some(m);
@@ -928,7 +929,7 @@ impl State {
         if s.frames {
             let mut origins = BTreeMap::new();
             for f in &d.frames {
-                if let Some(p) = tf.lookup(&fixed, f) {
+                if let Some(p) = tf.lookup(&fixed, f, None) {
                     let m = p.matrix();
                     lines.axes(m, axis, 2.5);
                     let o = m.transform_point3(Vec3::ZERO);
@@ -948,7 +949,7 @@ impl State {
         if s.poses.show {
             for r in self.received() {
                 for ((topic, _), (_, poses)) in &r.poses {
-                    let Some(frame) = tf.lookup(&fixed, &poses.frame_id) else {
+                    let Some(frame) = tf.lookup(&fixed, &poses.frame_id, None) else {
                         problems.push(format!("{topic}: no transform from {} to {fixed}", poses.frame_id));
                         continue;
                     };
@@ -967,7 +968,7 @@ impl State {
                     }
                 }
                 for t in r.trails.values() {
-                    let Some(frame) = tf.lookup(&fixed, &t.frame_id) else { continue };
+                    let Some(frame) = tf.lookup(&fixed, &t.frame_id, None) else { continue };
                     let at = |p: &DVec3| frame.then(&Pose { translation: *p, rotation: Default::default() }).translation.as_vec3();
                     let pts: Vec<Vec3> = t.points.iter().map(|(_, p)| at(p)).collect();
                     for w in pts.windows(2) {
@@ -983,7 +984,7 @@ impl State {
         }
         if let Some(m) = self.shown_robot() {
             let root = &m.robot.links[0];
-            let placed = tf.lookup(&fixed, root).unwrap_or_else(|| {
+            let placed = tf.lookup(&fixed, root, None).unwrap_or_else(|| {
                 d.robot_note = Some(format!("No transform from {root} to {fixed}: drawn at {fixed}'s origin"));
                 Pose::IDENTITY
             });
@@ -1032,8 +1033,7 @@ impl State {
             problems.extend(self.error(&topic).map(|e| format!("{topic}: {e}")));
         }
         for ((topic, _), (_, e)) in self.received().flat_map(|r| &r.objects) {
-            let frame = if e.frame_locked { tf.lookup(fixed, &e.frame_id) } else { tf.lookup_at(fixed, &e.frame_id, e.timestamp) };
-            let Some(frame) = frame else {
+            let Some(frame) = tf.lookup(fixed, &e.frame_id, e.placed_at) else {
                 problems.push(format!("{topic}: no transform from {} to {fixed}", e.frame_id));
                 continue;
             };
@@ -1251,8 +1251,8 @@ mod tests {
             (id, Event::Data { topic: "/tf".into(), data: Decoded::Transforms(vec![Transform { parent: "world".into(), child: "gripper".into(), stamp, pose }]) })
         };
         let cube = Shape { pose: Pose::IDENTITY, color: [1.0; 4], geometry: Geometry::Cube { size: DVec3::splat(0.1) } };
-        let entity = |id: &str, frame_locked| Entity { id: id.into(), timestamp: sec, frame_id: "gripper".into(), frame_locked, lifetime: None, shapes: vec![cube.clone()] };
-        let scene = Decoded::Objects(SceneUpdate { deletions: vec![], entities: vec![entity("dropped", false), entity("held", true)] });
+        let entity = |id: &str, placed_at| Entity { id: id.into(), frame_id: "gripper".into(), placed_at, lifetime: None, shapes: vec![cube.clone()] };
+        let scene = Decoded::Objects(SceneUpdate { deletions: vec![], entities: vec![entity("dropped", Some(sec)), entity("held", None)] });
         s.apply(vec![
             (id, Event::Channels(vec![channel("/tf", Kind::Transforms), channel("/scene", Kind::Objects)])),
             gripper(sec, 1.0),
@@ -1276,7 +1276,7 @@ mod tests {
         s.sync_connections();
         let id = s.conns[0].id;
         let channel = crate::source::Channel { topic: "/scene".into(), schema: String::new(), encoding: String::new(), kind: Some(Kind::Objects) };
-        let cup = Entity { id: "cup".into(), timestamp: 0, frame_id: "gripper".into(), frame_locked: true, lifetime: None, shapes: vec![] };
+        let cup = Entity { id: "cup".into(), frame_id: "gripper".into(), placed_at: None, lifetime: None, shapes: vec![] };
         let update = Decoded::Objects(SceneUpdate { deletions: vec![], entities: vec![cup] });
         s.apply(vec![(id, Event::Channels(vec![channel])), (id, Event::Data { topic: "/scene".into(), data: update })], 0.0);
         let objects = |s: &State| s.received().map(|r| r.objects.len()).sum::<usize>();

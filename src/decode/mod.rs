@@ -14,6 +14,11 @@ use std::fmt;
 
 use crate::scene::{Annotation, Diagnostic, Image, PointCloud, Poses, SceneUpdate, Transform};
 
+/// Nanoseconds from a stamp's seconds and nanoseconds.
+fn nanos(sec: i64, nanosec: i64) -> i64 {
+    sec.saturating_mul(1_000_000_000).saturating_add(nanosec)
+}
+
 pub use points::ColorChoice;
 
 /// What a channel feeds, which decides how the UI offers it.
@@ -354,8 +359,8 @@ mod tests {
         let [grasped, shapes] = &pb.entities[..] else { panic!("two entities") };
         assert_eq!((grasped.id.as_str(), grasped.frame_id.as_str(), grasped.lifetime), ("grasped", "gripper", Some(1.5)));
         assert_eq!(shapes.lifetime, None, "no lifetime: kept until replaced");
-        assert_eq!((grasped.timestamp, grasped.frame_locked), (1_700_000_001_000_000_005, true));
-        assert_eq!((shapes.timestamp, shapes.frame_locked), (0, false), "unset, as Foxglove's defaults");
+        assert_eq!(grasped.placed_at, None, "frame-locked, so its timestamp isn't used");
+        assert_eq!(shapes.placed_at, Some(0), "not frame-locked, at an unset timestamp: Foxglove's defaults");
         let at = &grasped.shapes[0].pose;
         assert_eq!(at.translation, DVec3::new(0.5, -0.25, 0.1));
         assert!((at.rotation.z - std::f64::consts::FRAC_1_SQRT_2).abs() < 1e-12);

@@ -142,11 +142,10 @@ pub enum Deletion {
 #[derive(Clone, Debug, PartialEq)]
 pub struct Entity {
     pub id: String,
-    /// Nanoseconds on the publisher's clock: where an entity that isn't `frame_locked` is placed.
-    pub timestamp: i64,
     pub frame_id: String,
-    /// Follows its frame as TF moves it; else stays where its frame was at `timestamp`.
-    pub frame_locked: bool,
+    /// `None` follows the frame as TF moves it (`frame_locked`). `Some(t)` stays where the frame
+    /// was at `t`, the entity's `timestamp` in nanoseconds on the publisher's clock.
+    pub placed_at: Option<i64>,
     /// Dropped this many seconds after it arrives; `None` keeps it until replaced or deleted.
     pub lifetime: Option<f64>,
     pub shapes: Vec<Shape>,
@@ -247,11 +246,6 @@ pub fn percentiles(mut values: Vec<f32>, lo: f32, hi: f32) -> Option<(f32, f32)>
     Some((at(lo), at(hi)))
 }
 
-/// Nanoseconds from a header stamp's seconds and nanoseconds.
-pub fn nanos(sec: i64, nanosec: i64) -> i64 {
-    sec.saturating_mul(1_000_000_000).saturating_add(nanosec)
-}
-
 /// The most transforms kept per child frame, as Foxglove's 3D panel keeps
 /// (`DEFAULT_MAX_CAPACITY_PER_FRAME`): 100 s of history at 100 Hz. Older ones are dropped.
 pub const TF_HISTORY: usize = 10_000;
@@ -267,7 +261,7 @@ pub struct TfTree {
 struct Edge {
     parent: String,
     latest: Pose,
-    /// Sorted by stamp, one transform per stamp.
+    /// Sorted by stamp, one transform per stamp; never empty.
     history: VecDeque<(i64, Pose)>,
 }
 
@@ -277,14 +271,14 @@ impl Edge {
     fn at(&self, stamp: i64) -> Pose {
         let h = &self.history;
         let i = h.partition_point(|(t, _)| *t < stamp);
-        match (i.checked_sub(1).and_then(|k| h.get(k)), h.get(i)) {
-            (_, Some((t, p))) if *t == stamp => *p,
-            (Some((t0, a)), Some((t1, b))) => {
-                let f = (stamp - t0) as f64 / (t1 - t0) as f64;
+        match (i.checked_sub(1).map(|k| &h[k]), h.get(i)) {
+            (Some((t0, a)), Some((t1, b))) if *t1 != stamp => {
+                // In i128: stamps far apart (bad data) mustn't overflow.
+                let f = (i128::from(stamp) - i128::from(*t0)) as f64 / (i128::from(*t1) - i128::from(*t0)) as f64;
                 Pose { translation: a.translation.lerp(b.translation, f), rotation: a.rotation.slerp(b.rotation, f) }
             }
-            (Some((_, p)), None) | (None, Some((_, p))) => *p,
-            (None, None) => self.latest,
+            (_, Some((_, p))) | (Some((_, p)), None) => *p,
+            (None, None) => unreachable!("an edge's history is never empty"),
         }
     }
 }
@@ -295,10 +289,13 @@ impl TfTree {
         if t.parent == t.child {
             return;
         }
-        let edge = self.parents.entry(t.child).or_insert_with(|| Edge { parent: t.parent.clone(), latest: t.pose, history: VecDeque::new() });
-        if edge.parent != t.parent {
-            *edge = Edge { parent: t.parent, latest: t.pose, history: VecDeque::new() };
-        }
+        let edge = match self.parents.get_mut(&t.child) {
+            Some(edge) if edge.parent == t.parent => edge,
+            _ => {
+                self.parents.insert(t.child, Edge { parent: t.parent, latest: t.pose, history: VecDeque::from([(t.stamp, t.pose)]) });
+                return;
+            }
+        };
         edge.latest = t.pose;
         let h = &mut edge.history;
         let i = h.partition_point(|(s, _)| *s < t.stamp);
@@ -356,22 +353,15 @@ impl Tf<'_> {
         self.to_root(frame, None).0
     }
 
-    /// `target_T_source` with the latest transforms, if both are in one tree.
-    pub fn lookup(&self, target: &str, source: &str) -> Option<Pose> {
-        if target == source {
+    /// `target_T_source`, if both are in one tree: with the latest transforms, or for something
+    /// that stays where `source` was at `stamp`, as Foxglove places it: from `source` into the
+    /// tree's root with the transforms at `stamp`, then into `target` with the latest.
+    pub fn lookup(&self, target: &str, source: &str, stamp: Option<i64>) -> Option<Pose> {
+        if target == source && stamp.is_none() {
             return Some(Pose::IDENTITY);
         }
         let (root_t, root_from_target) = self.to_root(target, None);
-        let (root_s, root_from_source) = self.to_root(source, None);
-        (root_t == root_s).then(|| root_from_target.inverse().then(&root_from_source))
-    }
-
-    /// `target_T_source` for something that stays where `source` was at `stamp`, as Foxglove
-    /// places it: from `source` into the tree's root with the transforms at `stamp`, then into
-    /// `target` with the latest.
-    pub fn lookup_at(&self, target: &str, source: &str, stamp: i64) -> Option<Pose> {
-        let (root_t, root_from_target) = self.to_root(target, None);
-        let (root_s, root_from_source) = self.to_root(source, Some(stamp));
+        let (root_s, root_from_source) = self.to_root(source, stamp);
         (root_t == root_s).then(|| root_from_target.inverse().then(&root_from_source))
     }
 }
@@ -399,13 +389,13 @@ mod tests {
         let tree = Tf(vec![&tree]);
 
         // The lidar sits 1 m ahead of a base turned 90°, so 1 m along map +y from the base.
-        let p = tree.lookup("map", "lidar").unwrap();
+        let p = tree.lookup("map", "lidar", None).unwrap();
         assert!((p.translation - DVec3::new(2.0, 1.0, 0.5)).length() < 1e-9, "{:?}", p.translation);
         // A point at the lidar's origin seen from the camera: map (2,1,0.5) minus camera (0,3,1).
-        let c = tree.lookup("camera", "lidar").unwrap();
+        let c = tree.lookup("camera", "lidar", None).unwrap();
         assert!((c.translation - DVec3::new(2.0, -2.0, -0.5)).length() < 1e-9, "{:?}", c.translation);
         assert_eq!(tree.root_of("lidar"), "map");
-        assert!(tree.lookup("map", "wheel").is_none(), "odom tree is not connected to map");
+        assert!(tree.lookup("map", "wheel", None).is_none(), "odom tree is not connected to map");
     }
 
     // A gripper moving along map x at 1 m/s from t = 1 s, its transforms sent late and out of
@@ -421,16 +411,16 @@ mod tests {
             tree.insert(t);
         }
         let view = Tf(vec![&tree]);
-        let x = |stamp| view.lookup_at("map", "gripper", stamp).unwrap().translation.x;
+        let x = |stamp| view.lookup("map", "gripper", Some(stamp)).unwrap().translation.x;
         assert_eq!([x(s), x(5 * s / 2), x(0), x(9 * s)], [0.0, 1.5, 0.0, 2.0]);
-        assert_eq!(view.lookup("map", "gripper").unwrap().translation.x, 1.0, "arrived last");
+        assert_eq!(view.lookup("map", "gripper", None).unwrap().translation.x, 1.0, "arrived last");
 
         // Seen from the gripper, something left at 2 s stays at map x 1 as the gripper moves on.
         tree.insert(at(4 * s, 3.0));
-        assert_eq!(Tf(vec![&tree]).lookup_at("gripper", "gripper", 2 * s).unwrap().translation.x, -2.0);
+        assert_eq!(Tf(vec![&tree]).lookup("gripper", "gripper", Some(2 * s)).unwrap().translation.x, -2.0);
 
         // A new parent starts over: the old history was relative to another frame.
         tree.insert(Transform { stamp: 5 * s, ..tf("odom", "gripper", [7.0, 0.0, 0.0], 0.0) });
-        assert_eq!(Tf(vec![&tree]).lookup_at("odom", "gripper", s).unwrap().translation.x, 7.0);
+        assert_eq!(Tf(vec![&tree]).lookup("odom", "gripper", Some(s)).unwrap().translation.x, 7.0);
     }
 }

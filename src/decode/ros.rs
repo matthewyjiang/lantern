@@ -6,11 +6,11 @@ use glam::{DQuat, DVec3};
 use super::cdr::Cdr;
 use super::{entities, image};
 use super::points::{ColorChoice, Field, Num, Packed};
-use super::{DecodeError, Decoded};
-use crate::scene::{nanos, Diagnostic, Entity, Geometry, Level, Pose, Poses, SceneUpdate, Shape, Tracked, Transform};
+use super::{nanos, DecodeError, Decoded};
+use crate::scene::{Diagnostic, Entity, Geometry, Level, Pose, Poses, SceneUpdate, Shape, Tracked, Transform};
 
-/// `std_msgs/Header`: stamp (int32 sec, uint32 nanosec), then the frame_id it returns. Lantern
-/// draws the newest message of each topic, so it doesn't use stamps.
+/// `std_msgs/Header`: stamp (int32 sec, uint32 nanosec), then the frame_id it returns. For
+/// messages drawn as the newest of their topic, which don't need the stamp.
 fn header(r: &mut Cdr) -> Result<String, DecodeError> {
     Ok(stamped_header(r)?.1)
 }
@@ -262,7 +262,7 @@ fn scene_entity(r: &mut Cdr) -> Result<Entity, DecodeError> {
         let (url, media_type, data) = (r.string()?, r.string()?, r.bytes()?.to_vec());
         shapes.push(entities::model(pose, scale, color, override_color, url, media_type, data)?);
     }
-    Ok(Entity { id, timestamp, frame_id, frame_locked, lifetime, shapes })
+    Ok(Entity { id, frame_id, placed_at: (!frame_locked).then_some(timestamp), lifetime, shapes })
 }
 
 /// `foxglove_msgs/SceneUpdate`, as a ROS node publishes it through foxglove_bridge.

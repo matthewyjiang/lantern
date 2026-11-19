@@ -79,10 +79,10 @@ Each entity is placed by its `frame_id` and the primitives' poses, as Foxglove p
   pose goes into the root of the fixed frame's TF tree with the transforms at that time, and stays
   there as the frame moves.
 
-For the second, Lantern keeps up to 10,000 transforms per frame. A `timestamp` between two of them
-is interpolated, and one outside them takes the nearest. The timestamp is compared with the
-transforms' header stamps, so both must come from the same clock. An unset `timestamp` is 0, which
-takes the oldest transform kept.
+For the second, a `timestamp` between two of the frame's transforms is interpolated, and one
+outside them takes the nearest. The timestamp is compared with the transforms' header stamps, so
+both must come from the same clock. An unset `timestamp` is 0, which takes the oldest transform
+kept. Each connection's transforms start over when it reconnects.
 
 ## Shapes
 
@@ -133,6 +133,8 @@ are subscribed to.
   gives the vertices they need, the limit and how many aren't drawn. A model over it on its own
   doesn't load.
 - Mesh files are read up to 256 MiB, and only regular files.
-- A transform older than the newest 10,000 of its frame is dropped, so an unlocked entity stamped
+- Each connection keeps the newest 10,000 transforms of each frame. An unlocked entity stamped
   before them takes the oldest kept.
+- A clock that jumps back while connected, such as a simulator reset, mixes the old run's
+  transforms with the new run's until the connection restarts.
 - Not supported: OBJ and DAE meshes, textures and HTTP URLs.

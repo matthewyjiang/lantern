@@ -212,8 +212,9 @@ def serve_sdk(args, cloud, xyz, frame, mount):
             if fresh:
                 time.sleep(0.05)
                 subscribed.clear()
-            # The cloud last: Lantern frames its camera on the first cloud, with the frames and
-            # objects already received, so they must arrive first for the framing to repeat.
+            # The cloud last (here and in publish_cloud): Lantern frames its camera on the first
+            # cloud, with the frames, poses and objects already received, so they must arrive
+            # first for the framing to repeat.
             extras(fresh)
             if publish_cloud:
                 publish_cloud()
@@ -252,11 +253,11 @@ def cloud_publisher(args, fm, vec, quat, cloud, xyz, frame, mount):
 
     def publish():
         tf.log(fm.FrameTransforms(transforms=[fm.FrameTransform(parent_frame_id="world", child_frame_id=frame, translation=vec(mount[0]), rotation=quat(mount[1]))]))
-        points.log(fm.PointCloud(frame_id=frame, point_stride=stride, fields=fields, data=data))
         if args.cloud == "table":
             for name, (p, yaw, v) in OBJECTS.items():
                 objects.log(fm.Odometry(frame_id="world", body_frame_id=name, pose=fm.Pose(position=vec(p), orientation=quat(yaw_quat(yaw))), linear_velocity=vec(v) if v else None))
             markers.log(fm.PosesInFrame(frame_id="world", poses=[fm.Pose(position=vec(p), orientation=quat(yaw_quat(y))) for p, y in MARKERS]))
+        points.log(fm.PointCloud(frame_id=frame, point_stride=stride, fields=fields, data=data))
 
     return publish
 

@@ -9,8 +9,8 @@ use prost::Message;
 use super::points::{ColorChoice, Field, Num, Packed};
 use super::ros::unit;
 use super::{entities, image};
-use super::{DecodeError, Decoded};
-use crate::scene::{nanos, Annotation, Entity, Geometry, PointsKind, Pose as ScenePose, Poses, SceneUpdate as Scene, Shape, Tracked, Transform};
+use super::{nanos, DecodeError, Decoded};
+use crate::scene::{Annotation, Entity, Geometry, PointsKind, Pose as ScenePose, Poses, SceneUpdate as Scene, Shape, Tracked, Transform};
 
 #[derive(Clone, PartialEq, Message)]
 struct Vector3 {
@@ -579,7 +579,7 @@ fn entity(e: SceneEntity) -> Result<Entity, DecodeError> {
         shapes.push(entities::model(pose(m.pose), vec3(m.scale), rgba(m.color), m.override_color, m.url, m.media_type, m.data)?);
     }
     let lifetime = e.lifetime.and_then(|d| entities::lifetime(d.seconds, d.nanos.into()));
-    Ok(Entity { id: e.id, timestamp: stamp(e.timestamp), frame_id: e.frame_id, frame_locked: e.frame_locked, lifetime, shapes })
+    Ok(Entity { id: e.id, frame_id: e.frame_id, placed_at: (!e.frame_locked).then(|| stamp(e.timestamp)), lifetime, shapes })
 }
 
 pub fn scene_update(bytes: &[u8], _: &ColorChoice) -> Result<Decoded, DecodeError> {

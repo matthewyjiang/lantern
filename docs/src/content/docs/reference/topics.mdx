@@ -93,7 +93,7 @@ its key-value pairs, in one card or a Data panel.
 | Mesh file size | 256 MiB, as for a message | The mesh doesn't load, and its error gives the limit |
 | Image side | 8,192 px | The image isn't shown; the status chip and its topic say why |
 | Text cards and statuses in the 3D view | 3 cards, 6 statuses | An `and N more` line counts the rest |
-| TF history | 10,000 transforms per frame, as Foxglove keeps | The oldest is dropped; an unlocked scene entity stamped before what's kept is placed with the oldest |
+| TF history | 10,000 transforms per frame and connection, as Foxglove keeps (640 KB at 64 bytes each) | The oldest is dropped; an unlocked scene entity stamped before what's kept is placed with the oldest |
 | Pose trail | 60 s | A longer `poses.trail` in a layout is clamped, with a note on stderr |
 
 128 MiB is the largest storage buffer Rune's GPU device allows. The image size is checked before
