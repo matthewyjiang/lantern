@@ -1,8 +1,8 @@
 // Lantern's 3D viewport. These pipelines draw into the offscreen target in one pass, in order:
 // `sky` (backdrop + ground grid, no depth), `points` (the cloud, depth-tested and written),
-// `mesh` twice per mesh, robot then objects (depth only, then colour where depth matches,
-// blended), then `seg` (TF axes and tree, poses, velocities, object lines; depth-tested,
-// blended); a mesh with translucent parts draws after `seg` instead. `blit` then copies the target into
+// `mesh` for the opaque parts of the robot and objects (depth only, then colour where depth
+// matches), `seg` (TF axes and tree, poses, velocities, object lines; depth-tested, blended),
+// then `mesh` again for the translucent parts (blended). `blit` then copies the target into
 // Rune's effect slot inside the UI pass. Rune's CLIP_WGSL is prepended (clip_alpha).
 //
 // Colours are linear: the offscreen target is *Srgb, and `blit` re-encodes when the UI pass

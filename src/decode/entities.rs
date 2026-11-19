@@ -6,12 +6,21 @@ use std::hash::{DefaultHasher, Hash, Hasher};
 use glam::DVec3;
 
 use super::DecodeError;
-use crate::scene::{Geometry, LineKind, ModelSource, Pose, Shape, Thickness};
+use crate::scene::{Deletion, Geometry, LineKind, ModelSource, Pose, Shape, Thickness};
 
 /// A lifetime of `sec` + `nanos`; zero (or less) keeps the entity until replaced or deleted.
 pub fn lifetime(sec: i64, nanos: i64) -> Option<f64> {
     let s = sec as f64 + nanos as f64 * 1e-9;
     (s > 0.0).then_some(s)
+}
+
+/// A deletion of `kind` 0 (the entity `id`) or 1 (all of the topic's).
+pub fn deletion(kind: i64, id: String) -> Result<Deletion, DecodeError> {
+    match kind {
+        0 => Ok(Deletion::Id(id)),
+        1 => Ok(Deletion::All),
+        other => Err(DecodeError::new(format!("deletion has unknown type {other}"))),
+    }
 }
 
 /// `items` in the order `indices` names them, or as they are with no indices.

@@ -189,16 +189,13 @@ impl<S: 'static> Compositor<S> for Viewport<S> {
             let sets = [view.robot, view.objects].map(|v| v.map(|v| (Arc::clone(v.mesh), v.parts)));
             f.write_buffer(&gpu.frame_buf, 0, bytemuck::bytes_of(&uniform));
             for (k, set) in sets.iter().enumerate() {
-                match set {
-                    Some((mesh, parts)) => {
-                        let drawn = gpu.ensure_mesh(device, queue, k, mesh, parts);
-                        f.write_buffer(&drawn.parts, 0, bytemuck::cast_slice(&part_data(parts)));
-                    }
-                    None => gpu.hide_mesh(k),
+                if let Some((mesh, parts)) = set {
+                    let uploaded = gpu.ensure_mesh(device, queue, k, mesh, parts);
+                    f.write_buffer(&uploaded.parts, 0, bytemuck::cast_slice(&part_data(parts)));
                 }
                 self.last_meshes[k] = set.as_ref().map_or(0, |(m, _)| m.vertices.len());
             }
-            gpu.encode_3d(f.encoder, drawn);
+            gpu.encode_3d(f.encoder, drawn, sets.each_ref().map(|s| s.as_ref().map_or(&[][..], |(_, p)| p.as_slice())));
             self.last = (drawn, (w, h));
         }
 
@@ -287,7 +284,7 @@ fn frame_uniform(v: &View<'_>, (w, h): (u32, u32), scale: f32) -> FrameUniform {
         style: [mode, v.decimate.max(1), v.grid.is_some() as u32, 0],
         shade: [lo, hi, 0.0, 0.0],
         // Pixels per metre at unit depth, for lines in metres.
-        grid: [v.grid.unwrap_or(1.0), v.radius, h as f32 * 0.5 / (v.camera.fov_y * 0.5).tan(), 0.0],
+        grid: [v.grid.unwrap_or(1.0), v.radius, v.camera.focal(h as f32), 0.0],
     }
 }
 
@@ -304,7 +301,7 @@ struct Gpu {
     segs: wgpu::RenderPipeline,
     mesh_bgl: wgpu::BindGroupLayout,
     /// A mesh in two passes over the same vertices: depth only, then colour where the depth
-    /// matches. A translucent robot then shows what's behind it, not its own hidden faces.
+    /// matches. Translucent parts then show what's behind them, not their own hidden faces.
     mesh_depth: wgpu::RenderPipeline,
     mesh_color: wgpu::RenderPipeline,
     /// The robot's and the objects' meshes.
@@ -333,16 +330,12 @@ struct Uploaded {
 }
 
 /// One mesh's vertices (re-uploaded when the mesh changes) and its per-part matrices and
-/// colours (written every frame it's drawn).
+/// colours (written every frame it's drawn). A mesh not drawn keeps its buffers, so drawing it
+/// again costs nothing.
 struct MeshGpu {
     mesh: Arc<Mesh>,
     parts: wgpu::Buffer,
     group: wgpu::BindGroup,
-    /// Drawn this frame: shown, and which parts are visible (alpha over 0).
-    shown: bool,
-    visible: Vec<bool>,
-    /// Some visible part shows through: the set draws after the lines.
-    translucent: bool,
 }
 
 impl Gpu {
@@ -487,25 +480,14 @@ impl Gpu {
         !same_cloud && cloud.is_some()
     }
 
-    /// Shows `mesh` in slot `k` with `parts` placed, uploading it unless it's the one already
-    /// there. A hidden mesh keeps its buffers, so showing it again costs nothing. `State::view`
-    /// only passes meshes with parts, and a placement for each.
+    /// Slot `k`'s buffers for `mesh`, uploading it unless it's the one already there.
+    /// `State::view` passes a placement for each of the mesh's parts.
     fn ensure_mesh(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, k: usize, mesh: &Arc<Mesh>, parts: &[PartDraw]) -> &MeshGpu {
         debug_assert_eq!(parts.len(), mesh.parts.len());
         if !self.meshes[k].as_ref().is_some_and(|m| Arc::ptr_eq(&m.mesh, mesh)) {
             self.meshes[k] = Some(self.upload_mesh(device, queue, mesh));
         }
-        let m = self.meshes[k].as_mut().unwrap();
-        m.shown = true;
-        m.visible = parts.iter().map(|p| p.color[3] > 0.0).collect();
-        m.translucent = parts.iter().any(|p| p.color[3] > 0.0 && p.color[3] < 1.0);
-        m
-    }
-
-    fn hide_mesh(&mut self, k: usize) {
-        if let Some(m) = &mut self.meshes[k] {
-            m.shown = false;
-        }
+        self.meshes[k].as_ref().unwrap()
     }
 
     fn upload_mesh(&self, device: &wgpu::Device, queue: &wgpu::Queue, mesh: &Arc<Mesh>) -> MeshGpu {
@@ -519,13 +501,14 @@ impl Gpu {
                 wgpu::BindGroupEntry { binding: 1, resource: parts.as_entire_binding() },
             ],
         });
-        MeshGpu { mesh: Arc::clone(mesh), parts, group, shown: false, visible: Vec::new(), translucent: false }
+        MeshGpu { mesh: Arc::clone(mesh), parts, group }
     }
 
-    /// Records the timestamped 3D pass into the offscreen target. A mesh with a translucent part
-    /// draws after the lines, so its depth doesn't hide the TF axes inside it (lines in front of
-    /// it take a faint tint instead); an opaque one draws before them, so they stay crisp.
-    fn encode_3d(&mut self, encoder: &mut wgpu::CommandEncoder, drawn: u32) {
+    /// Records the timestamped 3D pass into the offscreen target, with `parts[k]` placing slot
+    /// `k`'s mesh this frame (empty: not drawn). Opaque parts draw before the lines, so lines
+    /// stay crisp; translucent parts draw after them, so their depth doesn't hide the TF axes
+    /// inside them (lines in front take a faint tint instead). Alpha-0 parts aren't drawn.
+    fn encode_3d(&mut self, encoder: &mut wgpu::CommandEncoder, drawn: u32, parts: [&[PartDraw]; 2]) {
         let (Some(target), Some(scene)) = (&self.target, &self.scene) else { return };
         let slot = self.timer.as_mut().and_then(|t| t.begin());
         let timestamp_writes = slot.map(|k| wgpu::RenderPassTimestampWrites {
@@ -558,24 +541,26 @@ impl Gpu {
                 pass.set_pipeline(&self.points);
                 pass.draw(0..6 * drawn, 0..1);
             }
-            let draw_meshes = |pass: &mut wgpu::RenderPass<'_>, translucent: bool| {
-                for m in self.meshes.iter().flatten().filter(|m| m.shown && m.translucent == translucent) {
-                    pass.set_bind_group(1, &m.group, &[]);
-                    for pipeline in [&self.mesh_depth, &self.mesh_color] {
-                        pass.set_pipeline(pipeline);
+            // Each phase draws its parts of both meshes depth-only, then in colour.
+            let draw_meshes = |pass: &mut wgpu::RenderPass<'_>, phase: fn(f32) -> bool| {
+                for pipeline in [&self.mesh_depth, &self.mesh_color] {
+                    pass.set_pipeline(pipeline);
+                    // A slot not drawn this frame keeps its buffers but has no placements.
+                    for (m, parts) in self.meshes.iter().zip(parts).filter_map(|(m, p)| Some((m.as_ref()?, p)).filter(|_| !p.is_empty())) {
+                        pass.set_bind_group(1, &m.group, &[]);
                         // The instance index picks the part's matrix and colour.
-                        for (k, range) in m.mesh.parts.iter().enumerate().filter(|(k, r)| m.visible[*k] && !r.is_empty()) {
+                        for (k, range) in m.mesh.parts.iter().enumerate().filter(|(k, r)| phase(parts[*k].color[3]) && !r.is_empty()) {
                             pass.draw(range.clone(), k as u32..k as u32 + 1);
                         }
                     }
                 }
             };
-            draw_meshes(&mut pass, false);
+            draw_meshes(&mut pass, |a| a >= 1.0);
             if scene.lines.len() > 0 {
                 pass.set_pipeline(&self.segs);
                 pass.draw(0..4, 0..scene.lines.len() as u32);
             }
-            draw_meshes(&mut pass, true);
+            draw_meshes(&mut pass, |a| a > 0.0 && a < 1.0);
         }
         if let Some(k) = slot {
             self.timer.as_mut().unwrap().end(encoder, k, drawn);

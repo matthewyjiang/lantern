@@ -3,8 +3,11 @@
 //! own frame (scale applied) and placed at draw time, so a part that only moves keeps the mesh;
 //! lines join the TF lines and text the labels.
 
+use std::collections::HashMap;
 use std::f32::consts::FRAC_PI_2;
+use std::path::Path;
 use std::sync::{Arc, LazyLock};
+use std::time::Instant;
 
 use glam::{Mat4, Quat, Vec3};
 
@@ -14,13 +17,13 @@ use crate::viewport::{Lines, PartDraw};
 
 /// What names a loaded model: its URL or file path, or the hash of the bytes a message sent.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub enum ModelKey {
+enum ModelKey {
     Url(String),
     Data(u64),
 }
 
 impl ModelKey {
-    pub fn of(source: &ModelSource) -> ModelKey {
+    fn of(source: &ModelSource) -> ModelKey {
         match source {
             ModelSource::Url(url) => ModelKey::Url(url.clone()),
             ModelSource::Data { hash, .. } => ModelKey::Data(*hash),
@@ -28,8 +31,51 @@ impl ModelKey {
     }
 }
 
-/// One part of the objects' mesh, in its own frame. Equal geometry builds an equal mesh.
+/// The models that objects and the layout's meshes name, each loaded once, or why it can't be.
+#[derive(Default)]
+pub struct Models(HashMap<ModelKey, Result<Arc<Asset>, String>>);
+
+impl Models {
+    /// Loads the `named` models not loaded yet, and drops the ones no longer named. Loads run
+    /// on the calling (UI) thread: a model is read when something first names it.
+    pub fn sync(&mut self, named: Vec<ModelSource>) {
+        let named: HashMap<ModelKey, ModelSource> = named.into_iter().map(|s| (ModelKey::of(&s), s)).collect();
+        self.0.retain(|key, _| named.contains_key(key));
+        for (key, source) in named {
+            if self.0.contains_key(&key) {
+                continue;
+            }
+            let started = Instant::now();
+            let (what, loaded) = match &source {
+                ModelSource::Url(url) => (url.clone(), mesh::resolve(url, Path::new(".")).and_then(|p| mesh::model_file(&p))),
+                ModelSource::Data { media_type, bytes, .. } => (format!("{} bytes of {media_type}", bytes.len()), mesh::model(bytes, media_type, "", None)),
+            };
+            match &loaded {
+                Ok(a) => eprintln!("lantern: loaded model {what} in {:.1} ms: {} pieces, {} vertices", started.elapsed().as_secs_f64() * 1000.0, a.pieces.len(), a.vertex_count()),
+                Err(e) => eprintln!("lantern: can't load model {what}: {e}"),
+            }
+            self.0.insert(key, loaded.map(Arc::new));
+        }
+    }
+
+    /// A model's load, once something has named it.
+    pub fn get(&self, source: &ModelSource) -> Option<&Result<Arc<Asset>, String>> {
+        self.0.get(&ModelKey::of(source))
+    }
+}
+
+/// A loaded model, equal only to itself: the same load builds the same mesh.
 #[derive(Clone, Debug)]
+pub struct AssetRef(pub Arc<Asset>);
+
+impl PartialEq for AssetRef {
+    fn eq(&self, other: &AssetRef) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+/// One part of the objects' mesh, in its own frame. Equal geometry builds an equal mesh.
+#[derive(Clone, Debug, PartialEq)]
 pub enum Geom {
     /// The unit shapes scaled along their axes.
     Cube(Vec3),
@@ -38,21 +84,7 @@ pub enum Geom {
     Arrow { shaft_length: f32, shaft_diameter: f32, head_length: f32, head_diameter: f32 },
     Triangles(Vec<Vec3>),
     /// Piece `piece` of a loaded model, scaled.
-    Model { asset: Arc<Asset>, piece: usize, scale: Vec3 },
-}
-
-impl PartialEq for Geom {
-    fn eq(&self, other: &Geom) -> bool {
-        use Geom::*;
-        match (self, other) {
-            (Cube(a), Cube(b)) | (Sphere(a), Sphere(b)) => a == b,
-            (Cylinder { size: a, bottom: b1, top: t1 }, Cylinder { size: b, bottom: b2, top: t2 }) => a == b && b1 == b2 && t1 == t2,
-            (Arrow { shaft_length: a, shaft_diameter: b, head_length: c, head_diameter: d }, Arrow { shaft_length: e, shaft_diameter: f, head_length: g, head_diameter: h }) => (a, b, c, d) == (e, f, g, h),
-            (Triangles(a), Triangles(b)) => a == b,
-            (Model { asset: a, piece: p, scale: s }, Model { asset: b, piece: q, scale: t }) => Arc::ptr_eq(a, b) && p == q && s == t,
-            _ => false,
-        }
-    }
+    Model { asset: AssetRef, piece: usize, scale: Vec3 },
 }
 
 /// The unit shapes, shaded once: a 1 m cube, and a sphere, cylinder and cone 1 m across (the
@@ -89,13 +121,14 @@ impl Geom {
                 let tris: Vec<mesh::Triangle> = points.chunks_exact(3).map(|t| [t[0], t[1], t[2]]).collect();
                 mesh::shade(&tris)
             }
-            Geom::Model { asset, piece, scale } => mesh::scaled(&asset.pieces[*piece].vertices, *scale).collect(),
+            Geom::Model { asset, piece, scale } => mesh::scaled(&asset.0.pieces[*piece].vertices, *scale).collect(),
         }
     }
 }
 
 /// The mesh of `geoms`, one part each, in order. Once `max_vertices` would be passed, the rest
-/// are left empty, and the second value says how many vertices they needed.
+/// are left empty, and the second value names the vertices asked for, the limit, and how many
+/// aren't drawn.
 pub fn build(geoms: &[Geom], max_vertices: usize) -> (Mesh, Option<String>) {
     let mut out = Mesh::default();
     let mut skipped = 0;
@@ -111,7 +144,8 @@ pub fn build(geoms: &[Geom], max_vertices: usize) -> (Mesh, Option<String>) {
     }
     let problem = (skipped > 0).then(|| {
         use crate::ui::thousands;
-        format!("Objects: {} more mesh vertices than the {} the GPU can draw; some aren't drawn", thousands(skipped), thousands(max_vertices))
+        let total = out.vertices.len() + skipped;
+        format!("Objects need {} mesh vertices, over the {} the GPU can draw; {} aren't drawn", thousands(total), thousands(max_vertices), thousands(skipped))
     });
     (out, problem)
 }
@@ -142,13 +176,13 @@ impl Placed {
     pub fn model(&mut self, asset: &Arc<Asset>, at: Mat4, scale: Vec3, color: Option<[f32; 4]>) {
         for (k, piece) in asset.pieces.iter().enumerate() {
             let color = color.or(piece.color).unwrap_or(mesh::DEFAULT_COLOR);
-            self.part(Geom::Model { asset: Arc::clone(asset), piece: k, scale }, at, color);
+            self.part(Geom::Model { asset: AssetRef(Arc::clone(asset)), piece: k, scale }, at, color);
         }
     }
 
-    /// Places `shape` at `at` (`fixed_T_shape`). `model` finds a loaded model; one not loaded
-    /// (yet, or at all) isn't drawn.
-    pub fn shape(&mut self, shape: &Shape, at: Pose, lines: &mut Lines, model: impl Fn(&ModelSource) -> Option<Arc<Asset>>) {
+    /// Places `shape` at `at` (`fixed_T_shape`), its model from `models`. A model that isn't
+    /// loaded isn't drawn; the error is returned when it failed to load.
+    pub fn shape<'m>(&mut self, shape: &Shape, at: Pose, lines: &mut Lines, models: &'m Models) -> Option<&'m str> {
         let m = at.matrix();
         let f = |x: f64| x as f32;
         match &shape.geometry {
@@ -160,11 +194,10 @@ impl Placed {
                 self.part(geom, m, shape.color);
             }
             Geometry::Triangles { points } => self.part(Geom::Triangles(points.iter().map(|p| p.as_vec3()).collect()), m, shape.color),
-            Geometry::Model { source, scale, override_color } => {
-                if let Some(asset) = model(source) {
-                    self.model(&asset, m, scale.as_vec3(), override_color.then_some(shape.color));
-                }
-            }
+            Geometry::Model { source, scale, override_color } => match models.get(source)? {
+                Ok(asset) => self.model(asset, m, scale.as_vec3(), override_color.then_some(shape.color)),
+                Err(e) => return Some(e),
+            },
             Geometry::Line { kind, points, colors, thickness } => {
                 let pts: Vec<Vec3> = points.iter().map(|p| m.transform_point3(p.as_vec3())).collect();
                 let color = |i: usize| colors.get(i).copied().unwrap_or(shape.color);
@@ -183,6 +216,7 @@ impl Placed {
             }
             Geometry::Text { text, size } => self.labels.push((text.clone(), at.translation.as_vec3(), LabelStyle { color: shape.color, size: *size })),
         }
+        None
     }
 }
 
@@ -227,26 +261,26 @@ mod tests {
         let mut cube = shape(Geometry::Cube { size: DVec3::ONE });
         cube.pose.translation = DVec3::new(0.5, 0.0, 0.0);
         let (mut placed, mut lines) = (Placed::default(), Lines::default());
-        placed.shape(&cube, frame.then(&cube.pose), &mut lines, |_| None);
+        placed.shape(&cube, frame.then(&cube.pose), &mut lines, &Models::default());
         let centre = placed.draws[0].model.transform_point3(Vec3::ZERO);
         assert!((centre - Vec3::new(1.0, 0.5, 0.0)).length() < 1e-6, "0.5 m along the frame's x, which is fixed y: {centre}");
 
         let square = [DVec3::ZERO, DVec3::X, DVec3::new(1.0, 1.0, 0.0), DVec3::Y];
         let line = shape(Geometry::Line { kind: LineKind::Loop, points: square.to_vec(), colors: vec![], thickness: Thickness::Points(2.0) });
-        placed.shape(&line, frame, &mut lines, |_| None);
+        placed.shape(&line, frame, &mut lines, &Models::default());
         assert_eq!(lines.len(), 4, "a loop of four points is four segments");
         let list = shape(Geometry::Line { kind: LineKind::List, points: square.to_vec(), colors: vec![], thickness: Thickness::Metres(0.01) });
-        placed.shape(&list, frame, &mut lines, |_| None);
+        placed.shape(&list, frame, &mut lines, &Models::default());
         assert_eq!(lines.len(), 6, "a list of four points is two");
     }
 
     // Parts that would pass the vertex limit are left empty, not dropped, so every placement
-    // still matches its part; the problem counts what's missing.
+    // still matches its part; the problem names what was asked, the limit and what's missing.
     #[test]
     fn parts_past_the_vertex_limit_stay_empty() {
         let geoms = vec![Geom::Cube(Vec3::ONE), Geom::Cube(Vec3::ONE), Geom::Cube(Vec3::ONE)];
         let (mesh, problem) = build(&geoms, 80);
         assert_eq!(mesh.parts, [0..36, 36..72, 72..72]);
-        assert!(problem.unwrap().contains("36 more mesh vertices than the 80"));
+        assert_eq!(problem.unwrap(), "Objects need 108 mesh vertices, over the 80 the GPU can draw; 36 aren't drawn");
     }
 }

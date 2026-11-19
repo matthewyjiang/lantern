@@ -58,7 +58,7 @@ in a link's frame.
 - Entities are kept per topic, by `id`. An entity with the same `id` replaces the old one.
 - Deletions (by `id`, or all of the topic's) apply before the update's entities.
 - An entity with a `lifetime` goes that long after it arrives; without one it stays until replaced
-  or deleted. Its topic going away or being switched off removes its entities too.
+  or deleted. Its topic going away or being switched off, or **Show** off, removes its entities too.
 - An entity always follows its frame as TF moves it. `frame_locked` is ignored.
 - An entity whose frame has no transform to the fixed frame isn't drawn, and the status chip says so.
 
@@ -136,6 +136,6 @@ the layout's meshes too.
 
 - All objects share one mesh of up to 5,592,405 vertices
   ([limits](/lantern/reference/topics/#limits)). Shapes past it aren't drawn, and the status chip
-  gives the count.
+  gives the vertices they need, the limit and how many aren't drawn.
 - Not supported: OBJ and DAE meshes, textures, HTTP URLs, and entities fixed in place while their
   frame moves (`frame_locked: false`).

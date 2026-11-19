@@ -8,7 +8,6 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::Path;
 use std::sync::{Arc, LazyLock};
-use std::time::Instant;
 
 use glam::{DVec3, Mat4, Vec3};
 use rune::{Pixels, TextEdit, Tx};
@@ -18,8 +17,8 @@ use crate::camera::OrbitCamera;
 use crate::connection::{Connection, Picked, Post, Received};
 use crate::decode::Kind;
 use crate::layout::{Dir, Layout, PaneId, Panel, PanelKind};
-use crate::mesh::{self, Asset, Mesh};
-use crate::objects::{self, Geom, LabelStyle, ModelKey, Placed};
+use crate::mesh::Mesh;
+use crate::objects::{self, Geom, LabelStyle, Models, Placed};
 use crate::robot::{self, Model};
 use crate::scene::{percentiles, Annotation, Diagnostic, Geometry, Image, ModelSource, PointCloud, PointColor, Pose, TfTree};
 use crate::settings::{DataSettings, ImageSettings, Settings, View3dSettings};
@@ -110,7 +109,7 @@ pub struct State {
     /// How the file's robot differs from the described one, when both loaded and they differ.
     robot_mismatch: Option<Mismatch>,
     /// The models the shown objects and frame meshes name, loaded or why not (`sync_models`).
-    models: HashMap<ModelKey, Result<Arc<Asset>, String>>,
+    models: Models,
     /// Joint positions changed: `sync` re-poses the robot without rebuilding the display.
     robot_dirty: bool,
     /// Each shown image with its annotations drawn in, by its topic and the annotation topics
@@ -314,7 +313,7 @@ impl State {
             robot_file: None,
             robot_description: None,
             robot_mismatch: None,
-            models: HashMap::new(),
+            models: Models::default(),
             robot_dirty: false,
             images: BTreeMap::new(),
             image_dirty: false,
@@ -588,9 +587,9 @@ impl State {
         self.robot_mismatch.as_ref().map(|m| m.message.as_str())
     }
 
-    /// A model's load, by what names it (a URL or path, or the bytes' hash), once loaded.
-    pub fn model(&self, key: &ModelKey) -> Option<&Result<Arc<Asset>, String>> {
-        self.models.get(key)
+    /// The models the shown objects and frame meshes name.
+    pub fn models(&self) -> &Models {
+        &self.models
     }
 
     /// The robot drawn: the file's, unless a server describes a different robot, which wins (a
@@ -685,7 +684,6 @@ impl State {
         self.sync_robot();
         let (joint_topic, cloud_topic, image_topics) = (self.joint_topic(), self.cloud_topic(), self.image_topics());
         let hidden = self.v3().poses.hidden.clone();
-        let hidden_objects = self.v3().objects.hidden.clone();
         for r in self.conns.iter_mut().map(|c| &mut c.received) {
             // A switched joint topic: the old topic's positions don't apply.
             if r.joints.as_ref().is_some_and(|(t, _)| Some(t) != joint_topic.as_ref()) {
@@ -703,14 +701,18 @@ impl State {
             self.image_dirty |= r.images.len() != before;
             r.poses.retain(|(topic, _), _| !hidden.contains(topic));
             r.trails.retain(|(topic, _), _| !hidden.contains(topic));
-            let before = r.objects.len();
-            r.objects.retain(|(topic, _), _| !hidden_objects.contains(topic));
-            self.dirty |= r.objects.len() != before;
         }
         if let Some(due) = self.expire(clock) {
             tx.wake_at(due);
         }
         let wanted = self.wanted();
+        // Entities only of topics still subscribed: one switched off or hidden with Show misses
+        // its deletions, so its entities would be stale when shown again.
+        for r in self.conns.iter_mut().map(|c| &mut c.received) {
+            let before = r.objects.len();
+            r.objects.retain(|(topic, _), _| wanted.topics.contains(topic));
+            self.dirty |= r.objects.len() != before;
+        }
         self.conns.iter_mut().for_each(|c| c.want(&wanted));
         if self.settings != self.applied {
             self.overrides.to_save(&self.settings, &self.from_file).save();
@@ -815,41 +817,19 @@ impl State {
         }
     }
 
-    /// Loads the models the shown objects and frame meshes name that aren't loaded yet, and
-    /// drops the ones nothing names any more. Loads run here, on the UI thread, when the display
-    /// is rebuilt: a model is read once, when an entity or the layout first names it.
+    /// Loads the models the received entities (only shown topics' are kept) and, with Show on,
+    /// the layout's meshes name. Runs when the display is rebuilt, just before `derive`.
     fn sync_models(&mut self) {
         let v = self.v3();
-        let mut named: HashMap<ModelKey, ModelSource> = HashMap::new();
+        let shapes = self.received().flat_map(|r| r.objects.values()).flat_map(|(_, e)| &e.shapes);
+        let mut named: Vec<ModelSource> = shapes.filter_map(|s| match &s.geometry {
+            Geometry::Model { source, .. } => Some(source.clone()),
+            _ => None,
+        }).collect();
         if v.objects.show {
-            let entities = self.received().flat_map(|r| &r.objects).filter(|((topic, _), _)| !v.objects.hidden.contains(topic));
-            for (_, (_, e)) in entities {
-                for shape in &e.shapes {
-                    if let Geometry::Model { source, .. } = &shape.geometry {
-                        named.entry(ModelKey::of(source)).or_insert_with(|| source.clone());
-                    }
-                }
-            }
-            for m in &v.objects.meshes {
-                named.entry(ModelKey::Url(m.file.clone())).or_insert_with(|| ModelSource::Url(m.file.clone()));
-            }
+            named.extend(v.objects.meshes.iter().map(|m| ModelSource::Url(m.file.clone())));
         }
-        self.models.retain(|key, _| named.contains_key(key));
-        for (key, source) in named {
-            if self.models.contains_key(&key) {
-                continue;
-            }
-            let started = Instant::now();
-            let (what, loaded) = match &source {
-                ModelSource::Url(url) => (url.clone(), mesh::resolve(url, Path::new(".")).and_then(|p| mesh::model_file(&p))),
-                ModelSource::Data { media_type, bytes, .. } => (format!("{} bytes of {media_type}", bytes.len()), mesh::model(bytes, media_type, "", None)),
-            };
-            match &loaded {
-                Ok(a) => eprintln!("lantern: loaded model {what} in {:.1} ms: {} pieces, {} vertices", started.elapsed().as_secs_f64() * 1000.0, a.pieces.len(), a.vertex_count()),
-                Err(e) => eprintln!("lantern: can't load model {what}: {e}"),
-            }
-            self.models.insert(key, loaded.map(Arc::new));
-        }
+        self.models.sync(named);
     }
 
     /// Expires every connection's poses and trails (`Received::expire`); returns when the next
@@ -1062,11 +1042,10 @@ impl State {
     fn place_objects(&self, tf: &TfTree, fixed: &str, lines: &mut Lines, marks: &mut Vec<Vec3>, problems: &mut Vec<String>) -> (ObjectsDisplay, Vec<Label>) {
         let v = &self.v3().objects;
         let mut placed = Placed::default();
-        let loaded = |source: &ModelSource| self.models.get(&ModelKey::of(source)).and_then(|m| m.as_ref().ok()).cloned();
         for topic in self.topics_of(Kind::Objects).into_iter().filter(|t| !v.hidden.contains(t)) {
             problems.extend(self.error(&topic).map(|e| format!("{topic}: {e}")));
         }
-        for ((topic, _), (_, e)) in self.received().flat_map(|r| &r.objects).filter(|((t, _), _)| !v.hidden.contains(t)) {
+        for ((topic, _), (_, e)) in self.received().flat_map(|r| &r.objects) {
             let Some(frame) = tf.lookup(fixed, &e.frame_id) else {
                 problems.push(format!("{topic}: no transform from {} to {fixed}", e.frame_id));
                 continue;
@@ -1074,12 +1053,9 @@ impl State {
             for shape in &e.shapes {
                 let at = frame.then(&shape.pose);
                 marks.push(at.translation.as_vec3());
-                if let Geometry::Model { source, .. } = &shape.geometry
-                    && let Some(Err(err)) = self.models.get(&ModelKey::of(source))
-                {
+                if let Some(err) = placed.shape(shape, at, lines, &self.models) {
                     problems.push(format!("{topic}: {}: {err}", e.id));
                 }
-                placed.shape(shape, at, lines, loaded);
             }
         }
         for m in &v.meshes {
@@ -1087,7 +1063,7 @@ impl State {
                 problems.push(format!("Mesh {}: no transform from {} to {fixed}", m.file, m.frame));
                 continue;
             };
-            match self.models.get(&ModelKey::Url(m.file.clone())) {
+            match self.models.get(&ModelSource::Url(m.file.clone())) {
                 Some(Ok(asset)) => {
                     let at = frame.then(&Pose::from_xyz_rpy(DVec3::from(m.xyz), DVec3::from(m.rpy)));
                     marks.push(at.translation.as_vec3());
@@ -1283,6 +1259,32 @@ mod tests {
         let mut wanted: Vec<String> = s.wanted().topics.into_iter().collect();
         wanted.sort();
         assert_eq!(wanted, ["/cloud", "/diag", "/left", "/marks", "/right"]);
+    }
+
+    // Objects hidden with Show unsubscribe their topic, so they would miss its deletions: they
+    // go then, and showing them again doesn't bring back an object the server has since deleted.
+    #[test]
+    fn hidden_objects_do_not_come_back_stale() {
+        use crate::decode::Decoded;
+        use crate::scene::{Entity, SceneUpdate};
+        let settings = Settings { connections: vec!["ws://127.0.0.1:9".into()], layout: layout(r#"{"panel": "3d"}"#) };
+        let post: Post = Arc::new(|_, _| {});
+        let mut s = State::new(settings, Overrides::default(), post);
+        s.sync_connections();
+        let id = s.conns[0].id;
+        let channel = crate::source::Channel { topic: "/scene".into(), schema: String::new(), encoding: String::new(), kind: Some(Kind::Objects) };
+        let cup = Entity { id: "cup".into(), frame_id: "gripper".into(), lifetime: None, shapes: vec![] };
+        let update = Decoded::Objects(SceneUpdate { deletions: vec![], entities: vec![cup] });
+        s.apply(vec![(id, Event::Channels(vec![channel])), (id, Event::Data { topic: "/scene".into(), data: update })], 0.0);
+        let objects = |s: &State| s.received().map(|r| r.objects.len()).sum::<usize>();
+        s.sync(0.0, &mut Tx::default());
+        assert_eq!(objects(&s), 1);
+        s.set_unsaved(|v| v.objects.show = false);
+        s.sync(0.1, &mut Tx::default());
+        assert!(!s.wanted().topics.contains("/scene"));
+        s.set_unsaved(|v| v.objects.show = true);
+        s.sync(0.2, &mut Tx::default());
+        assert_eq!(objects(&s), 0, "the cup the server deleted while hidden isn't drawn");
     }
 
     // The Med 7's root is `world`; a stack that publishes TF under `map` must keep its TF tree

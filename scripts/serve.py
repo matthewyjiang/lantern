@@ -258,39 +258,45 @@ def cloud_publisher(args, fm, vec, quat, cloud, xyz, frame, mount):
     return publish
 
 
-def sdk_objects(fm, vec, quat):
-    """/scene as foxglove.SceneUpdate and the gripper frame in TF; returns the publisher."""
-    from foxglove.channels import FrameTransformsChannel, SceneUpdateChannel
+def scene_update(m, pose, vec, point, line_types):
+    """The --objects scene as `m.SceneUpdate`, built from `m`'s primitives: `m` is the SDK's
+    messages module or foxglove_msgs.msg, with its own pose, vector and point constructors and
+    its line type values (strip, loop, list)."""
 
     def color(c):
-        return fm.Color(r=c[0], g=c[1], b=c[2], a=c[3])
+        return m.Color(r=c[0], g=c[1], b=c[2], a=c[3])
 
-    def pose(p, q):
-        return fm.Pose(position=vec(p), orientation=quat(q))
-
-    kinds = {"strip": fm.LinePrimitiveLineType.LineStrip, "loop": fm.LinePrimitiveLineType.LineLoop, "list": fm.LinePrimitiveLineType.LineList}
+    kinds = dict(zip(("strip", "loop", "list"), line_types))
     entities = []
     for eid, frame, shapes in scene_entities():
         e = {k: [] for k in ("models", "texts", "cubes", "spheres", "cylinders", "arrows", "lines", "triangles")}
         for kind, p, q, f in shapes:
             at = pose(p, q)
             if kind == "model":
-                e["models"].append(fm.ModelPrimitive(pose=at, scale=vec((1.0, 1.0, 1.0)), media_type=f["media_type"], data=f["data"]))
+                e["models"].append(m.ModelPrimitive(pose=at, scale=vec((1.0, 1.0, 1.0)), media_type=f["media_type"], data=f["data"]))
             elif kind == "text":
-                e["texts"].append(fm.TextPrimitive(pose=at, billboard=True, font_size=f["font_size"], scale_invariant=f["scale_invariant"], color=color(f["color"]), text=f["text"]))
+                e["texts"].append(m.TextPrimitive(pose=at, billboard=True, font_size=f["font_size"], scale_invariant=f["scale_invariant"], color=color(f["color"]), text=f["text"]))
             elif kind in ("cube", "sphere"):
-                prim = (fm.CubePrimitive if kind == "cube" else fm.SpherePrimitive)(pose=at, size=vec(f["size"]), color=color(f["color"]))
+                prim = (m.CubePrimitive if kind == "cube" else m.SpherePrimitive)(pose=at, size=vec(f["size"]), color=color(f["color"]))
                 e[kind + "s"].append(prim)
             elif kind == "cylinder":
-                e["cylinders"].append(fm.CylinderPrimitive(pose=at, size=vec(f["size"]), bottom_scale=f["bottom_scale"], top_scale=f["top_scale"], color=color(f["color"])))
+                e["cylinders"].append(m.CylinderPrimitive(pose=at, size=vec(f["size"]), bottom_scale=f["bottom_scale"], top_scale=f["top_scale"], color=color(f["color"])))
             elif kind == "arrow":
-                e["arrows"].append(fm.ArrowPrimitive(pose=at, shaft_length=f["shaft_length"], shaft_diameter=f["shaft_diameter"], head_length=f["head_length"], head_diameter=f["head_diameter"], color=color(f["color"])))
+                e["arrows"].append(m.ArrowPrimitive(pose=at, shaft_length=f["shaft_length"], shaft_diameter=f["shaft_diameter"], head_length=f["head_length"], head_diameter=f["head_diameter"], color=color(f["color"])))
             elif kind == "line":
-                e["lines"].append(fm.LinePrimitive(type=kinds[f["type"]], pose=at, thickness=f["thickness"], points=[fm.Point3(x=x, y=y, z=z) for x, y, z in f["points"]], color=color(f["color"])))
+                e["lines"].append(m.LinePrimitive(type=kinds[f["type"]], pose=at, thickness=f["thickness"], points=[point(x) for x in f["points"]], color=color(f["color"])))
             elif kind == "triangles":
-                e["triangles"].append(fm.TriangleListPrimitive(pose=at, points=[fm.Point3(x=x, y=y, z=z) for x, y, z in f["points"]], color=color(f["color"])))
-        entities.append(fm.SceneEntity(frame_id=frame, id=eid, **e))
-    update = fm.SceneUpdate(entities=entities)
+                e["triangles"].append(m.TriangleListPrimitive(pose=at, points=[point(x) for x in f["points"]], color=color(f["color"])))
+        entities.append(m.SceneEntity(frame_id=frame, id=eid, **e))
+    return m.SceneUpdate(entities=entities)
+
+
+def sdk_objects(fm, vec, quat):
+    """/scene as foxglove.SceneUpdate and the gripper frame in TF; returns the publisher."""
+    from foxglove.channels import FrameTransformsChannel, SceneUpdateChannel
+
+    lt = fm.LinePrimitiveLineType
+    update = scene_update(fm, lambda p, q: fm.Pose(position=vec(p), orientation=quat(q)), vec, lambda p: fm.Point3(x=p[0], y=p[1], z=p[2]), (lt.LineStrip, lt.LineLoop, lt.LineList))
     gripper = fm.FrameTransforms(transforms=[fm.FrameTransform(parent_frame_id="world", child_frame_id="lbr_link_ee", translation=vec(GRIPPER[0]), rotation=quat(quat_of(GRIPPER[1])))])
     tf = FrameTransformsChannel("/tf")
     ch = SceneUpdateChannel("/scene")
@@ -468,35 +474,9 @@ def ros_objects(node, pose):
     from foxglove_msgs import msg as fx
     from geometry_msgs.msg import Point, Vector3
 
-    def color(c):
-        return fx.Color(r=c[0], g=c[1], b=c[2], a=c[3])
-
-    def v3(v):
-        return Vector3(x=v[0], y=v[1], z=v[2])
-
-    kinds = {"strip": fx.LinePrimitive.LINE_STRIP, "loop": fx.LinePrimitive.LINE_LOOP, "list": fx.LinePrimitive.LINE_LIST}
-    entities = []
-    for eid, frame, shapes in scene_entities():
-        e = {k: [] for k in ("models", "texts", "cubes", "spheres", "cylinders", "arrows", "lines", "triangles")}
-        for kind, p, q, f in shapes:
-            at = pose(p, q)
-            if kind == "model":
-                e["models"].append(fx.ModelPrimitive(pose=at, scale=v3((1.0, 1.0, 1.0)), media_type=f["media_type"], data=f["data"]))
-            elif kind == "text":
-                e["texts"].append(fx.TextPrimitive(pose=at, billboard=True, font_size=f["font_size"], scale_invariant=f["scale_invariant"], color=color(f["color"]), text=f["text"]))
-            elif kind in ("cube", "sphere"):
-                prim = (fx.CubePrimitive if kind == "cube" else fx.SpherePrimitive)(pose=at, size=v3(f["size"]), color=color(f["color"]))
-                e[kind + "s"].append(prim)
-            elif kind == "cylinder":
-                e["cylinders"].append(fx.CylinderPrimitive(pose=at, size=v3(f["size"]), bottom_scale=f["bottom_scale"], top_scale=f["top_scale"], color=color(f["color"])))
-            elif kind == "arrow":
-                e["arrows"].append(fx.ArrowPrimitive(pose=at, shaft_length=f["shaft_length"], shaft_diameter=f["shaft_diameter"], head_length=f["head_length"], head_diameter=f["head_diameter"], color=color(f["color"])))
-            elif kind == "line":
-                e["lines"].append(fx.LinePrimitive(type=kinds[f["type"]], pose=at, thickness=f["thickness"], points=[Point(x=x, y=y, z=z) for x, y, z in f["points"]], color=color(f["color"])))
-            elif kind == "triangles":
-                e["triangles"].append(fx.TriangleListPrimitive(pose=at, points=[Point(x=x, y=y, z=z) for x, y, z in f["points"]], color=color(f["color"])))
-        entities.append(fx.SceneEntity(frame_id=frame, id=eid, **e))
-    return node.create_publisher(fx.SceneUpdate, "/scene", 10), fx.SceneUpdate(entities=entities)
+    lp = fx.LinePrimitive
+    update = scene_update(fx, pose, lambda v: Vector3(x=v[0], y=v[1], z=v[2]), lambda p: Point(x=p[0], y=p[1], z=p[2]), (lp.LINE_STRIP, lp.LINE_LOOP, lp.LINE_LIST))
+    return node.create_publisher(fx.SceneUpdate, "/scene", 10), update
 
 
 if __name__ == "__main__":

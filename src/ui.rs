@@ -16,12 +16,11 @@ use rune::{Align, Color, Cx, Drag, El, Phase, PointerButton, ScrollSpec, Side, T
 use rune_kit::{Kit, Select, SelectAppearance};
 
 use crate::app::{State, Tab3d};
-use crate::objects::ModelKey;
 use crate::connection::Connection;
 use crate::decode::{ColorChoice, Kind};
 use crate::layout::{Layout, Panel, PanelKind, Preset, PRESETS};
 use crate::panels;
-use crate::scene::{Annotation, Diagnostic, Image, Level, PointColor, Thickness};
+use crate::scene::{Annotation, Diagnostic, Image, Level, ModelSource, PointColor, Thickness};
 use crate::settings::{DataSettings, ImageSettings, View3dSettings};
 use crate::source::Status;
 use crate::viewport::{self, Shade};
@@ -149,7 +148,7 @@ fn frame_labels(s: &State, [w, h]: [f32; 2]) -> Vec<El> {
     let t = tok::theme(true);
     let vp = s.camera.view_proj(w / h.max(1.0));
     // Points per metre at unit depth, for text sized in metres.
-    let focal = h * 0.5 / (s.camera.fov_y * 0.5).tan();
+    let focal = s.camera.focal(h);
     s.display.labels.iter().filter_map(|label| {
         let clip = vp * label.at.extend(1.0);
         if clip.w <= 0.0 {
@@ -874,7 +873,7 @@ fn objects_settings(s: &State, v: &View3dSettings) -> El {
     let error = oklch(0.72, 0.17, 25.0);
     let mut list = col().key("frame-meshes").w_full();
     for (i, m) in v.objects.meshes.iter().enumerate() {
-        let (status, color) = match s.model(&ModelKey::Url(m.file.clone())) {
+        let (status, color) = match s.models().get(&ModelSource::Url(m.file.clone())) {
             None => ("Not loaded while objects are hidden".to_string(), t.text_secondary),
             Some(Ok(a)) => (format!("{} vertices", thousands(a.vertex_count())), t.text_secondary),
             Some(Err(e)) => (e.clone(), error),

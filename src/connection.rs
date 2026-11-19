@@ -62,7 +62,7 @@ pub struct Received {
     pub poses: BTreeMap<(String, String), (f64, Poses)>,
     /// Scene entities per (topic, id), with when each expires (UI clock), if it does. An
     /// entity stays until its topic sends one of the same id or deletes it, its lifetime
-    /// passes, or the topic is unadvertised or hidden.
+    /// passes, or the topic is unsubscribed (`State::sync`).
     pub objects: BTreeMap<(String, String), (Option<f64>, Entity)>,
     /// Where each single-pose (topic, label) has been, newest last.
     pub trails: BTreeMap<(String, String), Trail>,

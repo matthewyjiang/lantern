@@ -10,7 +10,7 @@ use super::points::{ColorChoice, Field, Num, Packed};
 use super::ros::unit;
 use super::{entities, image};
 use super::{DecodeError, Decoded};
-use crate::scene::{Annotation, Deletion, Entity, Geometry, PointsKind, Pose as ScenePose, Poses, SceneUpdate as Scene, Shape, Tracked, Transform};
+use crate::scene::{Annotation, Entity, Geometry, PointsKind, Pose as ScenePose, Poses, SceneUpdate as Scene, Shape, Tracked, Transform};
 
 #[derive(Clone, PartialEq, Message)]
 struct Vector3 {
@@ -564,14 +564,7 @@ fn entity(e: SceneEntity) -> Result<Entity, DecodeError> {
 
 pub fn scene_update(bytes: &[u8], _: &ColorChoice) -> Result<Decoded, DecodeError> {
     let m: SceneUpdate = parse(bytes)?;
-    let mut deletions = Vec::new();
-    for d in m.deletions {
-        deletions.push(match d.r#type {
-            0 => Deletion::Id(d.id),
-            1 => Deletion::All,
-            other => return Err(DecodeError::new(format!("deletion has unknown type {other}"))),
-        });
-    }
+    let deletions = m.deletions.into_iter().map(|d| entities::deletion(d.r#type.into(), d.id)).collect::<Result<_, _>>()?;
     let entities = m.entities.into_iter().map(entity).collect::<Result<_, _>>()?;
     Ok(Decoded::Objects(Scene { deletions, entities }))
 }

@@ -7,7 +7,7 @@ use super::cdr::Cdr;
 use super::{entities, image};
 use super::points::{ColorChoice, Field, Num, Packed};
 use super::{DecodeError, Decoded};
-use crate::scene::{Deletion, Diagnostic, Entity, Geometry, Level, Pose, Poses, SceneUpdate, Shape, Tracked, Transform};
+use crate::scene::{Diagnostic, Entity, Geometry, Level, Pose, Poses, SceneUpdate, Shape, Tracked, Transform};
 
 /// `std_msgs/Header`: stamp (int32 sec, uint32 nanosec), then the frame_id it returns. Lantern
 /// draws the newest message of each topic, so it doesn't use stamps.
@@ -262,11 +262,7 @@ pub fn scene_update(bytes: &[u8], _: &ColorChoice) -> Result<Decoded, DecodeErro
     // A deletion: time (8), type (1, padded to 4), id (4 or more).
     let deletions = seq(&mut r, 16, |r| {
         let (_sec, _nanosec, kind, id) = (r.i32()?, r.u32()?, r.u8()?, r.string()?);
-        match kind {
-            0 => Ok(Deletion::Id(id)),
-            1 => Ok(Deletion::All),
-            other => Err(DecodeError::new(format!("deletion has unknown type {other}"))),
-        }
+        entities::deletion(kind.into(), id)
     })?;
     // An entity: two times, two strings, a bool, nine sequences: well over 40 bytes.
     let entities = seq(&mut r, 40, scene_entity)?;
