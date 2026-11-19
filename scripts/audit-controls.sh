@@ -3,7 +3,7 @@
 # each control headlessly through a Rune script (taps by element key, drags, wheel, typing),
 # snaps, and counts viewport pixels that differ from a no-input baseline. A control that
 # changes 0 pixels does nothing. `expect` is "changes" or "same" (Reset view after an orbit,
-# and Done after opening Settings, must land back on the baseline).
+# and closing Settings or a panel's settings, must land back on the baseline).
 # Usage: scripts/audit-controls.sh   (release build, ImageMagick `compare`, PY as snap-live.sh)
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -43,20 +43,26 @@ check() { # baseline, crop, name, expect, events, [settings JSON]
 ev() { echo "{\"t\": $1, \"type\": \"tap\", \"key\": \"$2\"}"; }
 tap() { echo "[$(ev 1.5 "$1")]"; }
 open='{"t": 0.5, "type": "tap", "key": "open-settings"}'
-stap() { echo "[$open, $(ev 1.5 "$1")]"; }
-# The same, after scrolling the page partway (Frames' axis length and the Robot section) or
-# to its end (the Display and Layout sections): taps land only on what's on screen.
-mtap() { echo "[$open, {\"t\": 1.0, \"type\": \"wheel\", \"x\": 1060, \"y\": 400, \"dx\": 0, \"dy\": -900}, $(ev 1.5 "$1")]"; }
-send() { echo "[$open, {\"t\": 1.0, \"type\": \"wheel\", \"x\": 1060, \"y\": 400, \"dx\": 0, \"dy\": ${SCROLL_DY:--2000}}, $(ev 1.5 "$1")]"; }
-# After scrolling the page by $1 pt (negative: down).
-wtap() { echo "[$open, {\"t\": 1.0, \"type\": \"wheel\", \"x\": 1060, \"y\": 400, \"dx\": 0, \"dy\": $1}, $(ev 1.5 "$2")]"; }
+# The Settings page, scrolled to its end (the Layout section): taps land only on what's on screen.
+send() { echo "[$open, {\"t\": 1.0, \"type\": \"wheel\", \"x\": 1060, \"y\": 400, \"dx\": 0, \"dy\": -2000}, $(ev 1.5 "$1")]"; }
+# The 3D view's settings, open over the viewport's right part (from x 1010 px, beside its
+# settings button): checks compare the viewport left of them. `ptab TAB KEY [KEY]` opens them
+# (after the events in $PRE if set), picks tab TAB (0 Scene, 1 Points, 2 Poses, 3 Robot,
+# 4 Cards) and taps the keys in turn (a picker, then its option); `pclose` then closes them
+# with Escape, for controls of what they cover.
+popen='{"t": 0.5, "type": "tap", "key": "panel-settings"}'
+crop_pop=980x1560+20+20
+ptab() { echo "[${PRE:+$PRE, }$popen, $(ev 0.9 "tab-$1")${2:+, $(ev 1.3 "$2")}${3:+, $(ev 1.7 "$3")}]"; }
+pclose() { local e; e=$(ptab "$@"); echo "${e%]}, {\"t\": 2.1, \"type\": \"key\", \"name\": \"Escape\"}, {\"t\": 2.2, \"type\": \"move\", \"x\": 400, \"y\": 600}]"; }
 drag='{"t": 1.5, "type": "drag", "x": 400, "y": 330, "dx": 160, "dy": 40, "dur": 0.4}'
 
 snap base '[]'
 snap settings "[$open]"
+snap panel "[$popen]"
 printf "%-22s %-8s %13s  %s\n" control expect "viewport diff" result
 side() { check base "$crop_side" "$@"; }
 sett() { check settings "$crop_settings" "$@"; }
+pset() { check panel "$crop_pop" "$@"; }
 # The live data must give the same frame twice, or a "changes" proves nothing.
 side no-input-again   same    '[]'
 # Side panel. Each toggle twice: its row (tapped at the centre) and the switch track.
@@ -76,24 +82,27 @@ side shift-drag-pan   changes "[{\"t\": 1.45, \"hold\": \"shift\"}, $drag, {\"t\
 side middle-drag-pan  changes '[{"t": 1.5, "type": "drag", "button": "middle", "x": 400, "y": 330, "dx": 160, "dy": 40, "dur": 0.4}]'
 side wheel-zoom       changes '[{"t": 1.5, "type": "wheel", "x": 400, "y": 330, "dx": 0, "dy": 120}]'
 side settings-done    same    "[$open, $(ev 1.5 close-settings)]"
-# Settings page. Topics sort by name: /camera/annotations, /camera/image, /diagnostics,
-# /joint_states, /markers, /objects, /points, /status, /tf.
-sett topic-annotations changes "$(stap topic-0-show)"
-sett topic-stats      changes "$(stap topic-2-show)"
-sett topic-markers    changes "$(stap topic-4-show)"
-sett topic-objects    changes "$(stap topic-5-show)"
-sett topic-text       changes "$(stap topic-7-show)"
-# Frames sits below the nine topics.
-sett fixed-frame      changes "$(wtap -500 frame-1)"
-sett labels           changes "$(wtap -500 labels)"
-sett axis-5cm         changes "$(mtap axis-0)"
-sett color-field      changes "$(send color-full-1)"
-sett size-full        changes "$(send size-full-3)"
-sett density-full     changes "$(send decimate-full-2)"
-sett grid-full        changes "$(send grid-full)"
-sett image-full       changes "$(send image-full)"
-sett text-full        changes "$(send text-full)"
-sett stats-full       changes "$(send stats-full)"
+# The 3D view's settings, tab by tab. Topics sort by name: /markers, /objects are the poses.
+pset fixed-frame      changes "$(ptab 0 fixed-frame frame-1)"
+for k in grid-full frames-full labels axis-0; do
+  pset "$k"           changes "$(ptab 0 $k)"
+done
+for k in points-full color-full-1 size-full-3 decimate-full-2; do
+  pset "$k"           changes "$(ptab 1 $k)"
+done
+for k in poses-full pose-0 pose-1; do
+  pset "$k"           changes "$(ptab 2 $k)"
+done
+# The cards (no Image or Data panel in the layout) are under the settings: each is checked once
+# they're closed.
+for k in show-image-card card-annotation-0 card-text card-text-topic-0 card-stats card-stats-topic-0; do
+  side "$k"           changes "$(pclose 4 $k)"
+done
+# Its button again, Escape and a press outside close them, landing back on the baseline (the
+# pointer moved off the button, so it isn't lit by hover).
+side panel-toggle     same    "[$popen, $(ev 1.5 panel-settings), {\"t\": 1.6, \"type\": \"move\", \"x\": 400, \"y\": 600}]"
+side panel-escape     same    "[$popen, {\"t\": 1.5, \"type\": \"key\", \"name\": \"Escape\"}, {\"t\": 1.6, \"type\": \"move\", \"x\": 400, \"y\": 600}]"
+side panel-outside    same    "[$popen, {\"t\": 1.5, \"type\": \"tap\", \"x\": 1100, \"y\": 700}]"
 # The wheel over the page's side margins (x 850 and 1270 pt) scrolls the page, once it has
 # settled from opening (by about 2.2 s; the snap is at 3 s), and never zooms the viewport.
 for x in 850 1270; do
@@ -130,20 +139,24 @@ check base-dash "$crop_side" show-3d-swaps changes "[$edit, $(ev 1.0 panel-1-1-s
 
 # Robot (the Med 7 from scripts/robot_fixture.py, posed by serve.py's joint states). Its side
 # panel section only exists once it has loaded, so these start from settings that load it.
-robot="{\"robot_urdf\": \"$PWD/fixtures/med7/med7.urdf\"}"
+robot="{\"layout\": {\"panel\": \"3d\", \"robot\": {\"urdf\": \"$PWD/fixtures/med7/med7.urdf\"}}}"
 [[ -f fixtures/med7/med7.urdf ]] || { echo "no fixtures/med7: run scripts/robot_fixture.py"; exit 1; }
 snap base-robot '[]' "$robot"
-snap settings-robot "[$open]" "$robot"
 rside() { check base-robot "$crop_side" "$@" "$robot"; }
-rsett() { check settings-robot "$crop_settings" "$@" "$robot"; }
 rside robot           changes "$(tap robot)"
 rside robot-track     changes "$(tap robot-track)"
 rside robot-opacity   changes "$(tap robot-opacity-2)"
-rsett robot-full      changes "$(mtap robot-full)"
-rsett robot-opacity-full changes "$(wtap -1400 robot-opacity-full-3)"
+# In the 3D view's settings the robot would be under them: a middle-button pan first moves the
+# scene left of them.
+pan='{"t": 0.2, "type": "drag", "button": "middle", "x": 400, "y": 330, "dx": -300, "dy": 0, "dur": 0.2}'
+snap panel-robot "$(PRE=$pan ptab 3)" "$robot"
+rpset() { check panel-robot "$crop_pop" "$@" "$robot"; }
+rpset robot-full         changes "$(PRE=$pan ptab 3 robot-full)"
+rpset robot-opacity-full changes "$(PRE=$pan ptab 3 robot-opacity-full-3)"
 # Picking the topic Auto already uses keeps the pose: switching must not drop received joints.
-rsett joints-explicit same    "$(mtap joints-1)"
+rpset joints-explicit same    "$(PRE=$pan ptab 3 joint-topic joints-1)"
 # Typing the path and pressing Enter loads the robot (from no robot, so the arm appears).
 # Typing runs at about 30 characters a second: Enter waits for the whole path.
-at=5 sett urdf-enter  changes "[$open, {\"t\": 0.6, \"type\": \"wheel\", \"x\": 1060, \"y\": 400, \"dx\": 0, \"dy\": -900}, $(ev 1.0 urdf), {\"t\": 1.1, \"type\": \"type\", \"text\": \"$PWD/fixtures/med7/med7.urdf\"}, {\"t\": 3.5, \"type\": \"key\", \"name\": \"Enter\"}]"
+snap panel-pan "$(PRE=$pan ptab 3)"
+at=5 check panel-pan "$crop_pop" urdf-enter changes "$(e=$(PRE=$pan ptab 3 urdf); echo "${e%]}, {\"t\": 1.4, \"type\": \"type\", \"text\": \"$PWD/fixtures/med7/med7.urdf\"}, {\"t\": 3.8, \"type\": \"key\", \"name\": \"Enter\"}]")"
 exit $fail

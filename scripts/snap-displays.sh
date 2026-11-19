@@ -43,16 +43,18 @@ same() { # a, b: the viewport beside the side panel must match
   local ok=PASS; [[ $px == 0 ]] || { ok=FAIL; fail=1; }
   printf "%-44s %8s px  %s\n" "$1 = $2" "$px" "$ok"
 }
+# The 3D view's settings, on the Robot tab.
 open_settings=(--script "$dir/open-settings.json")
-printf '[{"t": 0.5, "type": "tap", "key": "open-settings"}]\n' > "$dir/open-settings.json"
+printf '[{"t": 0.5, "type": "tap", "key": "panel-settings"}, {"t": 0.9, "type": "tap", "key": "tab-3"}]\n' > "$dir/open-settings.json"
 local8765='"connections": ["ws://127.0.0.1:8765"]'
+robot() { echo "{$local8765, \"layout\": {\"panel\": \"3d\", \"robot\": {\"urdf\": \"$1\"}}}"; }
 
 # Joint states: foxglove.JointStates (protobuf) poses the arm exactly as JSON JointState does.
 serve joints-json 8765 "--cloud none --robot-pose reach"
-shot joints-json "{$local8765, \"robot_urdf\": \"$med7\"}" 3
+shot joints-json "$(robot "$med7")" 3
 stop
 serve joints-proto 8765 "--cloud none --robot-pose reach --joints proto"
-shot joints-proto "{$local8765, \"robot_urdf\": \"$med7\"}" 3
+shot joints-proto "$(robot "$med7")" 3
 stop
 same joints-proto joints-json
 
@@ -62,9 +64,9 @@ serve two-a 8765 "--cloud table"
 serve two-b 8766 "--cloud none --robot-pose reach --status --motion"
 two="--connect ws://127.0.0.1:8765 --connect ws://127.0.0.1:8766 --urdf $med7"
 # shellcheck disable=SC2086
-shot two-servers '{"trail": 15}' 6 $two
+shot two-servers '{"layout": {"panel": "3d", "poses": {"trail": 15}}}' 6 $two
 # shellcheck disable=SC2086
-shot two-servers-settings '{"trail": 15}' 3 $two "${open_settings[@]}"
+shot two-servers-settings '{"layout": {"panel": "3d", "poses": {"trail": 15}}}' 3 $two "${open_settings[@]}"
 stop
 
 # The robot a server describes: drawn with no file at all; with a file of the same robot, the
@@ -72,26 +74,26 @@ stop
 # says so.
 serve description 8765 "--cloud none --robot-pose reach --robot-description $med14"
 shot description-only "{$local8765}" 3
-shot description-same "{$local8765, \"robot_urdf\": \"$med14\"}" 3
-shot description-mismatch "{$local8765, \"robot_urdf\": \"$med7\"}" 3
-shot description-mismatch-settings "{$local8765, \"robot_urdf\": \"$med7\"}" 3 "${open_settings[@]}"
+shot description-same "$(robot "$med14")" 3
+shot description-mismatch "$(robot "$med7")" 3
+shot description-mismatch-settings "$(robot "$med7")" 3 "${open_settings[@]}"
 stop
 same description-same description-only
 # The described robot's meshes aren't on this machine (the testdata copy has none next to it):
 # the file's robot draws, and the status says why.
 serve description-no-meshes 8765 "--cloud none --robot-pose reach --robot-description $PWD/src/robot/testdata/med14.urdf"
-shot description-no-meshes "{$local8765, \"robot_urdf\": \"$med7\"}" 3
+shot description-no-meshes "$(robot "$med7")" 3
 stop
 
 # Poses over the table: /once is sent once, /tracked keeps moving. Kept forever, /once is there
 # at 4 s; with a 2 s timeout it is gone.
 serve poses 8765 "--cloud table --motion"
-shot poses-never "{$local8765, \"pose_timeout\": 0, \"show_labels\": true}" 4 --scene top
-shot poses-expire "{$local8765, \"pose_timeout\": 2, \"show_labels\": true}" 4 --scene top
+shot poses-never "{$local8765, \"layout\": {\"panel\": \"3d\", \"poses\": {\"timeout\": 0}}}" 4 --scene top
+shot poses-expire "{$local8765, \"layout\": {\"panel\": \"3d\", \"poses\": {\"timeout\": 2}}}" 4 --scene top
 stop
 
 # Everything over the table scan: camera image and annotations, text and stats, a trail.
 serve all 8765 "--cloud table --camera --status --motion"
-shot all "{$local8765, \"trail\": 15}" 6
+shot all "{$local8765, \"layout\": {\"panel\": \"3d\", \"poses\": {\"trail\": 15}}}" 6
 stop
 exit $fail
