@@ -9,7 +9,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 tag=${1:?usage: scripts/release-notes.sh TAG}
-# The repository scripts/install.sh downloads from.
+# The GitHub repository the changelog link points to.
 repo=matthewyjiang/lantern
 fail() {
   echo "release-notes: $1" >&2
@@ -53,7 +53,7 @@ for section in "${sections[@]}"; do
   fi
 done
 fence='```'
-printf '## Install\n\n%ssh\ncurl -fsSL https://raw.githubusercontent.com/%s/main/scripts/install.sh | LANTERN_VERSION=%s sh\n%s\n' "$fence" "$repo" "$tag" "$fence"
+printf '## Install\n\n%ssh\ncurl -fsSL https://matthewyjiang.github.io/lantern/install.sh | LANTERN_VERSION=%s sh\n%s\n' "$fence" "$tag" "$fence"
 if [[ -n $prev ]]; then
   printf '\n**Full changelog:** https://github.com/%s/compare/%s...%s\n' "$repo" "$prev" "$tag"
 fi

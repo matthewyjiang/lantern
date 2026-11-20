@@ -11,14 +11,14 @@ desktop, but not ROS.
 On x86_64 or aarch64 Linux:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/matthewyjiang/lantern/main/scripts/install.sh | sh
+curl -fsSL https://matthewyjiang.github.io/lantern/install.sh | sh
 ```
 
 The script downloads the latest release, checks its SHA-256, and puts `lantern` in
 `~/.local/bin`. `LANTERN_VERSION` picks a release and `LANTERN_INSTALL_DIR` changes where it goes:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/matthewyjiang/lantern/main/scripts/install.sh \
+curl -fsSL https://matthewyjiang.github.io/lantern/install.sh \
     | LANTERN_VERSION=v0.2.0 LANTERN_INSTALL_DIR="$HOME/bin" sh
 ```
 
