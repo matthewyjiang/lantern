@@ -1,6 +1,7 @@
 # Builds the Starlight site in docs/ on every PR that touches it, and deploys it to GitHub Pages
 # (https://matthewyjiang.github.io/lantern/) on pushes to main. Needs Settings → Pages → Source:
-# GitHub Actions.
+# GitHub Actions. docs/public/install.sh links to scripts/install.sh, so the site serves it at
+# https://matthewyjiang.github.io/lantern/install.sh.
 name: Docs
 
 on:
@@ -8,10 +9,12 @@ on:
     branches: [main]
     paths:
       - "docs/**"
+      - "scripts/install.sh"
       - ".github/workflows/docs.yml"
   pull_request:
     paths:
       - "docs/**"
+      - "scripts/install.sh"
       - ".github/workflows/docs.yml"
   workflow_dispatch:
 

@@ -1,5 +1,5 @@
 #!/bin/sh
-# Usage: curl -fsSL https://raw.githubusercontent.com/matthewyjiang/lantern/main/scripts/install.sh | sh
+# Usage: curl -fsSL https://matthewyjiang.github.io/lantern/install.sh | sh
 # Env: LANTERN_VERSION (default: latest release), LANTERN_INSTALL_DIR (default: ~/.local/bin)
 set -eu
 
