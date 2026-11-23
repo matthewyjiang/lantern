@@ -17,6 +17,8 @@ use rune::compose::{Compositor, DeviceKey, Frame};
 use rune::render::{CLIP_WGSL, EffectSite, Instance, KIND_EFFECT};
 use wgpu::util::DeviceExt;
 
+mod upload;
+
 use crate::camera::OrbitCamera;
 use crate::mesh::Mesh;
 use crate::scene::PointCloud;
@@ -136,10 +138,12 @@ pub struct Viewport<S> {
     view_of: fn(&S) -> View<'_>,
     gpu: Option<Gpu>,
     /// Compositor `render` CPU time per frame, ms (recording only; Rune times the whole frame),
-    /// and whether that frame uploaded a new cloud.
+    /// and whether a new cloud landed in the points buffer that frame.
     encode_ms: Vec<(bool, f64)>,
-    /// Time to copy each new cloud into a GPU buffer, ms (included in its frame's `encode_ms`).
-    upload_ms: Vec<f64>,
+    /// UI-thread time of each frame's scene update that landed a new cloud, ms (included in
+    /// its `encode_ms`): recording the copy, rebinding. The cloud's bytes are written into
+    /// staging on a helper thread beforehand (`upload`).
+    land_ms: Vec<f64>,
     /// When each frame's `render` started: in a paced run the gaps show frames that ran late.
     starts: Vec<Instant>,
     /// Points drawn on the last frame, and the target size.
@@ -150,7 +154,7 @@ pub struct Viewport<S> {
 
 impl<S> Viewport<S> {
     pub fn new(view_of: fn(&S) -> View<'_>) -> Self {
-        Viewport { view_of, gpu: None, encode_ms: Vec::new(), upload_ms: Vec::new(), starts: Vec::new(), last: (0, (0, 0)), last_meshes: [0; 2] }
+        Viewport { view_of, gpu: None, encode_ms: Vec::new(), land_ms: Vec::new(), starts: Vec::new(), last: (0, (0, 0)), last_meshes: [0; 2] }
     }
 }
 
@@ -173,19 +177,22 @@ impl<S: 'static> Compositor<S> for Viewport<S> {
         }
 
         let slot = slot_rect(&f.rt.instances, &f.rt.marks);
-        let mut uploaded = false;
+        let mut landed = false;
         if let Some(inst) = slot {
             let view = (self.view_of)(&f.rt.state);
             let w = inst.rect[2].round().max(1.0) as u32;
             let h = inst.rect[3].round().max(1.0) as u32;
             gpu.ensure_target(device, (w, h));
             let t = Instant::now();
-            if gpu.ensure_scene(device, queue, view.cloud.map(|(c, _)| c), view.lines) {
-                uploaded = true;
-                self.upload_ms.push(t.elapsed().as_secs_f64() * 1000.0);
+            if gpu.ensure_scene(device, queue, f.encoder, view.cloud, view.lines) {
+                landed = true;
+                self.land_ms.push(t.elapsed().as_secs_f64() * 1000.0);
             }
-            let drawn = view.cloud.map_or(0, |(c, _)| c.points.len().div_ceil(view.decimate.max(1) as usize) as u32);
-            let uniform = frame_uniform(&view, (w, h), inst.params[3]);
+            // The cloud the points buffer holds, which trails the view's by the frame or two a
+            // new one takes to fill (`upload`), at the placement it last had.
+            let cloud = view.cloud.and(gpu.cloud.held());
+            let drawn = cloud.map_or(0, |(c, _)| c.points.len().div_ceil(view.decimate.max(1) as usize) as u32);
+            let uniform = frame_uniform(&view, cloud.map(|(_, m)| m), (w, h), inst.params[3]);
             let sets = [view.robot, view.objects].map(|v| v.map(|v| (Arc::clone(v.mesh), v.parts)));
             f.write_buffer(&gpu.frame_buf, 0, bytemuck::bytes_of(&uniform));
             for (k, set) in sets.iter().enumerate() {
@@ -197,6 +204,9 @@ impl<S: 'static> Compositor<S> for Viewport<S> {
             }
             gpu.encode_3d(f.encoder, drawn, sets.each_ref().map(|s| s.as_ref().map_or(&[][..], |(_, p)| p.as_slice())));
             self.last = (drawn, (w, h));
+        } else {
+            // No 3D panel: let a running fill finish into the spares, so `animating` ends.
+            gpu.cloud.update(device, f.encoder, None);
         }
 
         let clear = f.rt.clear_color();
@@ -207,7 +217,12 @@ impl<S: 'static> Compositor<S> for Viewport<S> {
                 gpu.blit(device, queue, pass, site);
             }
         });
-        self.encode_ms.push((uploaded, started.elapsed().as_secs_f64() * 1000.0));
+        self.encode_ms.push((landed, started.elapsed().as_secs_f64() * 1000.0));
+    }
+
+    /// Keeps frames coming while a cloud fills, so it lands without waiting for other input.
+    fn animating(&self) -> bool {
+        self.gpu.as_ref().is_some_and(|g| g.cloud.busy())
     }
 
     fn summary(&mut self, device: &wgpu::Device) -> Option<String> {
@@ -216,7 +231,9 @@ impl<S: 'static> Compositor<S> for Viewport<S> {
         let mut out = format!("lantern: viewport {w}x{h} px, {drawn} points and {robot} robot vertices drawn on the last frame, and {objects} object vertices\n");
         let steady: Vec<f64> = self.encode_ms.iter().filter(|(u, _)| !u).map(|(_, ms)| *ms).collect();
         out += &format!("lantern: compositor encode cpu, frames without a new cloud: {}\n", Stats::of(&steady).line());
-        out += &format!("lantern: new clouds uploaded to the GPU: {} ({})\n", self.upload_ms.len(), Stats::all(&self.upload_ms).line());
+        out += &format!("lantern: new clouds landed in the GPU buffer: {} (UI thread {})\n", self.land_ms.len(), Stats::all(&self.land_ms).line());
+        let fill = self.gpu.as_ref().map_or(&[][..], |g| &g.cloud.fill_ms);
+        out += &format!("lantern: their staging filled on a helper thread: {}\n", Stats::all(fill).line());
         // Gaps between frame starts; at 60 Hz, one over 25 ms means a frame missed its slot.
         let gaps: Vec<f64> = self.starts.windows(2).map(|w| (w[1] - w[0]).as_secs_f64() * 1000.0).collect();
         let late = gaps.iter().skip(1).filter(|&&g| g > 25.0).count();
@@ -268,7 +285,8 @@ fn part_data(parts: &[PartDraw]) -> Vec<[f32; 20]> {
     }).collect()
 }
 
-fn frame_uniform(v: &View<'_>, (w, h): (u32, u32), scale: f32) -> FrameUniform {
+/// `cloud_model` places the cloud drawn (`display_T_cloud`).
+fn frame_uniform(v: &View<'_>, cloud_model: Option<Mat4>, (w, h): (u32, u32), scale: f32) -> FrameUniform {
     let vp = v.camera.view_proj(w as f32 / h as f32);
     let (mode, lo, hi) = match v.shade {
         Shade::Height { lo, hi } => (0, lo, hi),
@@ -278,7 +296,7 @@ fn frame_uniform(v: &View<'_>, (w, h): (u32, u32), scale: f32) -> FrameUniform {
     FrameUniform {
         view_proj: vp.to_cols_array(),
         inv_view_proj: vp.inverse().to_cols_array(),
-        model: v.cloud.map_or(Mat4::IDENTITY, |(_, m)| m).to_cols_array(),
+        model: cloud_model.unwrap_or(Mat4::IDENTITY).to_cols_array(),
         eye: v.camera.eye().extend(1.0).into(),
         viewport: [w as f32, h as f32, v.point_size * scale, scale],
         style: [mode, v.decimate.max(1), v.grid.is_some() as u32, 0],
@@ -310,6 +328,7 @@ struct Gpu {
     blits: std::cell::RefCell<Vec<(wgpu::TextureFormat, wgpu::RenderPipeline)>>,
     target: Option<Target>,
     scene: Option<Uploaded>,
+    cloud: upload::CloudBuffer,
     timer: Option<GpuTimer>,
 }
 
@@ -320,9 +339,9 @@ struct Target {
     blit_group: wgpu::BindGroup,
 }
 
-/// Buffers for one cloud and one set of lines (each compared by pointer, re-uploaded on change).
+/// The line segments (compared by pointer, re-uploaded on change), the points buffer bound,
+/// and the scene's bind group.
 struct Uploaded {
-    cloud: Option<Arc<PointCloud>>,
     points: wgpu::Buffer,
     lines: Arc<Lines>,
     segs: wgpu::Buffer,
@@ -413,6 +432,7 @@ impl Gpu {
             key, frame_buf, scene_bgl, blit_bgl, blit_buf, module, sky, points, segs,
             mesh_bgl, mesh_depth, mesh_color, meshes: [None, None],
             blits: Default::default(), target: None, scene: None, timer,
+            cloud: upload::CloudBuffer::new(device),
         }
     }
 
@@ -443,26 +463,16 @@ impl Gpu {
         self.target = Some(Target { size, color, depth, blit_group });
     }
 
-    /// Uploads a changed cloud or line set; true when it uploaded a new cloud.
-    fn ensure_scene(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, cloud: Option<&Arc<PointCloud>>, lines: &Arc<Lines>) -> bool {
+    /// Moves the points buffer toward the view's cloud (`upload`) and uploads changed lines;
+    /// true when a new cloud landed in the points buffer this frame.
+    fn ensure_scene(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, encoder: &mut wgpu::CommandEncoder, cloud: Option<(&Arc<PointCloud>, Mat4)>, lines: &Arc<Lines>) -> bool {
+        let landed = self.cloud.update(device, encoder, cloud);
         let old = self.scene.take();
-        let same_cloud = old.as_ref().is_some_and(|u| match (&u.cloud, cloud) {
-            (Some(a), Some(b)) => Arc::ptr_eq(a, b),
-            (None, None) => true,
-            _ => false,
-        });
         let same_lines = old.as_ref().is_some_and(|u| Arc::ptr_eq(&u.lines, lines));
-        if same_cloud && same_lines {
+        if same_lines && old.as_ref().is_some_and(|u| u.points == *self.cloud.buffer()) {
             self.scene = old;
-            return false;
+            return landed;
         }
-        let points = match &old {
-            Some(u) if same_cloud => u.points.clone(),
-            _ => {
-                let bytes: &[u8] = cloud.map_or(&[], |c| bytemuck::cast_slice(&c.points));
-                storage(device, queue, "viewport points", old.as_ref().map(|u| &u.points), bytes)
-            }
-        };
         let segs = match &old {
             Some(u) if same_lines => u.segs.clone(),
             _ => storage(device, queue, "viewport segments", old.as_ref().map(|u| &u.segs), bytemuck::cast_slice(&lines.0)),
@@ -472,12 +482,12 @@ impl Gpu {
             layout: &self.scene_bgl,
             entries: &[
                 wgpu::BindGroupEntry { binding: 0, resource: self.frame_buf.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 1, resource: points.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 1, resource: self.cloud.buffer().as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 2, resource: segs.as_entire_binding() },
             ],
         });
-        self.scene = Some(Uploaded { cloud: cloud.cloned(), points, lines: Arc::clone(lines), segs, group });
-        !same_cloud && cloud.is_some()
+        self.scene = Some(Uploaded { points: self.cloud.buffer().clone(), lines: Arc::clone(lines), segs, group });
+        landed
     }
 
     /// Slot `k`'s buffers for `mesh`, uploading it unless it's the one already there.
@@ -620,10 +630,9 @@ const RING: usize = 8;
 /// `resolve_query_set` writes at multiples of this.
 const RESOLVE_STRIDE: u64 = wgpu::QUERY_RESOLVE_BUFFER_ALIGNMENT;
 
-/// `bytes` in a storage buffer: `old` refilled when they fit, else a new buffer. A sensor's
-/// clouds are about the same size, and refilling halves a 1.37 M-point cloud's upload against a
-/// new 22 MB buffer each time (docs, Performance: "Ingesting a cloud"). An empty binding is
-/// invalid, so empty data binds 48 zero bytes (one line segment, three points).
+/// `bytes` in a storage buffer: `old` refilled when they fit, else a new buffer. For line
+/// segments and meshes; clouds fill off the UI thread (`upload`). An empty binding is invalid,
+/// so empty data binds 48 zero bytes (one line segment).
 fn storage(device: &wgpu::Device, queue: &wgpu::Queue, label: &str, old: Option<&wgpu::Buffer>, bytes: &[u8]) -> wgpu::Buffer {
     match old.filter(|b| !bytes.is_empty() && b.size() >= bytes.len() as u64) {
         Some(b) => {

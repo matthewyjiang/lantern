@@ -29,7 +29,7 @@ serve() { # serve.py args
   echo "serve.py didn't start"; cat out/bench/serve.log; exit 1
 }
 trap '[[ -n $server ]] && kill $server 2>/dev/null; wait 2>/dev/null || true; rm -rf "$cfg"' EXIT
-printf "config\ttrial\tdrawn\tcpu_mean\tcpu_p50\tcpu_p95\tcpu_max\tgpu_p50\tgpu_p95\tgpu_n\tuploads\tupload_mean_ms\tgap_p95\tgap_max\tgaps_over_25ms\twall_s\n" > out/bench.tsv
+printf "config\ttrial\tdrawn\tcpu_mean\tcpu_p50\tcpu_p95\tcpu_max\tgpu_p50\tgpu_p95\tgpu_n\tclouds\tland_mean_ms\tfill_mean_ms\tgap_p95\tgap_max\tgaps_over_25ms\twall_s\n" > out/bench.tsv
 run() { # name, extra args...
   local name=$1; shift
   for t in $(seq 1 "$trials"); do
@@ -39,13 +39,16 @@ run() { # name, extra args...
     local start; start=$(date +%s.%N)
     XDG_CONFIG_HOME=$cfg "$bin" "$@" > "$log" 2>&1
     local wall; wall=$(echo "$(date +%s.%N) - $start" | bc)
-    local cpu gpu drawn uploads
+    local cpu gpu drawn clouds
     cpu=$(grep -oP 'frame cpu mean \K[0-9.]+ ms p50 [0-9.]+ p95 [0-9.]+ max [0-9.]+' "$log" | sed -E 's/ ms p50 | p95 | max /\t/g')
     drawn=$(grep -oP '\K[0-9]+(?= points and)' "$log")
     gpu=$(grep -oP 'frames drawing [0-9]+ points: mean [0-9.]+ ms p50 \K[0-9.]+ p95 [0-9.]+ max [0-9.]+ \(n=[0-9]+' "$log" | sed -E 's/ p95 /\t/; s/ max [0-9.]+ \(n=/\t/')
-    uploads=$(grep -oP 'uploaded to the GPU: \K[0-9]+ \(mean [0-9.]+' "$log" | sed -E 's/ \(mean /\t/')
+    # Clouds landed in the GPU buffer, the UI thread's mean cost per landing, and the helper
+    # thread's mean time writing each into staging.
+    clouds=$(grep -oP 'landed in the GPU buffer: \K[0-9]+ \(UI thread mean [0-9.]+' "$log" | sed -E 's/ \(UI thread mean /\t/')
+    clouds+=$'\t'$(grep -oP 'filled on a helper thread: mean \K[0-9.]+' "$log")
     gaps=$(grep -oP 'start-to-start mean [0-9.]+ ms p50 [0-9.]+ p95 \K[0-9.]+ max [0-9.]+ \(n=[0-9]+\), [0-9]+' "$log" | sed -E 's/ max /\t/; s/ \(n=[0-9]+\), /\t/')
-    printf "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%.2f\n" "$name" "$t" "$drawn" "$cpu" "$gpu" "$uploads" "$gaps" "$wall" >> out/bench.tsv
+    printf "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%.2f\n" "$name" "$t" "$drawn" "$cpu" "$gpu" "$clouds" "$gaps" "$wall" >> out/bench.tsv
   done
 }
 paced=(--realtime --frames 600)
